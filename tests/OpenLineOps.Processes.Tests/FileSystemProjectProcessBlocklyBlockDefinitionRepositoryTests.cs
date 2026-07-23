@@ -31,8 +31,8 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             blockType,
             "Fixture",
             "Application A Fixture Action",
-            BlockJson(blockType, "application A fixture action v1"),
-            "test.fixture.application-a.v1",
+            BlockJson(blockType, "application A fixture action initial"),
+            "test.fixture.application-a.initial",
             FirstRecordedAtUtc);
         var applicationASecond = await SaveNewVersionAsync(
             writer,
@@ -50,7 +50,7 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             "Fixture",
             "Application B Fixture Action",
             BlockJson(blockType, "application B fixture action"),
-            "test.fixture.application-b.v1",
+            "test.fixture.application-b.initial",
             SecondRecordedAtUtc);
 
         Assert.Equal(1, applicationAFirst.Version);
@@ -261,14 +261,14 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             {
                 Assert.Equal(1, block.Version);
                 Assert.Equal("Application A Fixture Action", block.DisplayName);
-                AssertCanonicalContract(block, "test.fixture.application-a.v1");
+                AssertCanonicalContract(block, "test.fixture.application-a.initial");
             });
 
         Assert.NotNull(latestB);
         Assert.Equal(1, latestB.Version);
         Assert.Equal("Application B Fixture Action", latestB.DisplayName);
         Assert.Equal(BlockJson(blockType, "application B fixture action"), latestB.BlocklyJson);
-        AssertCanonicalContract(latestB, "test.fixture.application-b.v1");
+        AssertCanonicalContract(latestB, "test.fixture.application-b.initial");
         Assert.Equal(SecondRecordedAtUtc, latestB.CreatedAtUtc);
         Assert.Equal(SecondRecordedAtUtc, latestB.UpdatedAtUtc);
         Assert.Single(listedB);
@@ -278,7 +278,7 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             block =>
             {
                 Assert.Equal(1, block.Version);
-                AssertCanonicalContract(block, "test.fixture.application-b.v1");
+                AssertCanonicalContract(block, "test.fixture.application-b.initial");
             });
     }
 

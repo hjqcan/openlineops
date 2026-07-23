@@ -181,7 +181,8 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
         var catalog = new ProcessBlocklyBlockCatalog(
             new ScopedBlockRepository(scope, _blockRepository),
             _clock,
-            _blockSources);
+            _blockSources,
+            scope);
         var catalogResult = await catalog
             .ListAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -265,6 +266,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
             .ToArray();
 
         var packageDependenciesResult = await ResolvePackageDependenciesAsync(
+                scope,
                 topology,
                 frozenProduction.Operations.Select(operation => new PackageFlowRouteScope(
                     operation.StationSystemId,
@@ -555,6 +557,13 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                             .ThenBy(resource => resource.TopologyTargetId, StringComparer.Ordinal)
                             .ThenBy(resource => resource.BindingId, StringComparer.Ordinal)
                             .ToArray(),
+                        operation.InputMappings.Select(mapping => new ProjectReleaseOperationInputMapping(
+                                mapping.TargetInputKey,
+                                mapping.SourceOperationId.Value,
+                                mapping.SourceOutputKey,
+                                mapping.ExpectedValueKind.ToString()))
+                            .OrderBy(mapping => mapping.TargetInputKey, StringComparer.Ordinal)
+                            .ToArray(),
                         flow.Document.Nodes
                             .SelectMany(node => node.Actions.Select((action, index) => new
                             {
@@ -588,7 +597,8 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                 .Select(transition => new ProjectReleaseRouteTransition(
                     transition.Id.Value,
                     transition.SourceOperationId.Value,
-                    transition.TargetOperationId.Value,
+                    transition.TargetOperationId?.Value,
+                    transition.TerminalDisposition?.ToString(),
                     transition.Kind.ToString(),
                     transition.RequiredJudgement?.ToString(),
                     transition.MaxTraversals,
@@ -692,6 +702,26 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                         ApplicationError.Conflict(
                             "Projects.ReleaseExternalProgramActionContractInvalid",
                             $"Flow action {item.Action.ActionId} does not match external program resource {resourceId} and its Operation Station."));
+                }
+
+                var undeclaredProductionInput = resource.InputMappings
+                    .Select(mapping => ExternalProgramResourceContract.TryGetProductionInputKey(
+                        mapping.Source,
+                        out var inputKey)
+                            ? inputKey
+                            : null)
+                    .Where(static inputKey => inputKey is not null)
+                    .FirstOrDefault(inputKey => !item.Operation.InputMappings.Any(operationMapping =>
+                        string.Equals(
+                            operationMapping.TargetInputKey,
+                            inputKey,
+                            StringComparison.Ordinal)));
+                if (undeclaredProductionInput is not null)
+                {
+                    return Result.Failure<IReadOnlyCollection<ProjectReleaseExternalProgramResource>>(
+                        ApplicationError.Conflict(
+                            "Projects.ReleaseExternalProgramProductionInputUndeclared",
+                            $"External program resource {resourceId} reads Production input '{undeclaredProductionInput}', but Operation {item.Operation.OperationId} does not declare that input mapping."));
                 }
             }
 
@@ -911,6 +941,22 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                     $"Required capability {capabilityId} must resolve to exactly one Driver binding for action {action.ActionId} in topology {topology.TopologyId}.");
             }
 
+            if (string.Equals(
+                    topologyBinding.ProviderKind,
+                    nameof(DriverProviderKind.ExternalSystem),
+                    StringComparison.Ordinal))
+            {
+                var externalProgramReference = ExternalProgramResourceContract.ReadReference(
+                    action.InputPayload);
+                if (externalProgramReference.IsMalformed
+                    || externalProgramReference.ResourceId is null)
+                {
+                    return ApplicationError.Conflict(
+                        "Projects.ReleaseExternalSystemResourceRequired",
+                        $"ExternalSystem action {action.ActionId} must reference exactly one ApplicationExecutable external program resource.");
+                }
+            }
+
             if (IsDevicePluginProvider(topologyBinding.ProviderKind)
                 && configurationSnapshot.DeviceBindings.Count(binding =>
                     string.Equals(binding.CapabilityId, capabilityId, StringComparison.Ordinal)
@@ -1027,12 +1073,14 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
     }
 
     internal async Task<Result<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>> ResolvePackageDependenciesAsync(
+        ProjectApplicationWorkspaceScope scope,
         AutomationTopologyDetails topology,
         string stationSystemId,
         FlowIrDocument flowIr,
         CancellationToken cancellationToken)
     {
         return await ResolvePackageDependenciesAsync(
+                scope,
                 topology,
                 [new PackageFlowRouteScope(stationSystemId, flowIr, [])],
                 cancellationToken)
@@ -1040,6 +1088,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
     }
 
     private async Task<Result<IReadOnlyCollection<ProjectReleasePackageDependencyLock>>> ResolvePackageDependenciesAsync(
+        ProjectApplicationWorkspaceScope scope,
         AutomationTopologyDetails topology,
         IReadOnlyCollection<PackageFlowRouteScope> stationFlows,
         CancellationToken cancellationToken)
@@ -1151,7 +1200,7 @@ public sealed class ProjectReleaseSourceResolver : IProjectReleaseSourceResolver
                     "A plugin package catalog is required to freeze plugin-backed capability routes."));
         }
 
-        var packages = await _packageCatalog.DiscoverAsync(cancellationToken).ConfigureAwait(false);
+        var packages = await _packageCatalog.DiscoverAsync(scope, cancellationToken).ConfigureAwait(false);
         var locks = new List<ProjectReleasePackageDependencyLock>(resolvedRoutes.Count);
 
         foreach (var route in resolvedRoutes)

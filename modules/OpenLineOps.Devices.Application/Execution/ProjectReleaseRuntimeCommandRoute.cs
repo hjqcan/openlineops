@@ -7,8 +7,6 @@ public static class ProjectReleaseRuntimeProviderKinds
 {
     public const string Simulator = "Simulator";
 
-    public const string DeviceInstance = "DeviceInstance";
-
     public const string PluginCommand = "PluginCommand";
 
     public const string ExternalSystem = "ExternalSystem";

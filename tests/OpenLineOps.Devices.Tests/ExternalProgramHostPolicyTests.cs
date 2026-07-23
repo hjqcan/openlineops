@@ -1,3 +1,6 @@
+using System.Runtime.Versioning;
+using System.Security.Principal;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.Devices.Application.Execution.ExternalPrograms;
 using OpenLineOps.Devices.Infrastructure.Execution.ExternalPrograms;
 
@@ -5,6 +8,62 @@ namespace OpenLineOps.Devices.Tests;
 
 public sealed class ExternalProgramHostPolicyTests
 {
+    private const string ServiceSid = "S-1-5-80-123-456-789-1011-1213";
+    private const string OtherServiceSid = "S-1-5-80-321-654-987-1101-1312";
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void WindowsIdentityReaderRequestsOnlyQueryAccess()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        Assert.Equal(
+            TokenAccessLevels.Query,
+            WindowsExternalProgramHostIdentityReader.RequiredTokenAccess);
+    }
+
+    [Fact]
+    public void RestrictedServiceIdentityAcceptsExactLocalServiceTokenFacts()
+    {
+        WindowsStationServiceIdentityReader.Validate(new WindowsStationServiceIdentity(
+            WindowsStationServiceIdentityReader.LocalServiceSid,
+            ServiceSid,
+            ServiceLogonSidEnabled: true,
+            IsRestrictedToken: true,
+            ServiceSidEnabled: true,
+            ServiceSidOwnerEligible: true,
+            ServiceSidRestricted: true));
+    }
+
+    [Theory]
+    [InlineData("S-1-5-18", true, true, true, true, true)]
+    [InlineData("S-1-5-19", false, true, true, true, true)]
+    [InlineData("S-1-5-19", true, false, true, true, true)]
+    [InlineData("S-1-5-19", true, true, false, true, true)]
+    [InlineData("S-1-5-19", true, true, true, false, true)]
+    [InlineData("S-1-5-19", true, true, true, true, false)]
+    public void RestrictedServiceIdentityRejectsWrongHostOrTokenMembership(
+        string hostAccountSid,
+        bool serviceLogonSidEnabled,
+        bool isRestrictedToken,
+        bool enabled,
+        bool ownerEligible,
+        bool restricted)
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            WindowsStationServiceIdentityReader.Validate(new WindowsStationServiceIdentity(
+                hostAccountSid,
+                ServiceSid,
+                serviceLogonSidEnabled,
+                isRestrictedToken,
+                enabled,
+                ownerEligible,
+                restricted)));
+    }
+
     [Fact]
     public void EffectivePolicyUsesTheStrictIntersectionOfHostAndFrozenResourceLimits()
     {
@@ -54,51 +113,119 @@ public sealed class ExternalProgramHostPolicyTests
     public void RestrictedIdentityMismatchFailsClosedBeforeLaunch()
     {
         var options = CreateOptions(requireIdentity: true);
-        options.AllowedRestrictedHostAccounts.Add("FACTORY\\OpenLineOpsAgent");
         var enforcer = new ExternalProgramHostPolicyEnforcer(
             options,
             new IdentityReader(new ExternalProgramHostIdentity(
-                "FACTORY\\DifferentAccount",
-                "S-1-5-21-1000",
-                IsAuthenticated: true,
-                IsSystem: false,
-                IsAdministrator: false)));
+                WindowsStationServiceIdentityReader.LocalServiceSid,
+                OtherServiceSid,
+                ServiceLogonSidEnabled: true,
+                IsRestrictedToken: true,
+                ServiceSidEnabled: true,
+                ServiceSidRestricted: true)));
 
         Assert.Throws<InvalidOperationException>(() =>
             enforcer.Enforce(CreateRequest(networkAccessAllowed: true).Policy));
     }
 
     [Fact]
-    public void RestrictedIdentityRejectsAdministrativeTokensEvenWhenAllowlisted()
+    public void RestrictedIdentityRejectsNonLocalServiceTokenUser()
     {
         var options = CreateOptions(requireIdentity: true);
-        options.AllowedRestrictedHostSids.Add("S-1-5-21-1000");
         var enforcer = new ExternalProgramHostPolicyEnforcer(
             options,
             new IdentityReader(new ExternalProgramHostIdentity(
-                "FACTORY\\OpenLineOpsAgent",
-                "S-1-5-21-1000",
-                IsAuthenticated: true,
-                IsSystem: false,
-                IsAdministrator: true)));
+                "S-1-5-18",
+                ServiceSid,
+                ServiceLogonSidEnabled: true,
+                IsRestrictedToken: true,
+                ServiceSidEnabled: true,
+                ServiceSidRestricted: true)));
 
         Assert.Throws<InvalidOperationException>(() =>
             enforcer.Enforce(CreateRequest(networkAccessAllowed: true).Policy));
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void RestrictedIdentityRequiresEnabledAndRestrictedServiceSid(
+        bool enabled,
+        bool restricted)
+    {
+        var options = CreateOptions(requireIdentity: true);
+        var enforcer = new ExternalProgramHostPolicyEnforcer(
+            options,
+            new IdentityReader(new ExternalProgramHostIdentity(
+                WindowsStationServiceIdentityReader.LocalServiceSid,
+                ServiceSid,
+                ServiceLogonSidEnabled: true,
+                IsRestrictedToken: true,
+                enabled,
+                restricted)));
+
+        Assert.Throws<InvalidOperationException>(() =>
+            enforcer.Enforce(CreateRequest(networkAccessAllowed: true).Policy));
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void RestrictedIdentityRequiresServiceLogonAndRestrictedTokenFacts(
+        bool serviceLogonSidEnabled,
+        bool isRestrictedToken)
+    {
+        var options = CreateOptions(requireIdentity: true);
+        var enforcer = new ExternalProgramHostPolicyEnforcer(
+            options,
+            new IdentityReader(new ExternalProgramHostIdentity(
+                WindowsStationServiceIdentityReader.LocalServiceSid,
+                ServiceSid,
+                serviceLogonSidEnabled,
+                isRestrictedToken,
+                ServiceSidEnabled: true,
+                ServiceSidRestricted: true)));
+
+        Assert.Throws<InvalidOperationException>(() =>
+            enforcer.Enforce(CreateRequest(networkAccessAllowed: true).Policy));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("S-1-5-19")]
+    [InlineData("S-1-5-80-0123-456-789-1011-1213")]
+    public void OptionsRejectMissingOrNoncanonicalRestrictedServiceSid(string? serviceSid)
+    {
+        var options = CreateOptions(requireIdentity: true);
+        options.RestrictedServiceSid = serviceSid;
+
+        Assert.Throws<InvalidOperationException>(options.Validate);
+    }
+
+    [Fact]
+    public void OptionsRejectImmutableContentWithoutAppContainerIsolation()
+    {
+        var options = CreateOptions(requireIdentity: true);
+        options.RequireImmutableContentProtection = true;
+        options.RequireAppContainerIsolation = false;
+
+        var exception = Assert.Throws<InvalidOperationException>(options.Validate);
+
+        Assert.Contains("requires AppContainer isolation", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
     public void NetworkDenialRequiresAppContainerIsolation()
     {
         var options = CreateOptions(requireIdentity: true);
-        options.AllowedRestrictedHostSids.Add("S-1-5-21-1000");
         var enforcer = new ExternalProgramHostPolicyEnforcer(
             options,
             new IdentityReader(new ExternalProgramHostIdentity(
-                "FACTORY\\OpenLineOpsAgent",
-                "S-1-5-21-1000",
-                IsAuthenticated: true,
-                IsSystem: false,
-                IsAdministrator: false)));
+                WindowsStationServiceIdentityReader.LocalServiceSid,
+                ServiceSid,
+                ServiceLogonSidEnabled: true,
+                IsRestrictedToken: true,
+                ServiceSidEnabled: true,
+                ServiceSidRestricted: true)));
 
         _ = enforcer.Enforce(CreateRequest(networkAccessAllowed: false).Policy);
 
@@ -115,11 +242,12 @@ public sealed class ExternalProgramHostPolicyTests
         var enforcer = new ExternalProgramHostPolicyEnforcer(
             options,
             new IdentityReader(new ExternalProgramHostIdentity(
-                "developer",
-                "developer",
-                IsAuthenticated: true,
-                IsSystem: false,
-                IsAdministrator: false)));
+                string.Empty,
+                string.Empty,
+                ServiceLogonSidEnabled: false,
+                IsRestrictedToken: false,
+                ServiceSidEnabled: false,
+                ServiceSidRestricted: false)));
 
         Assert.Throws<InvalidOperationException>(() =>
             enforcer.Enforce(CreateRequest(networkAccessAllowed: false).Policy));
@@ -155,7 +283,8 @@ public sealed class ExternalProgramHostPolicyTests
             RequireRestrictedHostIdentity = requireIdentity,
             RequireImmutableContentProtection = false,
             RequireAppContainerIsolation = true,
-            AppContainerProfileName = "OpenLineOps.Tests.ExternalPrograms"
+            AppContainerProfileName = "OpenLineOps.Tests.ExternalPrograms",
+            RestrictedServiceSid = requireIdentity ? ServiceSid : null
         };
     }
 
@@ -199,7 +328,7 @@ public sealed class ExternalProgramHostPolicyTests
     private sealed class IdentityReader(ExternalProgramHostIdentity identity)
         : IExternalProgramHostIdentityReader
     {
-        public ExternalProgramHostIdentity Read() => identity;
+        public ExternalProgramHostIdentity Read(string requiredServiceSid) => identity;
     }
 
 }

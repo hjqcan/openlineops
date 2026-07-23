@@ -1,5 +1,5 @@
 using OpenLineOps.Domain.Abstractions.Events;
-using OpenLineOps.Runtime.Domain.Commands;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 
 namespace OpenLineOps.Runtime.Domain.Events;
@@ -7,7 +7,7 @@ namespace OpenLineOps.Runtime.Domain.Events;
 public sealed record RuntimeCommandStatusChangedDomainEvent(
     RuntimeSessionId SessionId,
     RuntimeCommandId CommandId,
-    RuntimeCommandStatus FromStatus,
-    RuntimeCommandStatus ToStatus,
+    ExecutionStatus FromStatus,
+    ExecutionStatus ToStatus,
     string Reason)
     : DomainEvent("RuntimeCommand.StatusChanged");

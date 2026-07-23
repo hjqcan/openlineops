@@ -1,15 +1,19 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import {
   delay,
-  ElectronCdpHarness,
-  getFreePort
+  ElectronCdpHarness
 } from './electron-cdp-harness.mjs';
+import {
+  createWindowsPowerShellHost,
+  windowsSystemExecutablePath
+} from './windows-powershell-host.mjs';
 
 const execFileAsync = promisify(execFile);
 const scriptPath = fileURLToPath(import.meta.url);
@@ -44,69 +48,107 @@ const helperFileNames = [
   'OpenLineOps.VendorTestHelper.deps.json',
   'OpenLineOps.VendorTestHelper.runtimeconfig.json'
 ];
-const actorId = 'packaged-e2e-operator';
+const vendorProgramEntryPoint = 'files/bin/OpenLineOps.VendorTestHelper.exe';
+const vendorProgramInventoryPaths = [
+  ...helperFileNames.map(fileName => `files/bin/${fileName}`),
+  'files/config/shared.settings.json',
+  'files/lib/shared.settings.json'
+].sort((left, right) => left.localeCompare(right, 'en-US'));
+const productionClosureEvidenceRoot = path.resolve(
+  repoRoot,
+  'artifacts',
+  'production-closure-e2e');
 const runSuffix = `${new Date().toISOString().replaceAll(/[-:.TZ]/gu, '')}-${process.pid}`;
-const artifactRoot = path.join(repoRoot, 'artifacts', 'production-closure-e2e', runSuffix);
+const artifactRoot = path.join(productionClosureEvidenceRoot, runSuffix);
+const privateExecutionBaseRoot = path.resolve(
+  os.tmpdir(),
+  'openlineops-production-closure-e2e');
+const privateHandoffBaseRoot = path.resolve(
+  os.tmpdir(),
+  'openlineops-production-closure-handoffs');
+const privateExecutionRoot = path.join(privateExecutionBaseRoot, runSuffix);
+const vendorProgramDirectory = path.join(privateExecutionRoot, 'vendor-program-directory');
 const screenshotRoot = path.join(artifactRoot, 'screenshots');
+const traceArtifactSaveRoot = path.join(artifactRoot, 'verified-trace-artifact-saves');
 const summaryPath = path.join(artifactRoot, 'summary.json');
+const evidenceManifestPath = path.join(artifactRoot, 'evidence-manifest.json');
+const privateHandoffPath = resolvePrivateHandoffPath(
+  process.env.OPENLINEOPS_PRODUCTION_CLOSURE_HANDOFF_PATH);
+const privateProjectEvidenceLabel = 'private-runtime/project';
+const privateSourceProjectEvidenceLabel = 'private-runtime/project-source';
 const logs = [];
 const summary = {
   schema: 'openlineops.production-closure-e2e',
   status: 'running',
   startedAtUtc: new Date().toISOString(),
   completedAtUtc: null,
-  packagedExecutable,
+  packagedExecutable: 'packaged-desktop/OpenLineOps.exe',
   packagedBinaries: {
     before: null,
     after: null,
     unchangedDuringRun: null
   },
-  artifactRoot,
+  artifactRoot: '.',
   projectPath: null,
   projectId: null,
   applicationId: null,
   topologyId: null,
   productionLineDefinitionId: null,
   projectSnapshotId: null,
+  applicationPortability: null,
   frozenRelease: null,
+  externalProgramTrial: null,
   studioAuthoring: null,
   scenarios: {},
   restart: null,
   diagnostics: null,
-  failure: null,
-  logs: []
+  failure: null
 };
 
 let harness;
 let userDataDirectory;
 let projectPath;
+let sourceProjectPath;
+let portableApplication;
 let fixture;
 let logicalTimestamp = Date.now();
+let evidenceManifestWritten = false;
+let preservePrivateExecutionRoot = false;
 
 async function main() {
   if (typeof WebSocket === 'undefined') {
     throw new Error('Node.js 22 or newer is required for the Electron CDP harness.');
   }
+  await resetProductionClosureEvidence();
   await assertFile(packagedExecutable, 'Packaged OpenLineOps executable');
   await assertFile(packagedRuntimeApiExecutable, 'Packaged OpenLineOps runtime API executable');
-  await fs.mkdir(screenshotRoot, { recursive: true });
+  await Promise.all([
+    fs.mkdir(screenshotRoot, { recursive: true }),
+    fs.mkdir(traceArtifactSaveRoot, { recursive: true })
+  ]);
   summary.packagedBinaries.before = await capturePackagedBinaryIdentity();
   await persistSummary();
   await buildVendorHelper();
 
-  const apiPort = await getFreePort();
-  userDataDirectory = path.join(artifactRoot, 'user-data');
-  projectPath = path.join(artifactRoot, 'project');
+  userDataDirectory = path.join(privateExecutionRoot, 'user-data');
+  projectPath = path.join(privateExecutionRoot, 'project');
+  sourceProjectPath = path.join(privateExecutionRoot, 'project-source');
   await fs.mkdir(userDataDirectory, { recursive: true });
-  harness = createHarness(apiPort);
+  harness = createHarness();
   await harness.start();
   await ensureBackendHealthy();
-  await createProjectFromStartCenter(projectPath);
-  summary.projectPath = projectPath;
+  await createProjectFromStartCenter(sourceProjectPath);
+  summary.projectPath = privateSourceProjectEvidenceLabel;
   await persistSummary();
-  fixture = await createProductionFixture(projectPath);
+  const authoredFixture = await authorProductionFixture(sourceProjectPath);
+  const importedFixture = await copyApplicationIntoTargetProject(authoredFixture);
+  fixture = await publishProductionFixture(
+    importedFixture.ids,
+    authoredFixture.line,
+    authoredFixture.externalPrograms);
+  await recordPortableApplicationPhase('afterPublishTreeSha256', portableApplication.targetRoot);
   Object.assign(summary, {
-    projectPath,
+    projectPath: privateProjectEvidenceLabel,
     projectId: fixture.projectId,
     applicationId: fixture.applicationId,
     topologyId: fixture.topologyId,
@@ -125,6 +167,11 @@ async function main() {
   await runCrashScenario();
   await runRecoveryScenario();
   await restartStudioAndVerifyProjection();
+  await recordPortableApplicationPhase('afterExecutionTreeSha256', portableApplication.targetRoot);
+  await recordPortableApplicationPhase('sourceAfterExecutionTreeSha256', portableApplication.sourceRoot);
+  summary.applicationPortability.status = 'passed';
+  summary.applicationPortability.unchanged = true;
+  await persistSummary();
 
   summary.packagedBinaries.after = await capturePackagedBinaryIdentity();
   assertPackagedBinaryIdentityUnchanged(
@@ -133,20 +180,120 @@ async function main() {
   summary.packagedBinaries.unchangedDuringRun = true;
   summary.status = 'passed';
   summary.completedAtUtc = new Date().toISOString();
-  summary.logs = logs.slice(-200);
   await persistSummary();
+  await writeEvidenceManifest();
+  evidenceManifestWritten = true;
   console.log(`OpenLineOps packaged production closure E2E passed: ${summaryPath}`);
 }
 
-function createHarness(apiPort) {
+function resolvePrivateHandoffPath(configuredPath) {
+  if (configuredPath === undefined) return null;
+  if (configuredPath.length === 0
+      || configuredPath.trim() !== configuredPath
+      || !path.isAbsolute(configuredPath)) {
+    throw new Error(
+      'OPENLINEOPS_PRODUCTION_CLOSURE_HANDOFF_PATH must be one canonical absolute file path.');
+  }
+
+  const resolvedPath = path.resolve(configuredPath);
+  if (resolvedPath !== configuredPath) {
+    throw new Error(
+      'OPENLINEOPS_PRODUCTION_CLOSURE_HANDOFF_PATH must already be canonical.');
+  }
+  const relativeHandoffPath = path.relative(privateHandoffBaseRoot, resolvedPath);
+  const handoffSegments = relativeHandoffPath.split(path.sep);
+  if (relativeHandoffPath.startsWith(`..${path.sep}`)
+      || path.isAbsolute(relativeHandoffPath)
+      || handoffSegments.length !== 2
+      || !/^[0-9a-f]{32}$/u.test(handoffSegments[0])
+      || handoffSegments[1] !== 'production-closure-handoff.json') {
+    throw new Error(
+      'OPENLINEOPS_PRODUCTION_CLOSURE_HANDOFF_PATH must be <system-temp>/openlineops-production-closure-handoffs/<32-lowercase-hex>/production-closure-handoff.json.');
+  }
+  for (const forbiddenRoot of [privateExecutionRoot, artifactRoot]) {
+    if (resolvedPath.startsWith(`${path.resolve(forbiddenRoot)}${path.sep}`)) {
+      throw new Error(
+        'OPENLINEOPS_PRODUCTION_CLOSURE_HANDOFF_PATH must remain outside both private execution and public evidence roots.');
+    }
+  }
+
+  return resolvedPath;
+}
+
+async function resetProductionClosureEvidence() {
+  const artifactsRoot = path.resolve(repoRoot, 'artifacts');
+  if (path.dirname(productionClosureEvidenceRoot) !== artifactsRoot
+      || path.basename(productionClosureEvidenceRoot) !== 'production-closure-e2e') {
+    throw new Error(
+      `Refusing to clean a non-canonical production closure evidence root: ${productionClosureEvidenceRoot}`);
+  }
+
+  await assertNoReparsePointsForRecursiveDelete(
+    productionClosureEvidenceRoot,
+    'public production closure evidence root');
+  await fs.rm(productionClosureEvidenceRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 250
+  });
+  const resolvedTempRoot = path.resolve(os.tmpdir());
+  const resolvedPrivateBase = path.resolve(privateExecutionBaseRoot);
+  const resolvedPrivateRoot = path.resolve(privateExecutionRoot);
+  if (!resolvedPrivateBase.startsWith(`${resolvedTempRoot}${path.sep}`)
+      || !resolvedPrivateRoot.startsWith(`${resolvedPrivateBase}${path.sep}`)
+      || path.basename(resolvedPrivateRoot) !== runSuffix) {
+    throw new Error(`Refusing to clean a non-canonical private E2E root: ${resolvedPrivateRoot}`);
+  }
+  await assertNoReparsePointsForRecursiveDelete(
+    resolvedPrivateRoot,
+    'private production closure execution root');
+  await fs.rm(resolvedPrivateRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 250
+  });
+  await fs.mkdir(resolvedPrivateRoot, { recursive: true });
+}
+
+async function assertNoReparsePointsForRecursiveDelete(root, label) {
+  try {
+    const rootStat = await fs.lstat(root);
+    if (rootStat.isSymbolicLink()) {
+      throw new Error(`${label} cannot be a symbolic link or junction.`);
+    }
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+
+  const pending = [root];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    const entries = await fs.readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const candidate = path.join(current, entry.name);
+      const stat = await fs.lstat(candidate);
+      if (stat.isSymbolicLink()) {
+        throw new Error(`${label} contains a symbolic link or junction.`);
+      }
+      if (stat.isDirectory()) pending.push(candidate);
+    }
+  }
+}
+
+function createHarness() {
   return new ElectronCdpHarness({
     executablePath: packagedExecutable,
     workingDirectory: path.dirname(packagedExecutable),
     userDataDirectory,
-    apiBaseUrl: `http://127.0.0.1:${apiPort}`,
     environment: {
       OPENLINEOPS_REPO_ROOT: repoRoot,
-      OPENLINEOPS_DESKTOP_LOG_PATH: path.join(artifactRoot, 'desktop-logs')
+      OPENLINEOPS_DESKTOP_LOG_PATH: path.join(privateExecutionRoot, 'desktop-logs'),
+      OPENLINEOPS_E2E_TRACE_ARTIFACT_SAVE_ROOT: traceArtifactSaveRoot,
+      OPENLINEOPS_E2E_ALLOW_EXTERNAL_PROGRAM_DIRECTORY_DIALOG_BYPASS: '1',
+      OPENLINEOPS_E2E_EXTERNAL_PROGRAM_DIRECTORY_PATH: vendorProgramDirectory
     },
     logs
   });
@@ -167,6 +314,20 @@ async function buildVendorHelper() {
   for (const fileName of helperFileNames) {
     await assertFile(path.join(helperOutputDirectory, fileName), `Vendor helper ${fileName}`);
   }
+  await fs.mkdir(path.join(vendorProgramDirectory, 'bin'), { recursive: true });
+  await fs.mkdir(path.join(vendorProgramDirectory, 'config'), { recursive: true });
+  await fs.mkdir(path.join(vendorProgramDirectory, 'lib'), { recursive: true });
+  await Promise.all(helperFileNames.map(fileName => fs.copyFile(
+    path.join(helperOutputDirectory, fileName),
+    path.join(vendorProgramDirectory, 'bin', fileName))));
+  await fs.writeFile(
+    path.join(vendorProgramDirectory, 'config', 'shared.settings.json'),
+    '{"source":"config"}\n',
+    { flag: 'wx' });
+  await fs.writeFile(
+    path.join(vendorProgramDirectory, 'lib', 'shared.settings.json'),
+    '{"source":"lib"}\n',
+    { flag: 'wx' });
 }
 
 async function ensureBackendHealthy() {
@@ -226,7 +387,7 @@ async function reopenProjectFromStartCenter(targetPath, expectedProjectId) {
     'the frozen project to reopen');
 }
 
-async function createProductionFixture(targetPath) {
+async function authorProductionFixture(targetPath) {
   const projects = await expectApi('/api/automation-projects', {}, 200, 'list automation projects');
   const projectSummary = projects.body.find(project => project.projectPath === targetPath);
   assert(projectSummary, `Project was not found by exact path ${targetPath}.`);
@@ -239,7 +400,7 @@ async function createProductionFixture(targetPath) {
   assert(application, 'The created project has no default Application.');
   const ids = createFixtureIds(project.projectId, application.applicationId);
   Object.assign(summary, {
-    projectPath: targetPath,
+    projectPath: privateSourceProjectEvidenceLabel,
     projectId: project.projectId,
     applicationId: application.applicationId,
     topologyId: ids.topologyId,
@@ -345,6 +506,39 @@ async function createProductionFixture(targetPath) {
   });
   await createLayout(ids);
   const externalPrograms = await importVendorPrograms(ids);
+  const protocolTrial = (await expectApi(
+    `/api/automation-projects/${encodeURIComponent(ids.projectId)}`
+      + `/applications/${encodeURIComponent(ids.applicationId)}`
+      + `/external-programs/${encodeURIComponent(ids.prepExternalProgramResourceId)}/trial`,
+    {
+      method: 'POST',
+      body: {
+        inputs: {
+          vendorMode: { kind: 'Text', canonicalValue: 'Passed' },
+          productModel: { kind: 'Text', canonicalValue: 'PROTOCOL-TRIAL-BOARD' }
+        }
+      }
+    },
+    200,
+    'run the imported external program protocol trial')).body;
+  assert(protocolTrial.executionStatus === 'Completed', 'Protocol trial did not complete.');
+  assert(protocolTrial.judgement === 'Passed', 'Protocol trial did not return Passed.');
+  assert(protocolTrial.artifacts.length > 0, 'Protocol trial produced no hashed artifacts.');
+  summary.externalProgramTrial = {
+    status: 'passed',
+    executionStatus: protocolTrial.executionStatus,
+    judgement: protocolTrial.judgement,
+    artifactCount: protocolTrial.artifacts.length,
+    directoryImport: {
+      entryPoint: vendorProgramEntryPoint,
+      files: vendorProgramInventoryPaths,
+      preservedSameBasenames: [
+        'files/config/shared.settings.json',
+        'files/lib/shared.settings.json'
+      ]
+    }
+  };
+  await persistSummary();
   const prepFlow = await createAndPublishFlow(ids, createPrepFlow(ids));
   const vendorFlow = await createAndPublishFlow(ids, createVendorFlow(ids));
   await linkFlow(ids, prepFlow.processDefinitionId);
@@ -370,6 +564,19 @@ async function createProductionFixture(targetPath) {
       deviceKey: 'vendor-test-helper'
     }]);
   const line = await createProductionLine(ids, prepFlow, vendorFlow, prepConfiguration, vendorConfiguration);
+  await expectApi(
+    `/api/automation-projects/${encodeURIComponent(ids.projectId)}/manifest`,
+    { method: 'PUT' },
+    200,
+    'save the complete Application project before portable copy');
+  return {
+    ...ids,
+    line,
+    externalPrograms
+  };
+}
+
+async function publishProductionFixture(ids, line, externalPrograms) {
   const snapshotId = `snapshot.production-closure.${runSuffix}`;
   const publishedProject = (await expectApi(
     `/api/automation-projects/${encodeURIComponent(ids.projectId)}/snapshots`,
@@ -419,52 +626,242 @@ async function createProductionFixture(targetPath) {
   };
 }
 
+async function copyApplicationIntoTargetProject(authoredFixture) {
+  const targetProjectId = `project.production-closure.imported.${runSuffix}`;
+  await expectApi(
+    '/api/automation-project-workspaces',
+    {
+      method: 'POST',
+      body: {
+        projectId: targetProjectId,
+        displayName: 'Imported Production Closure Project',
+        projectPath,
+        defaultApplicationId: null,
+        defaultApplicationName: null
+      }
+    },
+    201,
+    'create target Project without a default Application');
+
+  const sourceApplicationFiles = await listFiles(
+    path.join(sourceProjectPath, 'applications'),
+    '.oloapp');
+  assert(
+    sourceApplicationFiles.length === 1,
+    'The source Project must contain exactly one complete Application project file.');
+  const sourceApplicationFile = sourceApplicationFiles[0];
+  const sourceRoot = path.dirname(sourceApplicationFile);
+  const targetRoot = path.join(projectPath, 'applications', path.basename(sourceRoot));
+  const sourceBeforeCopy = await captureApplicationTreeIdentity(sourceRoot);
+  assert(sourceBeforeCopy.fileCount > 0, 'The source Application cannot be empty.');
+
+  const targetBeforeCopy = await fs.lstat(targetRoot).catch(error => {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  });
+  assert(targetBeforeCopy === null, 'The target Application directory must not exist before copy.');
+  await fs.mkdir(path.dirname(targetRoot), { recursive: true });
+  await fs.cp(sourceRoot, targetRoot, {
+    recursive: true,
+    force: false,
+    errorOnExist: true,
+    preserveTimestamps: true
+  });
+  const copied = await captureApplicationTreeIdentity(targetRoot);
+  assertSameApplicationTree(sourceBeforeCopy, copied, 'copied Application');
+
+  const targetApplicationFile = path.join(
+    targetRoot,
+    path.relative(sourceRoot, sourceApplicationFile));
+  const importResponse = await expectApi(
+    `/api/automation-projects/${encodeURIComponent(targetProjectId)}/applications/import`,
+    {
+      method: 'POST',
+      body: { projectFilePath: targetApplicationFile }
+    },
+    200,
+    'import the byte-identical Application into the target Project');
+  assert(
+    importResponse.body.project?.applications?.some(application => (
+      application.applicationId === authoredFixture.applicationId)),
+    'The target Project did not register the copied Application identity.');
+  const afterImport = await captureApplicationTreeIdentity(targetRoot);
+  assertSameApplicationTree(sourceBeforeCopy, afterImport, 'imported Application');
+
+  portableApplication = {
+    sourceRoot,
+    targetRoot,
+    baseline: sourceBeforeCopy
+  };
+  summary.applicationPortability = {
+    status: 'imported',
+    sourceProjectId: authoredFixture.projectId,
+    targetProjectId,
+    applicationId: authoredFixture.applicationId,
+    fileCount: sourceBeforeCopy.fileCount,
+    totalSizeBytes: sourceBeforeCopy.totalSizeBytes,
+    sourceBeforeCopyTreeSha256: sourceBeforeCopy.treeSha256,
+    copiedTreeSha256: copied.treeSha256,
+    afterImportTreeSha256: afterImport.treeSha256,
+    afterPublishTreeSha256: null,
+    afterExecutionTreeSha256: null,
+    sourceAfterExecutionTreeSha256: null,
+    unchanged: false
+  };
+  await persistSummary();
+
+  return {
+    ids: createFixtureIds(targetProjectId, authoredFixture.applicationId)
+  };
+}
+
+async function recordPortableApplicationPhase(propertyName, applicationRoot) {
+  assert(portableApplication && summary.applicationPortability,
+    'Portable Application evidence has not been initialized.');
+  const identity = await captureApplicationTreeIdentity(applicationRoot);
+  assertSameApplicationTree(portableApplication.baseline, identity, propertyName);
+  summary.applicationPortability[propertyName] = identity.treeSha256;
+  await persistSummary();
+}
+
 async function verifySavedRouteAuthoring() {
+  const lineTestId = `production-line-${fixture.lineId}`;
+  const lineSelector = `[data-testid=${JSON.stringify(lineTestId)}]`;
   await harness.click('nav-production');
   await harness.waitFor(
     'Boolean(document.querySelector("[data-testid=\\"production-workbench\\"]"))'
-      + ' && Boolean(document.querySelector("[data-testid=\\"production-line-'
-      + `${fixture.lineId.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}`
-      + '\\"]"))',
+      + ` && Boolean(document.querySelector(${JSON.stringify(lineSelector)}))`,
     30_000,
     'the saved production route to appear in Line Designer');
-  await harness.cdp.send('Debugger.enable');
-  await harness.click(`production-line-${fixture.lineId}`);
   let evidence;
   try {
+    await harness.waitFor(
+      `(() => {
+        const line = document.querySelector(${JSON.stringify(lineSelector)});
+        return line instanceof HTMLButtonElement && line.disabled === false;
+      })()`,
+      30_000,
+      'the saved production route selector to become enabled');
+    await harness.click(lineTestId);
+    await harness.waitFor(
+      `(() => {
+        const lineId = document.querySelector('[data-testid="production-line-id"]');
+        const dirtyState = document.querySelector('[data-testid="production-dirty-state"]');
+        const guard = document.querySelector('[data-testid="production-draft-transition-dialog"]');
+        return lineId?.value === ${JSON.stringify(fixture.lineId)}
+          && dirtyState?.textContent?.trim() === 'Saved'
+          && guard === null;
+      })()`,
+      30_000,
+      'the exact saved production route to finish opening without an unsaved-change guard');
     evidence = await harness.waitFor(
-      `new Promise(resolve => requestAnimationFrame(() => {
+      `(() => {
         const model = document.querySelector('[data-testid="production-product-model-id"]');
         const nodes = document.querySelectorAll('[data-testid^="production-operation-node-"]');
+        const terminals = document.querySelectorAll('[data-testid^="production-terminal-node-"]');
         const edges = document.querySelectorAll('[data-testid^="production-transition-edge-"]');
+        const completed = document.querySelector('[data-testid="production-terminal-node-Completed"]');
+        const nonconforming = document.querySelector('[data-testid="production-terminal-node-Nonconforming"]');
+        const vendorOperation = document.querySelector('[data-testid="production-operation-node-operation.vendor-test"]');
         const publish = document.querySelector('[data-testid="publish-production-line-snapshot"]');
         const ready = model?.value === ${JSON.stringify(fixture.productModelId)}
           && nodes.length === 2
-          && edges.length === 2
+          && terminals.length === 2
+          && edges.length === 4
+          && completed?.textContent?.includes('Completed') === true
+          && nonconforming?.textContent?.includes('Nonconforming') === true
+          && vendorOperation?.textContent?.includes('2 CONDITIONAL TERMINALS') === true
           && publish?.disabled === false;
-        resolve(ready ? {
+        return ready ? {
           productModelId: model.value,
           operationCount: nodes.length,
+          terminalCount: terminals.length,
+          terminalDispositions: [completed.textContent, nonconforming.textContent],
           transitionCount: edges.length,
           publishEnabled: true
-        } : false);
-      }))`,
-      15_000,
-      'the saved Sequence and bounded Rework route to remain responsive');
+        } : false;
+      })()`,
+      30_000,
+      'the saved Sequence, bounded Rework, and explicit terminal routes to remain responsive');
   } catch (error) {
+    const domObservation = await harness.evaluate(`(async () => {
+        const line = document.querySelector(${JSON.stringify(lineSelector)});
+        const lineId = document.querySelector('[data-testid="production-line-id"]');
+        const dirtyState = document.querySelector('[data-testid="production-dirty-state"]');
+        const model = document.querySelector('[data-testid="production-product-model-id"]');
+        const nodes = document.querySelectorAll('[data-testid^="production-operation-node-"]');
+        const terminals = document.querySelectorAll('[data-testid^="production-terminal-node-"]');
+        const edges = document.querySelectorAll('[data-testid^="production-transition-edge-"]');
+        const completed = document.querySelector('[data-testid="production-terminal-node-Completed"]');
+        const nonconforming = document.querySelector('[data-testid="production-terminal-node-Nonconforming"]');
+        const vendorOperation = document.querySelector('[data-testid="production-operation-node-operation.vendor-test"]');
+        const publish = document.querySelector('[data-testid="publish-production-line-snapshot"]');
+        const dirtyLabel = dirtyState?.textContent?.trim();
+        let backendHealthy = false;
+        let backendStatusAvailable = false;
+        try {
+          const backendStatus = await window.openlineopsDesktop?.getBackendStatus();
+          backendStatusAvailable = backendStatus !== undefined && backendStatus !== null;
+          backendHealthy = backendStatus?.health === 'Healthy';
+        } catch {
+          backendStatusAvailable = false;
+        }
+        return {
+          backendStatusAvailable,
+          backendHealthy,
+          workbenchPresent: document.querySelector('[data-testid="production-workbench"]') !== null,
+          lineSelectorPresent: line !== null,
+          lineSelectorIsButton: line instanceof HTMLButtonElement,
+          lineSelectorDisabled: line instanceof HTMLButtonElement ? line.disabled : null,
+          lineIdPresent: lineId !== null,
+          lineIdMatchesExpected: lineId?.value === ${JSON.stringify(fixture.lineId)},
+          dirtyState: dirtyLabel === 'Saved' || dirtyLabel === 'Unsaved' || dirtyLabel === 'New'
+            ? dirtyLabel
+            : dirtyLabel === undefined ? 'Missing' : 'Other',
+          guardDialogPresent: document.querySelector('[data-testid="production-draft-transition-dialog"]') !== null,
+          productModelPresent: model !== null,
+          productModelMatchesExpected: model?.value === ${JSON.stringify(fixture.productModelId)},
+          operationCount: nodes.length,
+          terminalCount: terminals.length,
+          transitionCount: edges.length,
+          completedTerminalPresent: completed !== null,
+          completedTerminalLabelMatches: completed?.textContent?.includes('Completed') === true,
+          nonconformingTerminalPresent: nonconforming !== null,
+          nonconformingTerminalLabelMatches: nonconforming?.textContent?.includes('Nonconforming') === true,
+          vendorOperationPresent: vendorOperation !== null,
+          vendorConditionalTerminalLabelMatches:
+            vendorOperation?.textContent?.includes('2 CONDITIONAL TERMINALS') === true,
+          publishPresent: publish !== null,
+          publishDisabled: publish instanceof HTMLButtonElement ? publish.disabled : null,
+          problemCount: document.querySelectorAll('.production-problems-list > button').length
+        };
+      })()`).catch(() => ({ observationAvailable: false }));
     const rendererStack = await harness.captureJavaScriptStack().catch(stackError => ([{
       captureError: stackError instanceof Error ? stackError.message : String(stackError)
     }]));
-    summary.diagnostics = { rendererStack };
+    const privateDiagnosticBytes = Buffer.from(
+      `${JSON.stringify({ rendererStack, domObservation }, null, 2)}\n`,
+      'utf8');
+    const privateDiagnosticDirectory = path.join(privateExecutionRoot, 'diagnostics');
+    await fs.mkdir(privateDiagnosticDirectory, { recursive: true });
+    await fs.writeFile(
+      path.join(privateDiagnosticDirectory, 'route-authoring-diagnostic.json'),
+      privateDiagnosticBytes,
+      { flag: 'wx', mode: 0o600 });
+    summary.diagnostics = {
+      code: 'RouteAuthoringUnresponsive',
+      detailSha256: createHash('sha256').update(privateDiagnosticBytes).digest('hex')
+    };
     await persistSummary();
-    throw new Error(
-      `${error instanceof Error ? error.message : String(error)} Renderer stack: ${JSON.stringify(rendererStack)}`,
+    throw new Error('Saved production route authoring did not become responsive.',
       { cause: error });
   }
   await harness.click('production-operation-node-operation.vendor-test');
   await harness.waitFor(
     'document.querySelector("[data-testid=\\"production-operation-inspector\\"]")'
-      + '?.textContent?.includes("Run Vendor Test") === true',
+      + '?.textContent?.includes("Run Vendor Test") === true'
+      + ' && document.querySelector("[data-testid=\\"production-operation-inspector\\"]")'
+      + '?.textContent?.includes("Completed / Nonconforming (conditional terminals)") === true',
     15_000,
     'the saved Vendor Test Operation inspector to respond');
   const screenshot = await recordScreenshot('studio-saved-route-authoring');
@@ -561,7 +958,7 @@ function layoutElement(elementId, kind, targetKind, targetId, parentElementId, x
 }
 
 async function importVendorPrograms(ids) {
-  const vendor = await importVendorProgram(ids, {
+  const vendorDefinition = externalProgramDefinition({
     resourceId: ids.externalProgramResourceId,
     displayName: 'Signed Vendor Test Helper',
     capabilityId: ids.vendorCapabilityId,
@@ -569,7 +966,7 @@ async function importVendorPrograms(ids) {
     argumentTemplates: ['--mode', '{{input.vendorMode}}', '--delay-milliseconds', '30000'],
     timeoutMilliseconds: 60000
   });
-  const preparation = await importVendorProgram(ids, {
+  const preparationDefinition = externalProgramDefinition({
     resourceId: ids.prepExternalProgramResourceId,
     displayName: 'Signed Preparation Delay Helper',
     capabilityId: ids.prepCapabilityId,
@@ -577,17 +974,21 @@ async function importVendorPrograms(ids) {
     argumentTemplates: ['--mode', 'Delay', '--delay-milliseconds', '4000'],
     timeoutMilliseconds: 10000
   });
+  await seedExternalProgramProviderDefinition(ids, vendorDefinition);
+  await seedExternalProgramProviderDefinition(ids, preparationDefinition);
+  const vendor = await importVendorProgramDirectoryInStudio(ids, vendorDefinition);
+  const preparation = await importVendorProgramDirectoryInStudio(ids, preparationDefinition);
   return [vendor, preparation];
 }
 
-async function importVendorProgram(ids, definitionOptions) {
-  const definition = {
+function externalProgramDefinition(definitionOptions) {
+  return {
     resourceId: definitionOptions.resourceId,
     displayName: definitionOptions.displayName,
     capabilityId: definitionOptions.capabilityId,
     commandName: definitionOptions.commandName,
     launchKind: 'ApplicationExecutable',
-    entryPoint: 'files/OpenLineOps.VendorTestHelper.exe',
+    entryPoint: vendorProgramEntryPoint,
     providerKind: null,
     providerKey: null,
     argumentTemplates: definitionOptions.argumentTemplates,
@@ -622,20 +1023,93 @@ async function importVendorProgram(ids, definitionOptions) {
       maximumTotalArtifactBytes: 268435456
     }
   };
-  const files = helperFileNames.map(fileName => ({
-    sourcePath: path.join(helperOutputDirectory, fileName),
-    resourceRelativePath: `files/${fileName}`
-  }));
-  const response = await harness.uploadExternalProgram(
+}
+
+async function seedExternalProgramProviderDefinition(ids, definition) {
+  const seed = {
+    ...definition,
+    launchKind: 'Provider',
+    entryPoint: null,
+    providerKind: 'ProcessCommandProvider',
+    providerKey: `seed.${definition.resourceId}`
+  };
+  await expectApi(
     `/api/automation-projects/${encodeURIComponent(ids.projectId)}`
-      + `/applications/${encodeURIComponent(ids.applicationId)}/external-programs/import`,
-    definition,
-    files);
-  assertStatus(response, 201, `import ${definitionOptions.resourceId} with companion files`);
-  assert(response.body.files.length === helperFileNames.length, 'External program inventory is incomplete.');
+      + `/applications/${encodeURIComponent(ids.applicationId)}`
+      + `/external-programs/${encodeURIComponent(definition.resourceId)}`,
+    { method: 'PUT', body: seed },
+    200,
+    `seed ${definition.resourceId} metadata before Studio directory import`);
+}
+
+async function importVendorProgramDirectoryInStudio(ids, definition) {
+  await harness.click('nav-programs');
+  await harness.waitFor(
+    `Boolean(document.querySelector(${JSON.stringify(`[data-testid="external-program-resource-${definition.resourceId}"]`)}))`,
+    30_000,
+    `${definition.resourceId} in the Program Resources browser`);
+  await harness.click(`external-program-resource-${definition.resourceId}`);
+  await harness.waitFor(
+    `document.querySelector('[data-testid="external-program-resource-id"]')?.value === ${JSON.stringify(definition.resourceId)}`,
+    15_000,
+    `${definition.resourceId} editor`);
+  await harness.click('select-external-program-directory');
+  await harness.waitFor(
+    'Boolean(document.querySelector("[data-testid=\\"external-program-directory-stage\\"]"))'
+      + ` && document.querySelector('[data-testid="external-program-entry-point"]')`
+      + `?.querySelector('option[value=${JSON.stringify(vendorProgramEntryPoint)}]') !== null`,
+    30_000,
+    `validated nested directory inventory for ${definition.resourceId}`);
+  await harness.setSelect('external-program-entry-point', vendorProgramEntryPoint);
+  await harness.waitFor(
+    `document.querySelector('[data-testid="external-program-entry-point"]')?.value === ${JSON.stringify(vendorProgramEntryPoint)}`,
+    10_000,
+    `selected executable entry point for ${definition.resourceId}`);
+  await harness.click('save-external-program-resource');
+  const saveOutcome = await harness.waitFor(
+    `(() => {
+      const text = document.body.innerText;
+      if (text.includes(${JSON.stringify(`resource ${definition.resourceId} saved atomically`)})) {
+        return { status: 'saved' };
+      }
+      const failure = text.split('\\n').find(line => line.startsWith('External program save failed:'));
+      return failure ? { status: 'failed', detail: failure } : null;
+    })()`,
+    30_000,
+    `atomic Program Resource save for ${definition.resourceId}`);
+  if (saveOutcome.status !== 'saved') {
+    const editorSnapshot = await harness.evaluate(`(() => ({
+      launchKind: document.querySelector('[data-testid="external-program-launch-kind"]')?.value ?? null,
+      entryPoint: document.querySelector('[data-testid="external-program-entry-point"]')?.value ?? null,
+      inputSources: Array.from(document.querySelectorAll('[data-testid^="external-program-input-source-"]'))
+        .map(element => element instanceof HTMLInputElement ? element.value : null)
+    }))()`);
+    throw new Error(
+      `Studio directory import failed for ${definition.resourceId}: ${saveOutcome.detail}. Editor: ${JSON.stringify(editorSnapshot)}`);
+  }
+
+  const response = await expectApi(
+    `/api/automation-projects/${encodeURIComponent(ids.projectId)}`
+      + `/applications/${encodeURIComponent(ids.applicationId)}`
+      + `/external-programs/${encodeURIComponent(definition.resourceId)}`,
+    {},
+    200,
+    `read ${definition.resourceId} after Studio directory import`);
+  assert(response.body.launchKind === 'ApplicationExecutable', 'Studio did not persist executable launch kind.');
+  assert(response.body.entryPoint === vendorProgramEntryPoint, 'Studio did not persist the nested executable entry point.');
+  assert(
+    JSON.stringify(response.body.files
+      .map(file => file.relativePath)
+      .sort((left, right) => left.localeCompare(right, 'en-US')))
+      === JSON.stringify(vendorProgramInventoryPaths),
+    'Studio flattened or omitted the external program directory inventory.');
   for (const file of response.body.files) {
     assertSha256(file.sha256, `Imported file ${file.relativePath}`);
   }
+  assert(
+    response.body.files.some(file => file.relativePath === 'files/config/shared.settings.json')
+      && response.body.files.some(file => file.relativePath === 'files/lib/shared.settings.json'),
+    'Same-basename files in distinct nested directories were not preserved.');
   return response.body;
 }
 
@@ -823,9 +1297,9 @@ async function createProductionLine(ids, prepFlow, vendorFlow, prepConfiguration
             configurationSnapshotId: prepConfiguration,
             resources: [
               resource('resource.station.preparation', 'Station', ids.station1),
-              resource('resource.slot.preparation', 'Slot', ids.slot1),
-              resource('resource.device.preparation', 'Device', ids.prepBindingId)
-            ]
+              resource('resource.slot.preparation', 'Slot', ids.slot1)
+            ],
+            inputMappings: []
           },
           {
             operationId: ids.operationTest,
@@ -835,9 +1309,9 @@ async function createProductionLine(ids, prepFlow, vendorFlow, prepConfiguration
             configurationSnapshotId: vendorConfiguration,
             resources: [
               resource('resource.station.vendor-test', 'Station', ids.station2),
-              resource('resource.slot.vendor-test', 'Slot', ids.slot2),
-              resource('resource.device.vendor-test', 'Device', ids.vendorBindingId)
-            ]
+              resource('resource.slot.vendor-test', 'Slot', ids.slot2)
+            ],
+            inputMappings: []
           }
         ],
         transitions: [
@@ -845,6 +1319,7 @@ async function createProductionLine(ids, prepFlow, vendorFlow, prepConfiguration
             transitionId: 'route.preparation-to-vendor-test',
             sourceOperationId: ids.operationPrep,
             targetOperationId: ids.operationTest,
+            terminalDisposition: null,
             kind: 'Sequence',
             requiredJudgement: null,
             maxTraversals: null,
@@ -857,6 +1332,7 @@ async function createProductionLine(ids, prepFlow, vendorFlow, prepConfiguration
             transitionId: 'route.vendor-failed-rework',
             sourceOperationId: ids.operationTest,
             targetOperationId: ids.operationPrep,
+            terminalDisposition: null,
             kind: 'Rework',
             requiredJudgement: 'Failed',
             maxTraversals: 1,
@@ -864,9 +1340,41 @@ async function createProductionLine(ids, prepFlow, vendorFlow, prepConfiguration
             outputKey: null,
             expectedOutputKind: null,
             expectedOutputValue: null
+          },
+          {
+            transitionId: 'route.vendor-failed-terminal',
+            sourceOperationId: ids.operationTest,
+            targetOperationId: null,
+            terminalDisposition: 'Nonconforming',
+            kind: 'Judgement',
+            requiredJudgement: 'Failed',
+            maxTraversals: null,
+            parallelGroupId: null,
+            outputKey: null,
+            expectedOutputKind: null,
+            expectedOutputValue: null
+          },
+          {
+            transitionId: 'route.vendor-default-terminal',
+            sourceOperationId: ids.operationTest,
+            targetOperationId: null,
+            terminalDisposition: 'Completed',
+            kind: 'Sequence',
+            requiredJudgement: null,
+            maxTraversals: null,
+            parallelGroupId: null,
+            outputKey: null,
+            expectedOutputKind: null,
+            expectedOutputValue: null
           }
         ],
-        lineControllerAuthorizations: []
+        lineControllerAuthorizations: [],
+        routeLayout: {
+          operationPositions: [
+            { operationId: ids.operationPrep, x: 160, y: 80 },
+            { operationId: ids.operationTest, x: 450, y: 264 }
+          ]
+        }
       }
     },
     201,
@@ -906,17 +1414,59 @@ async function verifyFrozenRelease(ids, snapshot, externalPrograms) {
   }
   const packageRoot = path.join(userDataDirectory, 'data', 'station-packages', 'distribution');
   const packages = await listFiles(packageRoot, '.olopkg');
-  assert(packages.length >= 2, `Expected at least two signed Station packages under ${packageRoot}.`);
-  const packageEvidence = [];
-  for (const packagePath of packages) {
-    packageEvidence.push({
-      path: packagePath,
-      sha256: await sha256File(packagePath),
-      sizeBytes: (await fs.stat(packagePath)).size
+  assert(packages.length === 2, `Expected exactly two signed Station packages under ${packageRoot}.`);
+  const catalogRoot = path.join(userDataDirectory, 'data', 'station-packages', 'deployment-catalog');
+  const catalogs = await listFiles(catalogRoot, '.json');
+  assert(catalogs.length === 2, `Expected exactly two Station deployment catalogs under ${catalogRoot}.`);
+  const deploymentCatalogs = [];
+  for (const catalogPath of catalogs) {
+    const catalog = JSON.parse(await fs.readFile(catalogPath, 'utf8'));
+    assert(catalog.schema === 'openlineops.station-package-deployment',
+      `Station deployment catalog has an unexpected schema: ${catalogPath}`);
+    assert(catalog.projectId === ids.projectId && catalog.applicationId === ids.applicationId,
+      `Station deployment catalog belongs to another Project/Application: ${catalogPath}`);
+    assert(catalog.projectSnapshotId === snapshot.snapshotId,
+      `Station deployment catalog belongs to another Project Snapshot: ${catalogPath}`);
+    assert(catalog.productionLineDefinitionId === ids.lineId,
+      `Station deployment catalog belongs to another Production Line: ${catalogPath}`);
+    assert([ids.station1, ids.station2].includes(catalog.stationSystemId),
+      `Station deployment catalog contains an unknown Station System: ${catalogPath}`);
+    assertSha256(catalog.packageContentSha256, `${catalog.stationSystemId} package content`);
+    const relativePath = `public-release/deployment-catalog/${path.basename(catalogPath)}`;
+    deploymentCatalogs.push({
+      stationSystemId: catalog.stationSystemId,
+      packageContentSha256: catalog.packageContentSha256,
+      ...(await exportPublicEvidenceFile(catalogPath, relativePath))
     });
   }
-  return {
+  assert(new Set(deploymentCatalogs.map(item => item.stationSystemId)).size === 2,
+    'Station deployment catalogs do not describe two distinct Station Systems.');
+
+  const packageEvidence = [];
+  for (const packagePath of packages) {
+    const packageContentSha256 = path.basename(packagePath, '.olopkg');
+    assertSha256(packageContentSha256, `Station package ${packagePath} content identity`);
+    const deployment = deploymentCatalogs.find(
+      candidate => candidate.packageContentSha256 === packageContentSha256);
+    assert(deployment, `Station package ${packageContentSha256} has no matching deployment catalog.`);
+    const relativePath = `public-release/station-packages/${path.basename(packagePath)}`;
+    packageEvidence.push({
+      stationSystemId: deployment.stationSystemId,
+      packageContentSha256,
+      ...(await exportPublicEvidenceFile(packagePath, relativePath))
+    });
+  }
+  assert(new Set(packageEvidence.map(item => item.stationSystemId)).size === 2,
+    'Signed Station packages do not describe two distinct Station Systems.');
+
+  const publicManifest = await exportPublicEvidenceFile(
     releaseManifestPath,
+    'public-release/frozen-manifest.json');
+  const signingPublicKey = await exportPublicEvidenceFile(
+    path.join(userDataDirectory, 'data', 'station-packages', 'keys', 'release-signing-public.pem'),
+    'public-release/release-signing-public.pem');
+  return {
+    releaseManifest: publicManifest,
     projectRelativeReleaseManifestPath: snapshot.releaseManifestPath,
     releaseContentSha256: snapshot.releaseContentSha256,
     manifestSchema: manifest.schema ?? null,
@@ -925,7 +1475,9 @@ async function verifyFrozenRelease(ids, snapshot, externalPrograms) {
       contentSha256: program.contentSha256,
       files: program.files
     })),
-    stationPackages: packageEvidence
+    stationPackages: packageEvidence,
+    deploymentCatalogs,
+    signingPublicKey
   };
 }
 
@@ -940,7 +1492,6 @@ async function registerLineSlots() {
         lineId: fixture.lineId,
         stationSystemId,
         slotId,
-        actorId,
         occurredAtUtc: nextTimestamp()
       }
     }, 201, `register Slot ${slotId}`);
@@ -1023,26 +1574,96 @@ async function runConcurrentAndPassedScenario() {
     unitB.runId,
     run => run.isTerminal && run.executionStatus === 'Completed' && run.judgement === 'Passed',
     'Passed vendor run');
-  await completeSlotAndUnload(unitB, fixture.station2, fixture.slot2, fixture.station2);
-  const passedTrace = await waitForTrace(unitB.runId);
+  const frozenTraceBeforeUnloadResponse = await waitForTraceResponse(unitB.runId);
+  const frozenTraceBeforeUnload = frozenTraceBeforeUnloadResponse.body;
+  const frozenTraceBeforeUnloadBytes = Buffer.from(
+    frozenTraceBeforeUnloadResponse.text,
+    'utf8');
+  const unloadAtUtc = await completeSlotAndUnload(
+    unitB,
+    fixture.station2,
+    fixture.slot2,
+    fixture.station2);
+  assert(typeof unloadAtUtc === 'string',
+    'The final Slot unload did not return its exact lifecycle timestamp.');
+  const passedTraceResponse = await waitForTraceResponse(unitB.runId);
+  const passedTrace = passedTraceResponse.body;
+  const passedTraceBytes = Buffer.from(passedTraceResponse.text, 'utf8');
+  assert(passedTraceBytes.equals(frozenTraceBeforeUnloadBytes),
+    'Immutable Run Trace changed after the final Slot unload.');
+  const immutableRunTrace = {
+    before: byteIdentity(frozenTraceBeforeUnloadBytes),
+    after: byteIdentity(passedTraceBytes),
+    unchanged: true,
+    terminalCompletedAtUtc: passedTrace.completedAtUtc,
+    unloadAtUtc
+  };
+  assert(immutableRunTrace.before.sha256 === immutableRunTrace.after.sha256
+    && immutableRunTrace.before.sizeBytes === immutableRunTrace.after.sizeBytes,
+  'Immutable Run Trace byte identity changed after the final Slot unload.');
+  assert(Date.parse(immutableRunTrace.unloadAtUtc)
+    > Date.parse(immutableRunTrace.terminalCompletedAtUtc),
+  'The final Slot unload timestamp must be after terminal completion.');
+  const passedMaterialLifecycle = await waitForMaterialLifecycle(unitB.unitId);
+  assert(passedMaterialLifecycle.productionUnitId === unitB.unitId,
+    'Product material lifecycle returned another Production Unit.');
+  assert(passedMaterialLifecycle.currentLocation?.kind === 'StationQueue'
+    && passedMaterialLifecycle.currentLocation?.stationSystemId === fixture.station2,
+  'Product material lifecycle did not rebuild the final Station queue location.');
+  assert(passedMaterialLifecycle.materialLocationTransitions.some(transition => (
+    transition.productionRunId === unitB.runId
+      && transition.destination?.kind === 'StationQueue'
+      && Date.parse(transition.occurredAtUtc) > Date.parse(passedTrace.completedAtUtc))),
+  'Product material lifecycle is missing the post-run final unload movement.');
+  assert(passedMaterialLifecycle.slotOccupancyTransitions.some(transition => (
+    transition.productionRunId === unitB.runId
+      && transition.stationSystemId === fixture.station2
+      && transition.slotId === fixture.slot2
+      && transition.currentStatus === 'Available'
+      && Date.parse(transition.occurredAtUtc) > Date.parse(passedTrace.completedAtUtc))),
+  'Product material lifecycle is missing the post-run Slot release.');
+  assert(passedRun.disposition === 'Completed', 'Passed run did not select the Completed disposition.');
+  assert(passedTrace.disposition === 'Completed', 'Passed trace did not freeze the Completed disposition.');
+  assert(passedRun.routeDecisions.some(decision => (
+    decision.transitionId === 'route.vendor-default-terminal'
+      && decision.targetOperationId === null
+      && decision.terminalDisposition === 'Completed')),
+  'Passed run did not select the explicit Completed terminal route.');
+  assert(passedTrace.routeDecisions.some(decision => (
+    decision.transitionId === 'route.vendor-default-terminal'
+      && decision.targetOperationId === null
+      && decision.terminalDisposition === 'Completed')),
+  'Passed trace did not freeze the explicit Completed terminal route decision.');
   const artifacts = assertVendorArtifacts(passedTrace);
+  const artifactDownloads = await downloadAndVerifyArtifacts(artifacts);
   assert(passedTrace.operations.every(operation => operation.incidentCount === 0), 'Passed run contains an Incident.');
   const passedScreenshot = await openTraceAndScreenshot(unitB.runId, 'scenario-vendor-passed-trace');
+  const verifiedSaveActionCount = await harness.evaluate(
+    'document.querySelectorAll(`[data-testid^="trace-artifact-save-"]`).length');
+  assert(verifiedSaveActionCount >= 5,
+    'Trace workbench did not expose verified evidence save actions.');
+  const verifiedArtifactSave = await saveArtifactThroughDesktopIpc(
+    artifacts.find(artifact => artifact.name === 'measurements.csv'));
 
   summary.scenarios.concurrentPipeline = {
     status: 'passed',
-    unitA,
-    unitB,
+    unitA: publicUnit(unitA),
+    unitB: publicUnit(unitB),
     observedAtUtc: new Date().toISOString(),
     assertion: 'A executed at Station 2 while B executed at Station 1 with both Slots Running and independent fenced leases.',
-    lineState,
+    lineState: publicLineState(lineState),
     screenshots: [overlapScreenshot, topology2dScreenshot, topology3dScreenshot]
   };
   summary.scenarios.vendorPassed = {
     status: 'passed',
     run: compactRun(passedRun),
     trace: compactTrace(passedTrace),
-    artifacts,
+    immutableRunTrace,
+    materialLifecycle: compactMaterialLifecycle(passedMaterialLifecycle),
+    artifacts: artifacts.map(publicArtifactMetadata),
+    artifactDownloads: artifactDownloads.map(publicArtifactMetadata),
+    verifiedSaveActionCount,
+    verifiedArtifactSave,
     screenshots: [passedScreenshot]
   };
   await persistSummary();
@@ -1071,20 +1692,32 @@ async function runFailedReworkScenario() {
     unit.runId,
     run => run.isTerminal && run.executionStatus === 'Completed' && run.judgement === 'Failed',
     'bounded Failed rework terminal');
+  assert(terminal.disposition === 'Nonconforming', 'Bounded Failed run did not select the Nonconforming disposition.');
+  assert(terminal.routeDecisions.some(decision => (
+    decision.transitionId === 'route.vendor-failed-terminal'
+      && decision.targetOperationId === null
+      && decision.terminalDisposition === 'Nonconforming')),
+  'Bounded Failed run did not select the explicit Nonconforming terminal route.');
   await completeSlotAndUnload(unit, fixture.station2, fixture.slot2, fixture.station2);
   const trace = await waitForTrace(unit.runId);
+  assert(trace.disposition === 'Nonconforming', 'Bounded Failed trace did not freeze the Nonconforming disposition.');
   assert(trace.routeDecisions.some(decision => (
     decision.transitionId === 'route.vendor-failed-rework'
       && decision.sourceJudgement === 'Failed')),
   'Trace did not freeze the Failed Rework route decision.');
+  assert(trace.routeDecisions.some(decision => (
+    decision.transitionId === 'route.vendor-failed-terminal'
+      && decision.targetOperationId === null
+      && decision.terminalDisposition === 'Nonconforming')),
+  'Trace did not freeze the explicit Nonconforming terminal route decision.');
   assert(trace.operations.reduce((count, operation) => count + operation.incidentCount, 0) === 0, 'Failed trace contains a system Incident.');
   const screenshot = await openTraceAndScreenshot(unit.runId, 'scenario-vendor-failed-rework-trace');
   summary.scenarios.vendorFailedRework = {
     status: 'passed',
-    unit,
+    unit: publicUnit(unit),
     run: compactRun(terminal),
     trace: compactTrace(trace),
-    assertion: 'Vendor Failed remained Completed + Failed, traversed the bounded Rework edge, and created no system Incident.',
+    assertion: 'Vendor Failed remained Completed + Failed, traversed bounded Rework, selected Nonconforming, and created no system Incident.',
     screenshots: [screenshot]
   };
   await persistSummary();
@@ -1102,7 +1735,6 @@ async function runCancellationScenario() {
   const beforeScreenshot = await recordScreenshot('scenario-cancel-spawn-child-running');
   await harness.click(`active-run-${unit.runId}`);
   await harness.click('production-command-Cancel');
-  await harness.setInput('production-command-actor', actorId);
   await harness.setInput('production-command-reason', 'Packaged E2E operator cancellation');
   await harness.click('confirm-production-command');
   const terminal = await waitForRun(
@@ -1117,9 +1749,9 @@ async function runCancellationScenario() {
   const afterScreenshot = await openTraceAndScreenshot(unit.runId, 'scenario-cancel-spawn-child-trace');
   summary.scenarios.operatorCancel = {
     status: 'passed',
-    unit,
+    unit: publicUnit(unit),
     run: compactRun(terminal),
-    vendorProcessesBeforeCancel: vendorProcesses,
+    vendorProcessesBeforeCancel: vendorProcesses.map(publicProcessEvidence),
     processTreeTerminated: true,
     trace: compactTrace(trace),
     screenshots: [beforeScreenshot, afterScreenshot]
@@ -1143,10 +1775,10 @@ async function runCrashScenario() {
   const screenshot = await openTraceAndScreenshot(unit.runId, 'scenario-vendor-crash-incident-trace');
   summary.scenarios.vendorCrash = {
     status: 'passed',
-    unit,
+    unit: publicUnit(unit),
     run: compactRun(terminal),
     trace: compactTrace(trace),
-    incidents,
+    incidents: incidents.map(publicIncident),
     screenshots: [screenshot]
   };
   await persistSummary();
@@ -1164,7 +1796,10 @@ async function runRecoveryScenario() {
     'recovery vendor parent and child');
   const backend = await harness.evaluate('window.openlineopsDesktop.getBackendStatus()');
   assert(Number.isInteger(backend.pid) && backend.pid > 0, 'Packaged backend PID is unavailable.');
-  await execFileAsync('taskkill.exe', ['/PID', String(backend.pid), '/F'], { windowsHide: true });
+  await execFileAsync(
+    windowsSystemExecutablePath('taskkill.exe'),
+    ['/PID', String(backend.pid), '/F'],
+    { windowsHide: true });
   await harness.waitFor(
     '(async () => (await window.openlineopsDesktop.getBackendStatus()).health === "Unreachable")()',
     20_000,
@@ -1189,7 +1824,6 @@ async function runRecoveryScenario() {
   const requiredScreenshot = await recordScreenshot('scenario-recovery-required-no-replay');
   await harness.click(`active-run-${unit.runId}`);
   await harness.click('production-command-Reconcile');
-  await harness.setInput('production-command-actor', actorId);
   await harness.setInput('production-command-reason', 'Operator observed the interrupted vendor action completed safely');
   await harness.setInput('recovery-evidence-reference', `urn:openlineops:e2e:observation:${unit.runId}`);
   await harness.setSelect('recovery-operation-run', operationRunId);
@@ -1212,14 +1846,14 @@ async function runRecoveryScenario() {
   const decisionScreenshot = await openTraceAndScreenshot(unit.runId, 'scenario-recovery-reconciled-trace');
   summary.scenarios.recovery = {
     status: 'passed',
-    unit,
+    unit: publicUnit(unit),
     interruptedOperationRunId: operationRunId,
     backendPidTerminated: backend.pid,
-    vendorProcessesBeforeCrash: vendorProcesses,
+    vendorProcessesBeforeCrash: vendorProcesses.map(publicProcessEvidence),
     recoveryRequired: compactRun(recoveryRequired),
     terminal: compactRun(terminal),
     noAutomaticReplay: true,
-    recoveryDecisions: terminal.recoveryDecisions,
+    recoveryDecisions: terminal.recoveryDecisions.map(publicRecoveryDecision),
     trace: compactTrace(trace),
     screenshots: [requiredScreenshot, decisionScreenshot]
   };
@@ -1234,8 +1868,7 @@ async function restartStudioAndVerifyProjection() {
     'trace count before Studio restart');
   const previousCdpPort = harness.cdpPort;
   await harness.close();
-  const restartedApiPort = await getFreePort();
-  harness = createHarness(restartedApiPort);
+  harness = createHarness();
   await harness.start();
   await ensureBackendHealthy();
   await reopenProjectFromStartCenter(projectPath, fixture.projectId);
@@ -1261,7 +1894,7 @@ async function restartStudioAndVerifyProjection() {
     traceCountBefore: before.body.totalCount,
     traceCountAfter: after.body.totalCount,
     activeRunCount: lineState.activeRunCount,
-    rebuiltProjection: lineState,
+    rebuiltProjection: publicLineState(lineState),
     screenshots: [projectionScreenshot, traceScreenshot]
   };
   await persistSummary();
@@ -1282,7 +1915,6 @@ async function prepareRunAtStation1(identityValue, options = {}) {
       identityKey: fixture.identityKey,
       identityValue,
       lotId: null,
-      actorId,
       occurredAtUtc: nextTimestamp()
     }
   }, 201, `register Production Unit ${identityValue}`);
@@ -1296,7 +1928,6 @@ async function prepareRunAtStation1(identityValue, options = {}) {
       stationId: fixture.entryStationId,
       lineId: fixture.lineId,
       stationSystemId: fixture.station1,
-      actorId,
       occurredAtUtc: nextTimestamp()
     }
   }, 200, `arrive ${identityValue} at Station 1`);
@@ -1314,8 +1945,7 @@ async function submitPreparedRun(unit) {
       projectId: fixture.projectId,
       projectSnapshotId: fixture.snapshotId,
       productionRunId: unit.runId,
-      productionUnitId: unit.unitId,
-      actorId
+      productionUnitId: unit.unitId
     }
   }, 202, `submit Production Run ${unit.identityValue}`);
   assert(response.body.productionRunId === unit.runId, 'Run submission returned another Run ID.');
@@ -1332,9 +1962,9 @@ async function completeSlotAndUnload(unit, stationSystemId, slotId, destinationS
   const current = await harness.api(
     `/api/slot-occupancies/${encodeURIComponent(fixture.lineId)}`
       + `/${encodeURIComponent(stationSystemId)}/${encodeURIComponent(slotId)}`);
-  if (current.status !== 200 || current.body.materialId !== unit.unitId) return;
+  if (current.status !== 200 || current.body.materialId !== unit.unitId) return null;
   if (current.body.status === 'Running') await slotCommand(unit, stationSystemId, slotId, 'Complete');
-  await slotCommand(unit, stationSystemId, slotId, 'Unload', {
+  return slotCommand(unit, stationSystemId, slotId, 'Unload', {
     kind: 'StationQueue',
     lineId: fixture.lineId,
     stationSystemId: destinationStationSystemId,
@@ -1350,6 +1980,7 @@ async function moveUnitBetweenSlots(unit, sourceStation, sourceSlot, destination
 }
 
 async function slotCommand(unit, stationSystemId, slotId, command, destination = null) {
+  const occurredAtUtc = nextTimestamp();
   await expectApi(
     `/api/slot-occupancies/${encodeURIComponent(fixture.lineId)}`
       + `/${encodeURIComponent(stationSystemId)}/${encodeURIComponent(slotId)}/commands/${command}`,
@@ -1360,12 +1991,12 @@ async function slotCommand(unit, stationSystemId, slotId, command, destination =
         materialId: unit.unitId,
         destination,
         reason: null,
-        actorId,
-        occurredAtUtc: nextTimestamp()
+        occurredAtUtc
       }
     },
     200,
     `${command} ${unit.identityValue} in ${slotId}`);
+  return occurredAtUtc;
 }
 
 async function waitForOperation(runId, operationId, attempt, executionStatus) {
@@ -1408,15 +2039,36 @@ async function waitForLineState(predicate, description, timeoutMilliseconds = 45
   throw new Error(`Timed out waiting for ${description}: ${JSON.stringify(latest)}`);
 }
 
-async function waitForTrace(runId, timeoutMilliseconds = 45_000) {
+async function waitForTraceResponse(runId, timeoutMilliseconds = 45_000) {
   const deadline = Date.now() + timeoutMilliseconds;
   let latest;
   while (Date.now() < deadline) {
     latest = await harness.api(`/api/traceability/records/${runId}`);
-    if (latest.status === 200) return latest.body;
+    if (latest.status === 200) {
+      assert(typeof latest.text === 'string',
+        `Trace ${runId} did not expose its exact HTTP response bytes.`);
+      return latest;
+    }
     await delay(250);
   }
   throw new Error(`Timed out waiting for Trace ${runId}: ${latest?.text ?? 'no response'}`);
+}
+
+async function waitForTrace(runId, timeoutMilliseconds = 45_000) {
+  return (await waitForTraceResponse(runId, timeoutMilliseconds)).body;
+}
+
+async function waitForMaterialLifecycle(productionUnitId, timeoutMilliseconds = 45_000) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  let latest;
+  while (Date.now() < deadline) {
+    latest = await harness.api(
+      `/api/traceability/production-units/${encodeURIComponent(productionUnitId)}/material-lifecycle`);
+    if (latest.status === 200) return latest.body;
+    await delay(250);
+  }
+  throw new Error(
+    `Timed out waiting for Product material lifecycle ${productionUnitId}: ${latest?.text ?? 'no response'}`);
 }
 
 async function openOperationsDashboard(runId = null) {
@@ -1463,6 +2115,19 @@ async function openTraceAndScreenshot(runId, name) {
     `document.querySelector('[data-testid="trace-detail-panel"]')?.textContent?.includes(${JSON.stringify(runId)})`,
     30_000,
     `Trace detail ${runId}`);
+  await harness.waitFor(
+    'document.querySelector("[data-testid=\\"trace-run-material-evidence\\"]")?.textContent?.includes("Immutable run material evidence")',
+    30_000,
+    `immutable material evidence for ${runId}`);
+  await harness.waitFor(
+    'document.querySelector("[data-testid=\\"trace-product-material-lifecycle\\"]")?.textContent?.includes("Observed through")',
+    30_000,
+    `latest Product material lifecycle for ${runId}`);
+  await harness.waitFor(
+    'Boolean(document.querySelector("[data-testid=\\"trace-product-post-run-location-transition\\"]")'
+      + ' && document.querySelector("[data-testid=\\"trace-product-post-run-slot-transition\\"]"))',
+    30_000,
+    `post-run final unload material evidence for ${runId}`);
   return recordScreenshot(name);
 }
 
@@ -1480,6 +2145,90 @@ function assertVendorArtifacts(trace) {
     assertSha256(artifact.sha256, required);
   }
   return artifacts;
+}
+
+async function downloadAndVerifyArtifacts(artifacts) {
+  const config = await harness.evaluate('window.openlineopsDesktop.getConfig()');
+  assert(config?.apiBaseUrl, 'Desktop API base URL is unavailable for artifact verification.');
+  assert(config?.apiAccessToken, 'Desktop API credential is unavailable for artifact verification.');
+  const downloads = [];
+  for (const artifact of artifacts) {
+    assert(Number.isSafeInteger(artifact.sizeBytes) && artifact.sizeBytes >= 0,
+      `Artifact ${artifact.name} has no canonical byte count.`);
+    assertSha256(artifact.sha256, artifact.name);
+    const encodedKey = artifact.storageKey.split('/').map(encodeURIComponent).join('/');
+    const response = await fetch(
+      new URL(`/api/traceability/artifacts/${encodedKey}`, config.apiBaseUrl),
+      {
+        method: 'GET',
+        headers: { authorization: `Bearer ${config.apiAccessToken}` },
+        redirect: 'error'
+      });
+    assert(response.status === 200,
+      `Trace artifact ${artifact.name} download returned HTTP ${response.status}.`);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    assert(bytes.byteLength === artifact.sizeBytes,
+      `Trace artifact ${artifact.name} byte count changed during download.`);
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    assert(sha256 === artifact.sha256,
+      `Trace artifact ${artifact.name} SHA-256 changed during download.`);
+    downloads.push({
+      name: artifact.name,
+      storageKey: artifact.storageKey,
+      mediaType: response.headers.get('content-type'),
+      sizeBytes: bytes.byteLength,
+      sha256
+    });
+  }
+
+  for (const required of ['measurements.csv', 'inspection.png', 'report.pdf', 'stdout.log', 'stderr.log']) {
+    assert(downloads.some(artifact => artifact.name === required),
+      `Trace API download verification did not include ${required}.`);
+  }
+  return downloads;
+}
+
+async function saveArtifactThroughDesktopIpc(artifact) {
+  assert(artifact, 'No real Trace artifact was selected for the desktop save boundary.');
+  assert(Number.isSafeInteger(artifact.sizeBytes) && artifact.sizeBytes >= 0,
+    `Artifact ${artifact.name} has no canonical byte count.`);
+  assertSha256(artifact.sha256, artifact.name);
+  const result = await harness.evaluate(
+    `window.openlineopsDesktop.saveTraceArtifact(${JSON.stringify({
+      storageKey: artifact.storageKey,
+      fileName: artifact.name,
+      expectedSizeBytes: artifact.sizeBytes,
+      expectedSha256: artifact.sha256
+    })})`);
+  assert(result?.canceled === false, 'Desktop Trace artifact save was canceled.');
+  assert(typeof result.path === 'string' && path.isAbsolute(result.path),
+    'Desktop Trace artifact save returned no absolute destination.');
+  assert(path.dirname(path.normalize(result.path)) === path.normalize(traceArtifactSaveRoot),
+    'Desktop Trace artifact save escaped the host-controlled E2E destination.');
+
+  const bytes = await fs.readFile(result.path);
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  assert(bytes.byteLength === artifact.sizeBytes,
+    'Desktop Trace artifact save changed the immutable byte count.');
+  assert(sha256 === artifact.sha256,
+    'Desktop Trace artifact save changed the immutable SHA-256.');
+  assert(result.sizeBytes === bytes.byteLength && result.sha256 === sha256,
+    'Desktop Trace artifact IPC result did not describe the saved evidence exactly.');
+  const remainingTemporaryFiles = (await fs.readdir(traceArtifactSaveRoot))
+    .filter(name => name.startsWith('.openlineops-trace-') && name.endsWith('.tmp'));
+  assert(remainingTemporaryFiles.length === 0,
+    'Desktop Trace artifact save left a sibling temporary file behind.');
+  return {
+    name: artifact.name,
+    storageKeySha256: createHash('sha256')
+      .update(artifact.storageKey, 'utf8')
+      .digest('hex'),
+    path: toEvidenceRelativePath(result.path),
+    sizeBytes: bytes.byteLength,
+    sha256,
+    invokedThroughPreloadIpc: true,
+    atomicTemporaryFileRemoved: true
+  };
 }
 
 function assertLeaseEvidence(operation) {
@@ -1514,10 +2263,15 @@ async function listVendorProcesses() {
     + "@{Name='processName';Expression={$_.Name}},"
     + "@{Name='commandLine';Expression={$_.CommandLine}}); "
     + 'if ($items.Count -eq 0) { Write-Output \'[]\' } else { $items | ConvertTo-Json -Compress -Depth 3 }';
+  const powerShellHost = createWindowsPowerShellHost();
   const { stdout } = await execFileAsync(
-    'powershell.exe',
+    powerShellHost.executablePath,
     ['-NoProfile', '-NonInteractive', '-Command', command],
-    { windowsHide: true, maxBuffer: 1024 * 1024 });
+    {
+      env: powerShellHost.environment,
+      windowsHide: true,
+      maxBuffer: 1024 * 1024
+    });
   const parsed = JSON.parse(stdout.trim() || '[]');
   const projectNeedle = projectPath.toLowerCase();
   return (Array.isArray(parsed) ? parsed : [parsed])
@@ -1534,17 +2288,16 @@ function compactRun(run) {
   return {
     productionRunId: run.productionRunId,
     productionUnitId: run.productionUnitId,
-    identity: run.productionUnitIdentity,
+    identity: publicProductionIdentity(run.productionUnitIdentity),
     executionStatus: run.executionStatus,
     judgement: run.judgement,
     disposition: run.disposition,
     controlState: run.controlState,
     failureCode: run.failureCode,
-    failureReason: run.failureReason,
     operationCount: run.operations.length,
-    operations: run.operations,
-    routeDecisions: run.routeDecisions,
-    recoveryDecisions: run.recoveryDecisions,
+    operations: run.operations.map(publicOperation),
+    routeDecisions: run.routeDecisions.map(publicRouteDecision),
+    recoveryDecisions: run.recoveryDecisions.map(publicRecoveryDecision),
     incidentCount: run.incidentCount
   };
 }
@@ -1557,13 +2310,300 @@ function compactTrace(trace) {
     judgement: trace.judgement,
     disposition: trace.disposition,
     failureCode: trace.failureCode,
-    failureReason: trace.failureReason,
-    operations: trace.operations,
-    routeDecisions: trace.routeDecisions,
-    materialLocationTransitions: trace.materialLocationTransitions,
-    slotOccupancyTransitions: trace.slotOccupancyTransitions,
-    dispositionTransitions: trace.dispositionTransitions,
-    auditEntries: trace.auditEntries
+    operations: (trace.operations ?? []).map(publicTraceOperation),
+    routeDecisions: (trace.routeDecisions ?? []).map(publicRouteDecision),
+    genealogyCount: Array.isArray(trace.genealogy) ? trace.genealogy.length : 0,
+    materialLocationTransitions: (trace.materialLocationTransitions ?? []).map(publicLocationTransition),
+    slotOccupancyTransitions: (trace.slotOccupancyTransitions ?? []).map(publicSlotTransition),
+    dispositionTransitions: (trace.dispositionTransitions ?? []).map(publicDispositionTransition),
+    auditEntries: (trace.auditEntries ?? []).map(publicAuditEntry)
+  };
+}
+
+function compactMaterialLifecycle(lifecycle) {
+  return {
+    productionUnitId: lifecycle.productionUnitId,
+    currentDisposition: lifecycle.currentDisposition,
+    currentLocation: publicMaterialLocation(lifecycle.currentLocation),
+    currentCarrierLocation: publicMaterialLocation(lifecycle.currentCarrierLocation),
+    registeredAtUtc: lifecycle.registeredAtUtc,
+    observedThroughUtc: lifecycle.observedThroughUtc,
+    genealogyCount: Array.isArray(lifecycle.genealogy) ? lifecycle.genealogy.length : 0,
+    materialLocationTransitions: (lifecycle.materialLocationTransitions ?? []).map(publicLocationTransition),
+    slotOccupancyTransitions: (lifecycle.slotOccupancyTransitions ?? []).map(publicSlotTransition),
+    dispositionTransitions: (lifecycle.dispositionTransitions ?? []).map(publicDispositionTransition)
+  };
+}
+
+function publicUnit(unit) {
+  return {
+    unitId: unit.unitId,
+    runId: unit.runId,
+    identityValue: canonicalE2eMode(unit.identityValue),
+    runSubmitted: unit.runSubmitted === true
+  };
+}
+
+function publicProductionIdentity(identity) {
+  return identity ? {
+    modelId: identity.modelId,
+    inputKey: identity.inputKey,
+    value: canonicalE2eMode(identity.value)
+  } : null;
+}
+
+function canonicalE2eMode(value) {
+  const allowed = new Set([
+    'Delay',
+    'Passed',
+    'Failed',
+    'Crash',
+    'SpawnChildDelay',
+    'SpawnChildDelayRecovery'
+  ]);
+  assert(allowed.has(value), 'A public Production Unit identity is not an allowlisted E2E mode.');
+  return value;
+}
+
+function publicOperation(operation) {
+  return {
+    operationRunId: operation.operationRunId,
+    operationId: operation.operationId,
+    attempt: operation.attempt,
+    stationSystemId: operation.stationSystemId,
+    executionStatus: operation.executionStatus,
+    judgement: operation.judgement,
+    isTerminal: operation.isTerminal ?? null,
+    startedAtUtc: operation.startedAtUtc ?? null,
+    completedAtUtc: operation.completedAtUtc ?? null,
+    failureCode: operation.failureCode ?? null,
+    completedStepCount: operation.completedStepCount ?? 0,
+    commandCount: operation.commandCount ?? 0,
+    incidentCount: operation.incidentCount ?? 0,
+    resources: (operation.resources ?? []).map(publicResource),
+    outputs: (operation.outputs ?? []).map(publicTypedOutput)
+  };
+}
+
+function publicTraceOperation(operation) {
+  return {
+    ...publicOperation(operation),
+    runtimeSessionStatus: operation.runtimeSessionStatus ?? null,
+    artifactCount: (operation.artifacts ?? []).length,
+    artifacts: (operation.artifacts ?? []).map(publicArtifactMetadata),
+    incidents: (operation.incidents ?? []).map(publicIncident),
+    commandStatuses: (operation.commands ?? []).map(command => ({
+      runtimeCommandId: command.runtimeCommandId,
+      actionId: command.actionId,
+      commandName: command.commandName,
+      executionStatus: command.executionStatus,
+      resultJudgement: command.resultJudgement,
+      completedAtUtc: command.completedAtUtc ?? null
+    }))
+  };
+}
+
+function publicResource(resource) {
+  return {
+    kind: resource.kind,
+    resourceId: resource.resourceId,
+    status: resource.status ?? null,
+    fencingToken: resource.fencingToken ?? null
+  };
+}
+
+function publicTypedOutput(output) {
+  assert(output && typeof output === 'object', 'A typed output is not an object.');
+  assert(
+    typeof output.key === 'string' && output.key.length > 0,
+    'A typed output key is missing.');
+
+  const isRuntimeOutput = typeof output.kind === 'string'
+    && typeof output.canonicalValue === 'string'
+    && output.valueKind === undefined
+    && output.canonicalJson === undefined;
+  const isTraceOutput = typeof output.valueKind === 'string'
+    && typeof output.canonicalJson === 'string'
+    && output.kind === undefined
+    && output.canonicalValue === undefined;
+  assert(
+    isRuntimeOutput !== isTraceOutput,
+    `Typed output '${output.key}' must match exactly one supported API representation.`);
+
+  const kind = isRuntimeOutput ? output.kind : output.valueKind;
+  assert(
+    new Set(['Text', 'Boolean', 'WholeNumber', 'FixedPoint', 'DateTimeUtc']).has(kind),
+    `Typed output '${output.key}' has an unsupported value kind.`);
+  const value = isRuntimeOutput ? output.canonicalValue : output.canonicalJson;
+
+  return {
+    key: output.key,
+    kind,
+    valueSha256: createHash('sha256').update(String(value), 'utf8').digest('hex')
+  };
+}
+
+function publicRouteDecision(decision) {
+  return {
+    sourceOperationRunId: decision.sourceOperationRunId,
+    transitionId: decision.transitionId,
+    targetOperationId: decision.targetOperationId ?? null,
+    terminalDisposition: decision.terminalDisposition ?? null,
+    sourceJudgement: decision.sourceJudgement,
+    traversal: decision.traversal,
+    decidedAtUtc: decision.decidedAtUtc
+  };
+}
+
+function publicRecoveryDecision(decision) {
+  return {
+    decisionId: decision.decisionId ?? null,
+    kind: decision.kind,
+    operationRunId: decision.operationRunId ?? null,
+    operationId: decision.operationId ?? null,
+    observedJudgement: decision.observedJudgement ?? null,
+    observedOutputCount: decision.observedOutputs
+      ? Object.keys(decision.observedOutputs).length
+      : 0,
+    decidedAtUtc: decision.decidedAtUtc
+  };
+}
+
+function publicIncident(incident) {
+  return {
+    runtimeIncidentId: incident.runtimeIncidentId,
+    severity: incident.severity,
+    code: incident.code,
+    occurredAtUtc: incident.occurredAtUtc
+  };
+}
+
+function publicAuditEntry(entry) {
+  return {
+    auditEntryId: entry.auditEntryId,
+    action: entry.action,
+    occurredAtUtc: entry.occurredAtUtc
+  };
+}
+
+function publicArtifactMetadata(artifact) {
+  return {
+    name: artifact.name,
+    kind: artifact.kind ?? null,
+    storageKeySha256: artifact.storageKey
+      ? createHash('sha256').update(artifact.storageKey, 'utf8').digest('hex')
+      : null,
+    mediaType: artifact.mediaType ?? null,
+    sizeBytes: artifact.sizeBytes,
+    sha256: artifact.sha256
+  };
+}
+
+function publicMaterialLocation(location) {
+  return location ? {
+    kind: location.kind,
+    lineId: location.lineId ?? null,
+    stationSystemId: location.stationSystemId ?? null,
+    slotId: location.slotId ?? null,
+    carrierId: location.carrierId ?? null,
+    carrierPositionId: location.carrierPositionId ?? null
+  } : null;
+}
+
+function publicLocationTransition(transition) {
+  return {
+    evidenceId: transition.evidenceId,
+    productionRunId: transition.productionRunId,
+    materialKind: transition.materialKind,
+    materialId: transition.materialId,
+    source: publicMaterialLocation(transition.source),
+    destination: publicMaterialLocation(transition.destination),
+    occurredAtUtc: transition.occurredAtUtc
+  };
+}
+
+function publicSlotTransition(transition) {
+  return {
+    evidenceId: transition.evidenceId,
+    productionRunId: transition.productionRunId,
+    lineId: transition.lineId,
+    stationSystemId: transition.stationSystemId,
+    slotId: transition.slotId,
+    materialKind: transition.materialKind,
+    materialId: transition.materialId,
+    previousStatus: transition.previousStatus,
+    currentStatus: transition.currentStatus,
+    occurredAtUtc: transition.occurredAtUtc
+  };
+}
+
+function publicDispositionTransition(transition) {
+  return {
+    evidenceId: transition.evidenceId,
+    productionUnitId: transition.productionUnitId,
+    productionRunId: transition.productionRunId,
+    previousDisposition: transition.previousDisposition,
+    currentDisposition: transition.currentDisposition,
+    occurredAtUtc: transition.occurredAtUtc
+  };
+}
+
+function publicProcessEvidence(item) {
+  assert(Number.isInteger(item.processId) && item.processId > 0,
+    'Vendor process evidence has no positive PID.');
+  assert(Number.isInteger(item.parentProcessId) && item.parentProcessId >= 0,
+    'Vendor process evidence has no canonical parent PID.');
+  const imageName = String(item.processName ?? '');
+  assert(imageName === 'OpenLineOps.VendorTestHelper.exe' || imageName === 'dotnet.exe',
+    'Vendor process evidence has a non-allowlisted image name.');
+  return {
+    processId: item.processId,
+    parentProcessId: item.parentProcessId,
+    imageName
+  };
+}
+
+function publicLineState(state) {
+  return {
+    productionLineDefinitionId: state.productionLineDefinitionId,
+    generatedAtUtc: state.generatedAtUtc,
+    activeRunCount: state.activeRunCount,
+    activeRuns: (state.activeRuns ?? []).map(run => ({
+      productionRunId: run.productionRunId,
+      productionUnitId: run.productionUnitId,
+      executionStatus: run.executionStatus,
+      judgement: run.judgement,
+      disposition: run.disposition,
+      controlState: run.controlState,
+      isTerminal: run.isTerminal,
+      incidentCount: run.incidentCount
+    })),
+    stations: (state.stations ?? []).map(station => ({
+      stationSystemId: station.stationSystemId,
+      status: station.status,
+      stationId: station.stationId,
+      presenceState: station.agentPresenceState ?? null,
+      presenceHealth: station.agentPresenceHealth ?? null,
+      queueCount: (station.queue ?? []).length,
+      activeOperations: (station.activeOperations ?? []).map(operation => ({
+        productionRunId: operation.productionRunId,
+        productionUnitId: operation.productionUnitId,
+        operationRunId: operation.operationRunId,
+        operationId: operation.operationId,
+        executionStatus: operation.executionStatus,
+        judgement: operation.judgement,
+        resources: (operation.resources ?? []).map(publicResource)
+      }))
+    })),
+    slots: (state.slots ?? []).map(slot => ({
+      stationSystemId: slot.stationSystemId,
+      slotId: slot.slotId,
+      status: slot.status,
+      materialKind: slot.materialKind,
+      materialId: slot.materialId,
+      lastTransitionAtUtc: slot.lastTransitionAtUtc
+    })),
+    carrierCount: (state.carriers ?? []).length
   };
 }
 
@@ -1572,7 +2612,7 @@ async function recordScreenshot(name) {
   await harness.screenshot(filePath);
   return {
     name,
-    path: filePath,
+    path: toEvidenceRelativePath(filePath),
     sha256: await sha256File(filePath),
     sizeBytes: (await fs.stat(filePath)).size
   };
@@ -1619,21 +2659,234 @@ async function sha256File(filePath) {
   return hash.digest('hex');
 }
 
+function toEvidenceRelativePath(filePath) {
+  const resolvedRoot = path.resolve(artifactRoot);
+  const resolvedFile = path.resolve(filePath);
+  const relativePath = path.relative(resolvedRoot, resolvedFile);
+  assert(relativePath.length > 0
+    && !path.isAbsolute(relativePath)
+    && relativePath !== '..'
+    && !relativePath.startsWith(`..${path.sep}`),
+  `Evidence file escaped the public evidence root: ${filePath}`);
+  return relativePath.split(path.sep).join('/');
+}
+
+async function exportPublicEvidenceFile(sourcePath, relativePath) {
+  await assertFile(sourcePath, `Public evidence source ${relativePath}`);
+  assert(typeof relativePath === 'string'
+    && relativePath.length > 0
+    && relativePath === relativePath.split('\\').join('/')
+    && !path.posix.isAbsolute(relativePath)
+    && relativePath.split('/').every(segment => segment.length > 0 && segment !== '.' && segment !== '..'),
+  `Public evidence path is not canonical: ${relativePath}`);
+  const destinationPath = path.resolve(artifactRoot, ...relativePath.split('/'));
+  assert(toEvidenceRelativePath(destinationPath) === relativePath,
+    `Public evidence destination is not canonical: ${relativePath}`);
+  await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+  await fs.copyFile(sourcePath, destinationPath);
+  const sourceSha256 = await sha256File(sourcePath);
+  const destinationSha256 = await sha256File(destinationPath);
+  assert(destinationSha256 === sourceSha256,
+    `Exported public evidence changed during copy: ${relativePath}`);
+  const sourceSize = (await fs.stat(sourcePath)).size;
+  const destinationSize = (await fs.stat(destinationPath)).size;
+  assert(destinationSize === sourceSize,
+    `Exported public evidence size changed during copy: ${relativePath}`);
+  return { relativePath, sizeBytes: destinationSize, sha256: destinationSha256 };
+}
+
+async function writeEvidenceManifest() {
+  await assertFile(summaryPath, 'Production closure summary');
+  const files = await listAllEvidenceFiles(artifactRoot);
+  const entries = [];
+  for (const filePath of files) {
+    if (path.resolve(filePath) === path.resolve(evidenceManifestPath)) continue;
+    const relativePath = toEvidenceRelativePath(filePath);
+    assert(isAllowedPublicEvidencePath(relativePath),
+      `Production closure attempted to publish a non-allowlisted file: ${relativePath}`);
+    const stat = await fs.stat(filePath);
+    entries.push({
+      relativePath,
+      sizeBytes: stat.size,
+      sha256: await sha256File(filePath)
+    });
+  }
+  entries.sort((left, right) => left.relativePath < right.relativePath
+    ? -1
+    : left.relativePath > right.relativePath ? 1 : 0);
+  assert(entries.some(entry => entry.relativePath === 'summary.json'),
+    'Production closure evidence manifest has no summary.');
+  const document = {
+    schema: 'openlineops.production-closure-evidence-manifest',
+    schemaVersion: 1,
+    generatedAtUtc: new Date().toISOString(),
+    files: entries
+  };
+  const temporaryPath = `${evidenceManifestPath}.tmp`;
+  await fs.writeFile(temporaryPath, `${JSON.stringify(document, null, 2)}\n`, 'utf8');
+  await fs.rename(temporaryPath, evidenceManifestPath);
+}
+
+async function writePrivateHandoff() {
+  if (privateHandoffPath === null) return;
+  await Promise.all([
+    assertFile(summaryPath, 'Production closure summary'),
+    assertFile(evidenceManifestPath, 'Production closure evidence manifest'),
+    fs.stat(projectPath).then(stat => {
+      assert(stat.isDirectory(), `Private production project is not a directory: ${projectPath}`);
+    })
+  ]);
+  assert(summary.status === 'passed' && summary.completedAtUtc,
+    'A private production closure handoff can only be written after a passed run.');
+
+  const handoffDirectory = path.dirname(privateHandoffPath);
+  await fs.mkdir(handoffDirectory, { recursive: true });
+  await assertNoReparsePointsForRecursiveDelete(
+    handoffDirectory,
+    'private production closure handoff directory');
+  const realHandoffDirectory = await fs.realpath(handoffDirectory);
+  assert(realHandoffDirectory.toLowerCase() === handoffDirectory.toLowerCase(),
+    `Private handoff directory cannot traverse a symbolic link or junction: ${handoffDirectory}`);
+  const existing = await fs.lstat(privateHandoffPath).catch(error => {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  });
+  assert(existing === null,
+    `Private production closure handoff already exists and will not be overwritten: ${privateHandoffPath}`);
+
+  const [summaryStat, manifestStat] = await Promise.all([
+    fs.stat(summaryPath),
+    fs.stat(evidenceManifestPath)
+  ]);
+  const immutableRunTrace = summary.scenarios.vendorPassed?.immutableRunTrace;
+  assertImmutableRunTraceEvidence(immutableRunTrace);
+  const document = {
+    schema: 'openlineops.production-closure-private-handoff',
+    schemaVersion: 1,
+    createdAtUtc: new Date().toISOString(),
+    privateExecutionRoot,
+    sourceProjectPath,
+    projectPath,
+    summaryPath,
+    summarySizeBytes: summaryStat.size,
+    summarySha256: await sha256File(summaryPath),
+    evidenceManifestPath,
+    evidenceManifestSizeBytes: manifestStat.size,
+    evidenceManifestSha256: await sha256File(evidenceManifestPath),
+    projectId: summary.projectId,
+    applicationId: summary.applicationId,
+    topologyId: summary.topologyId,
+    productionLineDefinitionId: summary.productionLineDefinitionId,
+    projectSnapshotId: summary.projectSnapshotId,
+    immutableRunTrace
+  };
+  for (const identity of [
+    document.projectId,
+    document.applicationId,
+    document.topologyId,
+    document.productionLineDefinitionId,
+    document.projectSnapshotId
+  ]) {
+    assert(typeof identity === 'string'
+      && identity.length > 0
+      && identity.trim() === identity,
+    'Private production closure handoff identity is missing or non-canonical.');
+  }
+
+  const temporaryPath = path.join(
+    handoffDirectory,
+    `.production-closure-handoff.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    const handle = await fs.open(temporaryPath, 'wx', 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(document, null, 2)}\n`, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(temporaryPath, privateHandoffPath);
+  } finally {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+  preservePrivateExecutionRoot = true;
+  console.log(`OpenLineOps private production closure handoff ready: ${privateHandoffPath}`);
+}
+
+function isAllowedPublicEvidencePath(relativePath) {
+  return relativePath === 'summary.json'
+    || /^screenshots\/[A-Za-z0-9._-]+\.png$/u.test(relativePath)
+    || /^verified-trace-artifact-saves\/[A-Za-z0-9._-]+$/u.test(relativePath)
+    || relativePath === 'public-release/frozen-manifest.json'
+    || relativePath === 'public-release/release-signing-public.pem'
+    || /^public-release\/station-packages\/[0-9a-f]{64}\.olopkg$/u.test(relativePath)
+    || /^public-release\/deployment-catalog\/[0-9a-f]{64}\.json$/u.test(relativePath);
+}
+
+async function listAllEvidenceFiles(root) {
+  const result = [];
+  const visit = async directory => {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      assert(!entry.isSymbolicLink(),
+        `Production closure evidence cannot contain a symbolic link: ${path.join(directory, entry.name)}`);
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) await visit(fullPath);
+      else if (entry.isFile()) result.push(fullPath);
+      else throw new Error(`Production closure evidence contains an unsupported filesystem entry: ${fullPath}`);
+    }
+  };
+  await visit(root);
+  return result.sort();
+}
+
 async function capturePackagedBinaryIdentity() {
   return {
-    desktopExecutable: await captureFileIdentity(packagedExecutable),
-    runtimeApiExecutable: await captureFileIdentity(packagedRuntimeApiExecutable)
+    desktopExecutable: await captureFileIdentity(
+      packagedExecutable,
+      'packaged-desktop/OpenLineOps.exe'),
+    runtimeApiExecutable: await captureFileIdentity(
+      packagedRuntimeApiExecutable,
+      'packaged-desktop/runtime/api/OpenLineOps.Api.exe')
   };
 }
 
-async function captureFileIdentity(filePath) {
+async function captureFileIdentity(filePath, publicPath) {
   const stat = await fs.stat(filePath);
   return {
-    path: filePath,
+    path: publicPath,
     sha256: await sha256File(filePath),
     sizeBytes: stat.size,
     modifiedAtUtc: stat.mtime.toISOString()
   };
+}
+
+function byteIdentity(bytes) {
+  return {
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    sizeBytes: bytes.length
+  };
+}
+
+function assertImmutableRunTraceEvidence(evidence) {
+  assert(evidence && typeof evidence === 'object',
+    'Immutable Run Trace evidence is required.');
+  for (const phase of ['before', 'after']) {
+    assertSha256(evidence[phase]?.sha256, `immutable Run Trace ${phase}`);
+    assert(Number.isSafeInteger(evidence[phase]?.sizeBytes)
+      && evidence[phase].sizeBytes > 0,
+    `Immutable Run Trace ${phase} size must be a positive safe integer.`);
+  }
+  assert(evidence.unchanged === true
+    && evidence.before.sha256 === evidence.after.sha256
+    && evidence.before.sizeBytes === evidence.after.sizeBytes,
+  'Immutable Run Trace evidence must prove identical before/after bytes.');
+  assert(typeof evidence.terminalCompletedAtUtc === 'string'
+    && Number.isFinite(Date.parse(evidence.terminalCompletedAtUtc)),
+  'Immutable Run Trace terminal completion timestamp is invalid.');
+  assert(typeof evidence.unloadAtUtc === 'string'
+    && Number.isFinite(Date.parse(evidence.unloadAtUtc))
+    && Date.parse(evidence.unloadAtUtc) > Date.parse(evidence.terminalCompletedAtUtc),
+  'Immutable Run Trace unload timestamp must follow terminal completion.');
 }
 
 function assertPackagedBinaryIdentityUnchanged(before, after) {
@@ -1643,6 +2896,69 @@ function assertPackagedBinaryIdentityUnchanged(before, after) {
     assert(before?.[key]?.sizeBytes === after?.[key]?.sizeBytes, `${key} size changed during packaged E2E.`);
     assert(before?.[key]?.modifiedAtUtc === after?.[key]?.modifiedAtUtc, `${key} mtime changed during packaged E2E.`);
   }
+}
+
+async function captureApplicationTreeIdentity(applicationRoot) {
+  const rootStat = await fs.lstat(applicationRoot);
+  assert(rootStat.isDirectory() && !rootStat.isSymbolicLink(),
+    'Application inventory root must be a real directory.');
+  const entries = [];
+  const visit = async (directory, relativeDirectory) => {
+    const children = await fs.readdir(directory, { withFileTypes: true });
+    children.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+    for (const child of children) {
+      const absolutePath = path.join(directory, child.name);
+      const relativePath = relativeDirectory.length === 0
+        ? child.name
+        : `${relativeDirectory}/${child.name}`;
+      const stat = await fs.lstat(absolutePath);
+      assert(!stat.isSymbolicLink(),
+        `Application copy cannot contain a symbolic link or junction: ${relativePath}`);
+      if (stat.isDirectory()) {
+        await visit(absolutePath, relativePath);
+      }
+      else if (stat.isFile()) {
+        entries.push({
+          relativePath,
+          sizeBytes: stat.size,
+          sha256: await sha256File(absolutePath)
+        });
+      }
+      else {
+        throw new Error(`Application copy contains an unsupported entry: ${relativePath}`);
+      }
+    }
+  };
+  await visit(applicationRoot, '');
+  entries.sort((left, right) => left.relativePath < right.relativePath
+    ? -1
+    : left.relativePath > right.relativePath ? 1 : 0);
+  const treeHash = createHash('sha256');
+  for (const entry of entries) {
+    treeHash.update(entry.relativePath, 'utf8');
+    treeHash.update('\0', 'utf8');
+    treeHash.update(String(entry.sizeBytes), 'utf8');
+    treeHash.update('\0', 'utf8');
+    treeHash.update(entry.sha256, 'utf8');
+    treeHash.update('\n', 'utf8');
+  }
+  return {
+    fileCount: entries.length,
+    totalSizeBytes: entries.reduce((total, entry) => total + entry.sizeBytes, 0),
+    treeSha256: treeHash.digest('hex'),
+    entries
+  };
+}
+
+function assertSameApplicationTree(expected, actual, label) {
+  assert(expected.fileCount === actual.fileCount,
+    `${label} file count differs from the source Application.`);
+  assert(expected.totalSizeBytes === actual.totalSizeBytes,
+    `${label} byte count differs from the source Application.`);
+  assert(expected.treeSha256 === actual.treeSha256,
+    `${label} tree SHA-256 differs from the source Application.`);
+  assert(JSON.stringify(expected.entries) === JSON.stringify(actual.entries),
+    `${label} file inventory differs from the source Application.`);
 }
 
 async function listFiles(root, extension) {
@@ -1674,33 +2990,113 @@ async function runCommand(command, args, cwd) {
 async function persistSummary() {
   await fs.mkdir(artifactRoot, { recursive: true });
   const temporaryPath = `${summaryPath}.tmp`;
-  await fs.writeFile(temporaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+  const publicSummary = sanitizePublicEvidenceValue(summary);
+  await fs.writeFile(temporaryPath, `${JSON.stringify(publicSummary, null, 2)}\n`, 'utf8');
   await fs.rename(temporaryPath, summaryPath);
+}
+
+function sanitizePublicEvidenceValue(value) {
+  if (typeof value === 'string') return sanitizePublicEvidenceString(value);
+  if (Array.isArray(value)) return value.map(item => sanitizePublicEvidenceValue(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => (
+      [key, sanitizePublicEvidenceValue(item)])));
+  }
+  return value;
+}
+
+function sanitizePublicEvidenceString(value) {
+  let sanitized = value;
+  for (const privatePath of [privateExecutionRoot, userDataDirectory, projectPath]) {
+    if (typeof privatePath !== 'string' || privatePath.length === 0) continue;
+    sanitized = sanitized.replace(
+      new RegExp(escapeRegularExpression(privatePath), 'giu'),
+      '<private-runtime>');
+  }
+  sanitized = sanitized.replace(
+    new RegExp(escapeRegularExpression(repoRoot), 'giu'),
+    '<repository>');
+  return sanitized
+    .replace(/-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/giu,
+      '<private-key-redacted>')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/giu, 'Bearer <redacted>')
+    .replace(/\b((?:amqp|amqps|http|https):\/\/)[^\s/:@]+:[^\s/@]+@/giu, '$1<redacted>@')
+    .replace(/("(?:apiAccessToken|artifactUploadBearerToken|bearerToken|authorization|clientSecret|password)"\s*:\s*)"[^"]*"/giu,
+      '$1"<redacted>"')
+    .replace(/\b(OPENLINEOPS_[A-Z0-9_]*(?:TOKEN|PASSWORD|SECRET)\s*[=:]\s*)[^\s;]+/giu,
+      '$1<redacted>');
+}
+
+function escapeRegularExpression(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
 main()
   .catch(async error => {
     summary.status = 'failed';
     summary.completedAtUtc = new Date().toISOString();
+    const failureText = error instanceof Error
+      ? `${error.name}\n${error.message}\n${error.stack ?? ''}`
+      : String(error);
     summary.failure = {
-      message: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : null
+      code: 'ProductionClosureFailed',
+      detailSha256: createHash('sha256').update(failureText, 'utf8').digest('hex')
     };
     summary.diagnostics = await collectDiagnostics().catch(diagnosticError => ({
-      collectionFailure: diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError)
+      error: diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError),
+      processLogs: logs.slice(-100)
     }));
-    summary.logs = logs.slice(-300);
     await persistSummary().catch(() => undefined);
     console.error(error);
+    if (logs.length > 0) {
+      console.error(`Recent packaged process logs:\n${logs.slice(-100).join('\n')}`);
+    }
     console.error(`Failure evidence: ${summaryPath}`);
     process.exitCode = 1;
   })
   .finally(async () => {
     await harness?.close().catch(() => undefined);
+    try {
+      if (!evidenceManifestWritten) {
+        await writeEvidenceManifest();
+        evidenceManifestWritten = true;
+      }
+    } catch (error) {
+      console.error(`Production closure evidence manifest failed: ${error instanceof Error ? error.stack : String(error)}`);
+      process.exitCode = 1;
+    }
+    if (summary.status === 'passed'
+        && evidenceManifestWritten
+        && (process.exitCode === undefined || process.exitCode === 0)) {
+      try {
+        await writePrivateHandoff();
+      } catch (error) {
+        console.error(`Private production closure handoff failed: ${error instanceof Error ? error.stack : String(error)}`);
+        process.exitCode = 1;
+      }
+    }
+    if (!preservePrivateExecutionRoot) {
+      try {
+        await assertNoReparsePointsForRecursiveDelete(
+          privateExecutionRoot,
+          'private production closure execution root');
+        await fs.rm(privateExecutionRoot, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 250
+        });
+      } catch (error) {
+        console.error(`Private production closure cleanup failed outside the publishable root: ${String(error)}`);
+        process.exitCode = 1;
+      }
+    }
   });
 
 async function collectDiagnostics() {
-  if (!harness?.cdp) return null;
+  if (!harness?.cdp) {
+    return { processLogs: logs.slice(-100) };
+  }
   const [backendStatus, page, activeRuns, lineState] = await Promise.all([
     harness.evaluate('window.openlineopsDesktop.getBackendStatus()').catch(error => ({ error: String(error) })),
     harness.evaluate(`(() => ({
@@ -1715,5 +3111,12 @@ async function collectDiagnostics() {
       : Promise.resolve(null)
   ]);
   const diagnosticScreenshot = await recordScreenshot('failure-diagnostic').catch(() => null);
-  return { backendStatus, page, activeRuns, lineState, diagnosticScreenshot };
+  return {
+    backendStatus,
+    page,
+    activeRuns,
+    lineState,
+    diagnosticScreenshot,
+    processLogs: logs.slice(-100)
+  };
 }

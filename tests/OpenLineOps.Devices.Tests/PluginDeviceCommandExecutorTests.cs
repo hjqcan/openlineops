@@ -2,6 +2,7 @@ using OpenLineOps.Devices.Application.Execution;
 using OpenLineOps.Devices.Domain.Identifiers;
 using OpenLineOps.Devices.Infrastructure.Execution;
 using OpenLineOps.Plugins.Application.Commands;
+using OpenLineOps.Plugins.Application.Discovery;
 
 namespace OpenLineOps.Devices.Tests;
 
@@ -22,8 +23,11 @@ public sealed class PluginDeviceCommandExecutorTests
         Assert.Equal("openlineops.scanner-driver", request.PluginId);
         Assert.Equal("scanner-01", request.DeviceInstanceId);
         Assert.Equal("device.scanner:scan", request.CommandDefinitionId);
-        Assert.Equal("4.5.6", request.PackageIdentity!.Version);
-        Assert.Equal(new string('a', 64), request.PackageIdentity.PackageContentSha256);
+        var identity = Assert.IsType<PluginPackageExecutionIdentity>(request.PackageIdentity);
+        Assert.Equal("project.main", identity.ProjectId);
+        Assert.Equal("application.main", identity.ApplicationId);
+        Assert.Equal("4.5.6", identity.PackageIdentity.Version);
+        Assert.Equal(new string('a', 64), identity.PackageIdentity.PackageContentSha256);
     }
 
     [Fact]
@@ -77,6 +81,8 @@ public sealed class PluginDeviceCommandExecutorTests
     private static DeviceCommandExecutionRequest CreateRequest(DevicePluginPackageIdentity package)
     {
         return new DeviceCommandExecutionRequest(
+            "project.main",
+            "application.main",
             ProjectReleaseRuntimeProviderKinds.PluginCommand,
             "plugin://openlineops.scanner-driver/device.scanner:scan",
             new DeviceInstanceId("scanner-01"),

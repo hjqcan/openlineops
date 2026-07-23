@@ -23,8 +23,8 @@ public sealed class ProjectTopologyCrudApiTests : IDisposable
         var topologyPath = TopologyPath(projectId, applicationId, topologyId);
         var layoutPath = LayoutPath(projectId, applicationId, layoutId);
 
-        using (var factory = new WebApplicationFactory<Program>())
-        using (var client = factory.CreateClient())
+        using (var factory = ApiTestAuthentication.CreateFactory())
+        using (var client = factory.CreateAuthenticatedClient())
         {
             using var createWorkspace = await client.PostAsJsonAsync(
                 "/api/automation-project-workspaces",
@@ -145,8 +145,8 @@ public sealed class ProjectTopologyCrudApiTests : IDisposable
             Assert.Equal("Station.Main", onlyElement.GetProperty("target").GetProperty("targetId").GetString());
         }
 
-        using (var restartedFactory = new WebApplicationFactory<Program>())
-        using (var restartedClient = restartedFactory.CreateClient())
+        using (var restartedFactory = ApiTestAuthentication.CreateFactory())
+        using (var restartedClient = restartedFactory.CreateAuthenticatedClient())
         {
             using var reopen = await restartedClient.PostAsJsonAsync(
                 "/api/automation-project-workspaces/open",

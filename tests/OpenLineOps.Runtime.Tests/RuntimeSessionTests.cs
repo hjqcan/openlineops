@@ -1,8 +1,12 @@
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Incidents;
 using OpenLineOps.Runtime.Domain.Sessions;
+using OpenLineOps.Runtime.Domain.Steps;
 using OpenLineOps.Runtime.Domain.Targets;
+using ExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus;
+using ResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
 
 namespace OpenLineOps.Runtime.Tests;
 
@@ -128,6 +132,188 @@ public sealed class RuntimeSessionTests
         Assert.Equal("system.tester", step.TargetId);
         Assert.Equal(step.ActionId, command.ActionId);
         Assert.Equal(step.Target, command.Target);
+    }
+
+    [Fact]
+    public void TerminalSessionRejectsEveryEvidenceMutationWithoutChangingItsSnapshot()
+    {
+        var session = CreateRunningSession();
+        var step = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("inspect"),
+            "Inspect",
+            StartedAtUtc.AddSeconds(1),
+            new RuntimeActionId("inspect:action:1"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.tester"));
+        var command = session.CreateCommand(
+            RuntimeCommandId.New(),
+            step.Id,
+            new RuntimeCapabilityId("vision.inspect"),
+            "Inspect",
+            StartedAtUtc.AddSeconds(2),
+            TimeSpan.FromSeconds(5));
+        Assert.True(session.AcceptCommand(command.Id, StartedAtUtc.AddSeconds(3)).Succeeded);
+        Assert.True(session.StartCommand(command.Id, StartedAtUtc.AddSeconds(4)).Succeeded);
+        Assert.True(session.CompleteCommand(
+            command.Id,
+            "{}",
+            StartedAtUtc.AddSeconds(5),
+            ResultJudgement.Passed).Succeeded);
+        Assert.True(session.CompleteStep(step.Id, StartedAtUtc.AddSeconds(6)).Succeeded);
+        Assert.True(session.Complete(StartedAtUtc.AddSeconds(7)).Succeeded);
+        var terminalEventCount = session.DomainEvents.Count;
+
+        var failedAgain = session.Fail(
+            StartedAtUtc.AddSeconds(8),
+            "Runtime.LateFailure",
+            "Late failure must not change terminal evidence.");
+        var incidentException = Assert.Throws<InvalidOperationException>(() =>
+            session.RecordIncident(
+                RuntimeIncidentSeverity.Error,
+                "Runtime.LateIncident",
+                "Late incident must not change terminal evidence.",
+                StartedAtUtc.AddSeconds(8)));
+        var stepException = Assert.Throws<InvalidOperationException>(() =>
+            session.FailStep(step.Id, "late step failure", StartedAtUtc.AddSeconds(8)));
+        var commandException = Assert.Throws<InvalidOperationException>(() =>
+            session.FailCommand(
+                command.Id,
+                "late command failure",
+                StartedAtUtc.AddSeconds(8)));
+
+        Assert.False(failedAgain.Succeeded);
+        Assert.Equal("Runtime.SessionTerminal", failedAgain.Code);
+        Assert.Contains("terminal", incidentException.Message, StringComparison.Ordinal);
+        Assert.Contains("terminal", stepException.Message, StringComparison.Ordinal);
+        Assert.Contains("terminal", commandException.Message, StringComparison.Ordinal);
+        Assert.Empty(session.Incidents);
+        Assert.Equal(RuntimeStepStatus.Completed, step.Status);
+        Assert.Equal(ExecutionStatus.Completed, command.Status);
+        Assert.Equal(terminalEventCount, session.DomainEvents.Count);
+        Assert.Equal(RuntimeSessionStatus.Completed, session.Status);
+        Assert.Equal(StartedAtUtc.AddSeconds(7), session.CompletedAtUtc);
+    }
+
+    [Fact]
+    public void TerminalTransitionsRejectOpenWorkWithoutAppendingFailureEvidence()
+    {
+        var session = CreateRunningSession();
+        var step = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("inspect"),
+            "Inspect",
+            StartedAtUtc.AddSeconds(1),
+            new RuntimeActionId("inspect:action:1"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.tester"));
+        var command = session.CreateCommand(
+            RuntimeCommandId.New(),
+            step.Id,
+            new RuntimeCapabilityId("vision.inspect"),
+            "Inspect",
+            StartedAtUtc.AddSeconds(2),
+            TimeSpan.FromSeconds(5));
+        var eventCount = session.DomainEvents.Count;
+
+        var complete = session.Complete(StartedAtUtc.AddSeconds(3));
+        var fail = session.Fail(
+            StartedAtUtc.AddSeconds(3),
+            "Runtime.ExecutionFailed",
+            "Failure cannot bypass open work evidence.");
+        var cancel = session.Cancel(StartedAtUtc.AddSeconds(3), "operator cancel");
+
+        Assert.False(complete.Succeeded);
+        Assert.False(fail.Succeeded);
+        Assert.False(cancel.Succeeded);
+        Assert.Equal("Runtime.SessionHasActiveWork", complete.Code);
+        Assert.Equal("Runtime.SessionHasActiveWork", fail.Code);
+        Assert.Equal("Runtime.SessionHasActiveWork", cancel.Code);
+        Assert.Equal(RuntimeSessionStatus.Running, session.Status);
+        Assert.Equal(RuntimeStepStatus.Running, step.Status);
+        Assert.Equal(ExecutionStatus.Pending, command.Status);
+        Assert.Empty(session.Incidents);
+        Assert.Equal(eventCount, session.DomainEvents.Count);
+    }
+
+    [Fact]
+    public void RestoreRejectsTerminalSessionWithOpenWorkEvidence()
+    {
+        var session = CreateRunningSession();
+        var step = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("inspect"),
+            "Inspect",
+            StartedAtUtc.AddSeconds(1),
+            new RuntimeActionId("inspect:action:1"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.tester"));
+        session.CreateCommand(
+            RuntimeCommandId.New(),
+            step.Id,
+            new RuntimeCapabilityId("vision.inspect"),
+            "Inspect",
+            StartedAtUtc.AddSeconds(2),
+            TimeSpan.FromSeconds(5));
+
+        var exception = Assert.Throws<InvalidOperationException>(() => RuntimeSession.Restore(
+            session.Id,
+            session.StationId,
+            session.ProcessDefinitionId,
+            session.ProcessVersionId,
+            session.ConfigurationSnapshotId,
+            session.RecipeSnapshotId,
+            RuntimeSessionStatus.Completed,
+            session.CreatedAtUtc,
+            StartedAtUtc.AddSeconds(3),
+            session.StartedAtUtc,
+            session.PausedAtUtc,
+            StartedAtUtc.AddSeconds(3),
+            session.Steps,
+            session.Commands,
+            session.Incidents,
+            session.TraceMetadata));
+
+        Assert.Contains("open Step or Command", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FailedStepAllowsOnlyExactTerminalEvidenceReplayWhileSessionRemainsRunning()
+    {
+        var session = CreateRunningSession();
+        var step = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("inspect"),
+            "Inspect",
+            StartedAtUtc.AddSeconds(1),
+            new RuntimeActionId("inspect:action:1"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.tester"));
+        Assert.True(session.FailStep(
+            step.Id,
+            "original failure",
+            StartedAtUtc.AddSeconds(2)).Succeeded);
+        var eventCount = session.DomainEvents.Count;
+
+        var exactReplay = session.FailStep(
+            step.Id,
+            "original failure",
+            StartedAtUtc.AddSeconds(2));
+        var changedReason = session.FailStep(
+            step.Id,
+            "changed failure",
+            StartedAtUtc.AddSeconds(2));
+        var changedTimestamp = session.FailStep(
+            step.Id,
+            "original failure",
+            StartedAtUtc.AddSeconds(3));
+        var lateCancel = session.CancelStep(step.Id, StartedAtUtc.AddSeconds(3));
+
+        Assert.True(exactReplay.Succeeded);
+        Assert.False(changedReason.Succeeded);
+        Assert.False(changedTimestamp.Succeeded);
+        Assert.False(lateCancel.Succeeded);
+        Assert.Equal(RuntimeStepStatus.Failed, step.Status);
+        Assert.Equal("original failure", step.FailureReason);
+        Assert.Equal(StartedAtUtc.AddSeconds(2), step.CompletedAtUtc);
+        Assert.Equal(eventCount, session.DomainEvents.Count);
+        Assert.Equal(RuntimeSessionStatus.Running, session.Status);
     }
 
     private static RuntimeSession CreateRunningSession()

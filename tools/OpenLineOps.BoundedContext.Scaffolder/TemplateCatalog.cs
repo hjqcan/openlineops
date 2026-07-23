@@ -69,8 +69,6 @@ internal static class TemplateCatalog
                 DateTimeOffset OccurredAtUtc)
             {
                 public const string EventName = "{{model.EventName}}";
-
-                public const string Version = "v1";
             }
             """;
     }
@@ -170,10 +168,7 @@ internal static class TemplateCatalog
                 string DisplayName,
                 DateTimeOffset CreatedAtUtc)
                 : DomainEvent({{model.AggregateName}}CreatedIntegrationDto.EventName),
-                    IIntegrationEvent
-            {
-                public string Version => {{model.AggregateName}}CreatedIntegrationDto.Version;
-            }
+                    IIntegrationEvent;
             """;
     }
 

@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenLineOps.Plugin.Abstractions;
 using OpenLineOps.Plugins.Application.Commands;
+using OpenLineOps.Plugins.Application.Discovery;
 using OpenLineOps.Plugins.Infrastructure.Lifecycle;
 
 namespace OpenLineOps.Plugins.Tests;
@@ -228,7 +229,8 @@ public sealed class ExternalPluginHostProtocolLoopTests
             "device.scanner",
             "Scan",
             "{\"serial\":\"ABC\"}",
-            30000);
+            30000,
+            ExecutionIdentity(HostLoopDeviceCommandPlugin.ManifestId));
     }
 
     private static PluginProcessCommandInvocationRequest CreateProcessInvocationRequest()
@@ -245,8 +247,22 @@ public sealed class ExternalPluginHostProtocolLoopTests
             "process.vision",
             "Inspect",
             "{\"serial\":\"ABC\"}",
-            30000);
+            30000,
+            ExecutionIdentity(HostLoopProcessNodePlugin.ManifestId));
     }
+
+    private static PluginPackageExecutionIdentity ExecutionIdentity(string pluginId) => new(
+        "project.test",
+        "application.test",
+        new PluginPackageRuntimeIdentity(
+            pluginId,
+            "1.0.0",
+            new string('a', 64),
+            new string('b', 64),
+            new string('c', 64),
+            "1.0.0",
+            "win-x64",
+            "openlineops.plugin-abi/1"));
 
     private static ProtocolResponse ReadSingleResponse(StringWriter output)
     {

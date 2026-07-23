@@ -2,6 +2,7 @@ using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
 using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
@@ -29,6 +30,191 @@ public sealed class ProductionMaterialRepositoryTests
         using var repository = new SqliteProductionMaterialRepository(database.ConnectionString);
 
         await AssertAtomicConflict(repository);
+    }
+
+    [Fact]
+    public void TimelineQueryUnionsMaterialIdentitiesAndScopesThemToTheProductionRun()
+    {
+        var unitId = ProductionUnitId.New();
+        var carrierId = new CarrierId("carrier-query");
+        var runId = ProductionRunId.New();
+        var otherRunId = ProductionRunId.New();
+        var station = MaterialLocation.AtStation("line-a", "station-a");
+        var query = ProductionMaterialTimelineQuery.StrictIntersection(unitId, runId, carrierId);
+        var unitInRun = ProductionMaterialTimelineEntry.Location(
+            Guid.NewGuid(),
+            MaterialReference.ForProductionUnit(unitId),
+            runId,
+            null,
+            station,
+            "coordinator.main",
+            BaseTimeUtc);
+        var carrierInRun = ProductionMaterialTimelineEntry.Location(
+            Guid.NewGuid(),
+            MaterialReference.ForCarrier(carrierId),
+            runId,
+            null,
+            station,
+            "coordinator.main",
+            BaseTimeUtc);
+        var unitInOtherRun = ProductionMaterialTimelineEntry.Location(
+            Guid.NewGuid(),
+            MaterialReference.ForProductionUnit(unitId),
+            otherRunId,
+            null,
+            station,
+            "coordinator.main",
+            BaseTimeUtc);
+
+        Assert.True(query.Matches(unitInRun));
+        Assert.True(query.Matches(carrierInRun));
+        Assert.False(query.Matches(unitInOtherRun));
+    }
+
+    [Fact]
+    public void UnionScopeQueryIncludesGenealogyOrRunAndAlwaysAppliesTimeBoundary()
+    {
+        var unitId = ProductionUnitId.New();
+        var childId = ProductionUnitId.New();
+        var runId = ProductionRunId.New();
+        var query = ProductionMaterialTimelineQuery.UnionScope(
+            productionUnitId: unitId,
+            productionRunId: runId,
+            throughUtc: BaseTimeUtc.AddSeconds(2));
+        var genealogy = ProductionMaterialTimelineEntry.FromGenealogy(
+            new MaterialGenealogyLink(
+                MaterialGenealogyLinkId.New(),
+                unitId,
+                childId,
+                "ComponentOf",
+                "operation.assembly",
+                "coordinator.main",
+                BaseTimeUtc.AddSeconds(1)));
+        var runEvidence = ProductionMaterialTimelineEntry.Location(
+            Guid.NewGuid(),
+            MaterialReference.ForProductionUnit(ProductionUnitId.New()),
+            runId,
+            null,
+            MaterialLocation.AtStation("line-a", "station-a"),
+            "coordinator.main",
+            BaseTimeUtc.AddSeconds(2));
+        var lateUnitEvidence = ProductionMaterialTimelineEntry.Location(
+            Guid.NewGuid(),
+            MaterialReference.ForProductionUnit(unitId),
+            ProductionRunId.New(),
+            null,
+            MaterialLocation.AtStation("line-a", "station-a"),
+            "coordinator.main",
+            BaseTimeUtc.AddSeconds(3));
+
+        Assert.True(query.Matches(genealogy));
+        Assert.True(query.Matches(runEvidence));
+        Assert.False(query.Matches(lateUnitEvidence));
+    }
+
+    [Fact]
+    public async Task InMemoryUnionScopeQueryReadsUnitCarrierOrRunInOneOrderedResult()
+    {
+        await AssertUnionScopeQuery(
+            new InMemoryProductionMaterialRepository());
+    }
+
+    [Fact]
+    public async Task SqliteUnionScopeQueryReadsUnitCarrierOrRunInOneOrderedResult()
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        using var repository = new SqliteProductionMaterialRepository(database.ConnectionString);
+
+        await AssertUnionScopeQuery(repository);
+    }
+
+    [Fact]
+    public async Task SqliteTimelineQueryUnionsMaterialIdentitiesAndAppliesRunAndTimeBoundaries()
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        using var repository = new SqliteProductionMaterialRepository(database.ConnectionString);
+        var unit = CreateUnit("SN-TIMELINE-SQL");
+        var carrier = Carrier.Register(
+            new CarrierId("carrier-timeline-sql"),
+            "tray",
+            1,
+            "operator-a",
+            BaseTimeUtc);
+        var runId = ProductionRunId.New();
+        var otherRunId = ProductionRunId.New();
+        var firstStation = MaterialLocation.AtStation("line-a", "station-a");
+        var secondStation = MaterialLocation.AtStation("line-a", "station-b");
+        var unitFirstEvidenceId = Guid.NewGuid();
+        var carrierFirstEvidenceId = Guid.NewGuid();
+
+        Assert.True(await repository.TryAddAsync(unit));
+        Assert.True(await repository.TryAddAsync(carrier));
+        Assert.True(unit.Arrive(firstStation, BaseTimeUtc.AddSeconds(1)).Succeeded);
+        Assert.True(carrier.Arrive(firstStation, BaseTimeUtc.AddSeconds(2)).Succeeded);
+        await repository.CommitAsync(new ProductionMaterialCommit(
+            productionUnits: [new ProductionUnitUpdate(unit, 0)],
+            carriers: [new CarrierUpdate(carrier, 0)],
+            timeline:
+            [
+                ProductionMaterialTimelineEntry.Location(
+                    unitFirstEvidenceId,
+                    MaterialReference.ForProductionUnit(unit.Id),
+                    runId,
+                    null,
+                    firstStation,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(1)),
+                ProductionMaterialTimelineEntry.Location(
+                    carrierFirstEvidenceId,
+                    MaterialReference.ForCarrier(carrier.Id),
+                    runId,
+                    null,
+                    firstStation,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(2))
+            ]));
+
+        Assert.True(unit.Transfer(
+            firstStation,
+            secondStation,
+            BaseTimeUtc.AddSeconds(3)).Succeeded);
+        Assert.True(carrier.Transfer(
+            firstStation,
+            secondStation,
+            BaseTimeUtc.AddSeconds(4)).Succeeded);
+        await repository.CommitAsync(new ProductionMaterialCommit(
+            productionUnits: [new ProductionUnitUpdate(unit, 1)],
+            carriers: [new CarrierUpdate(carrier, 1)],
+            timeline:
+            [
+                ProductionMaterialTimelineEntry.Location(
+                    Guid.NewGuid(),
+                    MaterialReference.ForProductionUnit(unit.Id),
+                    otherRunId,
+                    firstStation,
+                    secondStation,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(3)),
+                ProductionMaterialTimelineEntry.Location(
+                    Guid.NewGuid(),
+                    MaterialReference.ForCarrier(carrier.Id),
+                    runId,
+                    firstStation,
+                    secondStation,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(4))
+            ]));
+
+        var timeline = await repository.ListTimelineAsync(
+            ProductionMaterialTimelineQuery.StrictIntersection(
+                unit.Id,
+                runId,
+                carrier.Id,
+                BaseTimeUtc.AddSeconds(2)));
+
+        Assert.Equal(
+            [unitFirstEvidenceId, carrierFirstEvidenceId],
+            timeline.Select(entry => entry.EvidenceId).ToArray());
     }
 
     [Fact]
@@ -139,6 +325,99 @@ public sealed class ProductionMaterialRepositoryTests
     }
 
     [Fact]
+    public async Task SqliteColdRestartPreservesTwoUnitsAtDistinctCarrierPositions()
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        var firstUnitId = ProductionUnitId.New();
+        var secondUnitId = ProductionUnitId.New();
+        var carrierId = new CarrierId("carrier-two-position");
+        var station = MaterialLocation.AtStation("line-a", "station-load");
+        var firstPosition = MaterialLocation.OnCarrier(carrierId, "position-01");
+        var secondPosition = MaterialLocation.OnCarrier(carrierId, "position-02");
+
+        using (var materials = new SqliteProductionMaterialRepository(database.ConnectionString))
+        using (var runs = new SqliteProductionRunRepository(database.ConnectionString))
+        {
+            var service = new ProductionMaterialService(materials, runs);
+            Assert.True((await service.RegisterUnitAsync(new RegisterProductionUnitCommand(
+                firstUnitId,
+                "board-a",
+                "serial-number",
+                "SN-CARRIER-POSITION-01",
+                null,
+                "operator-a",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.RegisterUnitAsync(new RegisterProductionUnitCommand(
+                secondUnitId,
+                "board-a",
+                "serial-number",
+                "SN-CARRIER-POSITION-02",
+                null,
+                "operator-a",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.RegisterCarrierAsync(new RegisterCarrierCommand(
+                carrierId,
+                "tray-2",
+                2,
+                "operator-a",
+                BaseTimeUtc))).Succeeded);
+            Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
+                MaterialReference.ForCarrier(carrierId),
+                station,
+                "scanner-a",
+                BaseTimeUtc.AddSeconds(1)))).Succeeded);
+            Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
+                MaterialReference.ForProductionUnit(firstUnitId),
+                station,
+                "scanner-a",
+                BaseTimeUtc.AddSeconds(2)))).Succeeded);
+            Assert.True((await service.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
+                MaterialReference.ForProductionUnit(secondUnitId),
+                station,
+                "scanner-a",
+                BaseTimeUtc.AddSeconds(3)))).Succeeded);
+            Assert.True((await service.TransferAsync(new TransferMaterialCommand(
+                MaterialReference.ForProductionUnit(firstUnitId),
+                station,
+                firstPosition,
+                "operator-a",
+                BaseTimeUtc.AddSeconds(4)))).Succeeded);
+            Assert.True((await service.TransferAsync(new TransferMaterialCommand(
+                MaterialReference.ForProductionUnit(secondUnitId),
+                station,
+                secondPosition,
+                "operator-a",
+                BaseTimeUtc.AddSeconds(5)))).Succeeded);
+        }
+
+        using var restarted = new SqliteProductionMaterialRepository(database.ConnectionString);
+        var restoredUnits = (await restarted.ListProductionUnitsAsync())
+            .Where(entry => entry.Aggregate.Location?.CarrierId == carrierId)
+            .ToDictionary(entry => entry.Aggregate.Id);
+        var restoredCarrier = Assert.IsType<ProductionMaterialPersistenceEntry<Carrier>>(
+            await restarted.GetCarrierAsync(carrierId));
+
+        Assert.Equal(2, restoredUnits.Count);
+        Assert.Equal(firstPosition, restoredUnits[firstUnitId].Aggregate.Location);
+        Assert.Equal(secondPosition, restoredUnits[secondUnitId].Aggregate.Location);
+        Assert.Equal(2, restoredCarrier.Aggregate.Capacity);
+        Assert.Equal(station, restoredCarrier.Aggregate.Location);
+        Assert.Contains(
+            await restarted.ListTimelineAsync(
+                ProductionMaterialTimelineQuery.StrictIntersection(
+                    productionUnitId: firstUnitId)),
+            entry => entry.DestinationLocation == firstPosition);
+        Assert.Contains(
+            await restarted.ListTimelineAsync(
+                ProductionMaterialTimelineQuery.StrictIntersection(
+                    productionUnitId: secondUnitId)),
+            entry => entry.DestinationLocation == secondPosition);
+    }
+
+    [Fact]
     public async Task SqliteTimelineRebuildsCarrierSlotLocationAndGenealogyEvidenceAfterRestart()
     {
         using var database = TemporarySqliteDatabase.Create();
@@ -237,7 +516,7 @@ public sealed class ProductionMaterialRepositoryTests
         }
 
         using var restarted = new SqliteProductionMaterialRepository(database.ConnectionString);
-        var timeline = await restarted.ListTimelineAsync(new ProductionMaterialTimelineQuery(
+        var timeline = await restarted.ListTimelineAsync(ProductionMaterialTimelineQuery.StrictIntersection(
             productionUnitId: childId,
             carrierId: carrierId));
         Assert.Equal(5, timeline.Count(entry =>
@@ -467,6 +746,88 @@ public sealed class ProductionMaterialRepositoryTests
             null,
             "operator-a",
             BaseTimeUtc);
+    }
+
+    private static async Task AssertUnionScopeQuery(IProductionMaterialRepository repository)
+    {
+        var unit = CreateUnit($"SN-UNION-{Guid.NewGuid():N}");
+        var runOnlyUnit = CreateUnit($"SN-RUN-{Guid.NewGuid():N}");
+        var unrelatedUnit = CreateUnit($"SN-OTHER-{Guid.NewGuid():N}");
+        var carrier = Carrier.Register(
+            new CarrierId($"carrier-{Guid.NewGuid():N}"),
+            "tray",
+            1,
+            "operator-a",
+            BaseTimeUtc);
+        var runId = ProductionRunId.New();
+        var otherRunId = ProductionRunId.New();
+        var station = MaterialLocation.AtStation("line-a", "station-a");
+        var unitEvidenceId = Guid.NewGuid();
+        var carrierEvidenceId = Guid.NewGuid();
+        var runEvidenceId = Guid.NewGuid();
+
+        Assert.True(await repository.TryAddAsync(unit));
+        Assert.True(await repository.TryAddAsync(runOnlyUnit));
+        Assert.True(await repository.TryAddAsync(unrelatedUnit));
+        Assert.True(await repository.TryAddAsync(carrier));
+        Assert.True(unit.Arrive(station, BaseTimeUtc.AddSeconds(1)).Succeeded);
+        Assert.True(carrier.Arrive(station, BaseTimeUtc.AddSeconds(2)).Succeeded);
+        Assert.True(runOnlyUnit.Arrive(station, BaseTimeUtc.AddSeconds(3)).Succeeded);
+        Assert.True(unrelatedUnit.Arrive(station, BaseTimeUtc.AddSeconds(4)).Succeeded);
+        await repository.CommitAsync(new ProductionMaterialCommit(
+            productionUnits:
+            [
+                new ProductionUnitUpdate(unit, 0),
+                new ProductionUnitUpdate(runOnlyUnit, 0),
+                new ProductionUnitUpdate(unrelatedUnit, 0)
+            ],
+            carriers: [new CarrierUpdate(carrier, 0)],
+            timeline:
+            [
+                ProductionMaterialTimelineEntry.Location(
+                    unitEvidenceId,
+                    MaterialReference.ForProductionUnit(unit.Id),
+                    otherRunId,
+                    null,
+                    station,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(1)),
+                ProductionMaterialTimelineEntry.Location(
+                    carrierEvidenceId,
+                    MaterialReference.ForCarrier(carrier.Id),
+                    otherRunId,
+                    null,
+                    station,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(2)),
+                ProductionMaterialTimelineEntry.Location(
+                    runEvidenceId,
+                    MaterialReference.ForProductionUnit(runOnlyUnit.Id),
+                    runId,
+                    null,
+                    station,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(3)),
+                ProductionMaterialTimelineEntry.Location(
+                    Guid.NewGuid(),
+                    MaterialReference.ForProductionUnit(unrelatedUnit.Id),
+                    otherRunId,
+                    null,
+                    station,
+                    "coordinator.main",
+                    BaseTimeUtc.AddSeconds(4))
+            ]));
+
+        var timeline = await repository.ListTimelineAsync(
+            ProductionMaterialTimelineQuery.UnionScope(
+                unit.Id,
+                runId,
+                carrier.Id,
+                BaseTimeUtc.AddSeconds(3)));
+
+        Assert.Equal(
+            [unitEvidenceId, carrierEvidenceId, runEvidenceId],
+            timeline.Select(entry => entry.EvidenceId).ToArray());
     }
 
     private sealed class TemporarySqliteDatabase : IDisposable

@@ -244,7 +244,7 @@ public sealed class TraceReadModelService : ITraceReadModelService
     }
 
     private static bool IsExecutionFailure(TraceCommandRecord command) =>
-        command.Status != TraceCommandStatus.Completed;
+        command.ExecutionStatus != ExecutionStatus.Completed;
 
     private static TraceFacetCountReadModel[] CountBy(IEnumerable<string> values)
     {

@@ -21,8 +21,8 @@ public sealed class EditorDocumentConcurrencyApiTests : IDisposable
         var applicationId = $"application-{suffix}";
         var topologyId = $"topology-{suffix}";
         var topologyPath = $"/api/automation-projects/{projectId}/applications/{applicationId}/topologies/{topologyId}";
-        using var factory = new WebApplicationFactory<Program>();
-        using var client = factory.CreateClient();
+        using var factory = ApiTestAuthentication.CreateFactory();
+        using var client = factory.CreateAuthenticatedClient();
 
         using var workspace = await client.PostAsJsonAsync("/api/automation-project-workspaces", new
         {

@@ -159,6 +159,12 @@ public sealed class AutomationTopologyServiceTests
         var fixture = new Fixture(operations);
         var service = fixture.Service;
         await service.CreateAsync("project", "app", new CreateAutomationTopologyRequest("topology", "Topology"));
+        await service.AddCapabilityAsync(
+            "project",
+            "app",
+            "topology",
+            new AddCapabilityContractRequest(
+                "station.execute", "Execute", "1.0", null, null, 30, "Normal"));
         await service.AddSystemAsync(
             "project", "app", "topology",
             new AddAutomationSystemRequest(
@@ -203,7 +209,11 @@ public sealed class AutomationTopologyServiceTests
         var updatedSystem = await service.UpdateSystemAsync(
             "project", "app", "topology", "Station.Main",
             new UpdateAutomationSystemRequest(
-                "station.eol", "EOL Station", new Dictionary<string, string> { ["area"] = "EOL" }));
+                "station.eol",
+                "EOL Station",
+                RequiredCapabilityIds: ["station.execute"],
+                ProvidedCapabilityIds: ["station.execute"],
+                new Dictionary<string, string> { ["area"] = "EOL" }));
         var updatedGroup = await service.UpdateSlotGroupAsync(
             "project", "app", "topology", "Group.Main",
             new UpdateSlotGroupRequest("Production Unit Fixture", "TesterBank", 4));
@@ -212,6 +222,12 @@ public sealed class AutomationTopologyServiceTests
             new UpdateSlotDefinitionRequest("A-01", "Production Unit Position", "Carrier", false));
 
         Assert.Equal("EOL Station", updatedSystem.Value.Systems.Single(system => system.SystemId == "Station.Main").DisplayName);
+        Assert.Equal(
+            ["station.execute"],
+            updatedSystem.Value.Systems.Single(system => system.SystemId == "Station.Main").RequiredCapabilityIds);
+        Assert.Equal(
+            ["station.execute"],
+            updatedSystem.Value.Systems.Single(system => system.SystemId == "Station.Main").ProvidedCapabilityIds);
         Assert.Equal("Production Unit Fixture", updatedGroup.Value.SlotGroups.Single().DisplayName);
         Assert.Equal("A-01", updatedSlot.Value.Slots.Single().Address);
         Assert.False(updatedSlot.Value.Slots.Single().IsEnabled);

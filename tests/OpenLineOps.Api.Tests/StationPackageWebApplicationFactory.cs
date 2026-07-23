@@ -43,6 +43,7 @@ public class StationPackageWebApplicationFactory : WebApplicationFactory<Program
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        ApiTestAuthentication.Configure(builder);
         builder.UseSetting(
             "OpenLineOps:Projects:StationPackages:DistributionDirectory",
             DistributionDirectory);

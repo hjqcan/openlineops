@@ -204,3 +204,4 @@ Assert-DoesNotMatch `
 
 Write-Host "Publication metadata finalization verification passed."
 Write-Host "Generated files: $successRoot"
+exit 0

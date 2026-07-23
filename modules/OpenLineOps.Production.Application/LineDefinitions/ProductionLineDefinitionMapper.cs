@@ -27,14 +27,20 @@ public static class ProductionLineDefinitionMapper
                         resource.Id.Value,
                         resource.Kind.ToString(),
                         resource.TopologyTargetId,
-                        resource.Resolution.ToString())).ToArray()))
+                        resource.Resolution.ToString())).ToArray(),
+                    operation.InputMappings.Select(mapping => new OperationInputMappingDetails(
+                        mapping.TargetInputKey,
+                        mapping.SourceOperationId.Value,
+                        mapping.SourceOutputKey,
+                        mapping.ExpectedValueKind.ToString())).ToArray()))
                 .ToArray(),
             definition.Transitions
                 .OrderBy(transition => transition.Id.Value, StringComparer.Ordinal)
                 .Select(transition => new RouteTransitionDetails(
                     transition.Id.Value,
                     transition.SourceOperationId.Value,
-                    transition.TargetOperationId.Value,
+                    transition.TargetOperationId?.Value,
+                    transition.TerminalDisposition?.ToString(),
                     transition.Kind.ToString(),
                     transition.RequiredJudgement?.ToString(),
                     transition.MaxTraversals,
@@ -59,6 +65,13 @@ public static class ProductionLineDefinitionMapper
                     authorization.TargetCapabilityId,
                     authorization.TargetAction))
                 .ToArray(),
+            new ProductionRouteLayoutDetails(definition.RouteLayout.OperationPositions
+                .OrderBy(position => position.OperationId.Value, StringComparer.Ordinal)
+                .Select(position => new OperationCanvasPositionDetails(
+                    position.OperationId.Value,
+                    position.X,
+                    position.Y))
+                .ToArray()),
             definition.CreatedAtUtc,
             definition.UpdatedAtUtc);
     }

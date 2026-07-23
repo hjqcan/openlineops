@@ -1,11 +1,11 @@
-using OpenLineOps.Runtime.Domain.Runs;
+using OpenLineOps.Runtime.Application.Persistence;
 
 namespace OpenLineOps.Runtime.Application.Events;
 
 public interface IProductionRunTerminalOutboxHandler
 {
     ValueTask HandleAsync(
-        ProductionRunSnapshot run,
+        ProductionRunTerminalEvidence evidence,
         CancellationToken cancellationToken = default);
 }
 

@@ -4,13 +4,13 @@ using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class RemovedLegacyApiSurfaceTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class RemovedLegacyApiSurfaceTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
     private readonly HttpClient _client;
 
-    public RemovedLegacyApiSurfaceTests(WebApplicationFactory<Program> factory)
+    public RemovedLegacyApiSurfaceTests(OpenLineOpsApiWebApplicationFactory factory)
     {
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        _client = factory.CreateAuthenticatedClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
         });
@@ -35,6 +35,16 @@ public sealed class RemovedLegacyApiSurfaceTests : IClassFixture<WebApplicationF
     {
         using var response = await _client.PostAsJsonAsync(
             "/api/runtime/sessions/simulated",
+            new { });
+
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task RawTraceRecordInjectionMethodDoesNotExist()
+    {
+        using var response = await _client.PostAsJsonAsync(
+            "/api/traceability/records",
             new { });
 
         Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);

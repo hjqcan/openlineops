@@ -491,7 +491,7 @@ public sealed class ProjectReleasePublisherTests
             "{\"schemaVersion\":\"openlineops.production-line\",\"resourceKind\":\"OpenLineOps.ProductionLine\",\"applicationId\":\"application.main\",\"lineDefinitionId\":\"line.main\"}");
         File.WriteAllText(
             Path.Combine(projects, "project-main.json"),
-            "{\"schema\":\"openlineops.engineering-configuration-resource\",\"schemaVersion\":1,\"applicationId\":\"application.main\",\"resourceKind\":\"project\",\"resourceId\":\"engineering.main\",\"snapshot\":{\"projectId\":\"engineering.main\",\"workspaceId\":\"workspace.main\",\"displayName\":\"Main\",\"createdAtUtc\":\"2026-07-10T08:00:00+00:00\",\"activeSnapshotId\":\"configuration.main.v1\",\"snapshots\":[{\"snapshotId\":\"configuration.main.v1\",\"projectId\":\"engineering.main\",\"processDefinitionId\":\"process.main\",\"processVersionId\":\"process.main@1.0.0\",\"recipeId\":\"recipe.main\",\"recipeVersionId\":\"recipe.main@1\",\"stationProfileId\":\"station.profile.main\",\"status\":\"Published\",\"publishedAtUtc\":\"2026-07-10T08:00:00+00:00\",\"deviceBindings\":[]}]}}");
+            "{\"schema\":\"openlineops.engineering-configuration-resource\",\"schemaVersion\":1,\"applicationId\":\"application.main\",\"resourceKind\":\"project\",\"resourceId\":\"engineering.main\",\"snapshot\":{\"projectId\":\"engineering.main\",\"workspaceId\":\"workspace.main\",\"displayName\":\"Main\",\"createdAtUtc\":\"2026-07-10T08:00:00+00:00\",\"activeSnapshotId\":\"configuration.main\",\"snapshots\":[{\"snapshotId\":\"configuration.main\",\"projectId\":\"engineering.main\",\"processDefinitionId\":\"process.main\",\"processVersionId\":\"process.main@1.0.0\",\"recipeId\":\"recipe.main\",\"recipeVersionId\":\"recipe.main@1\",\"stationProfileId\":\"station.profile.main\",\"status\":\"Published\",\"publishedAtUtc\":\"2026-07-10T08:00:00+00:00\",\"deviceBindings\":[]}]}}");
         File.WriteAllText(
             Path.Combine(profiles, "station-profile-main.json"),
             "{\"schema\":\"openlineops.engineering-configuration-resource\",\"schemaVersion\":1,\"applicationId\":\"application.main\",\"resourceKind\":\"station-profile\",\"resourceId\":\"station.profile.main\",\"snapshot\":{\"stationProfileId\":\"station.profile.main\",\"stationSystemId\":\"station.eol\",\"displayName\":\"EOL\",\"deviceBindings\":[]}}");
@@ -545,7 +545,7 @@ public sealed class ProjectReleasePublisherTests
                     "EOL",
                     "station.eol",
                     "process.main",
-                    "configuration.main.v1",
+                    "configuration.main",
                     "process.main@1.0.0",
                     "openlineops.flow-ir",
                     "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -557,9 +557,24 @@ public sealed class ProjectReleasePublisherTests
                         "station.eol",
                         "Fixed",
                         [])],
+                    [],
                     [])
             ],
-            Transitions: [],
+            Transitions:
+            [
+                new ProjectReleaseRouteTransition(
+                    "operation.eol.completed",
+                    "operation.eol",
+                    null,
+                    "Completed",
+                    "Sequence",
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)
+            ],
             LineControllerAuthorizations: []);
     }
 

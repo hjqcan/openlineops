@@ -227,7 +227,7 @@ namespace PythonScript.Runtime
             Session.WithGil(() =>
             {
                 var targetScope = EffectiveScope(scope);
-                
+
                 // 检查是否为嵌套类型
                 if (type.IsNested)
                 {
@@ -240,7 +240,7 @@ namespace PythonScript.Runtime
                     // 非嵌套类型：尝试使用 Python import 语句让 pythonnet 自然暴露类型
                     string? ns = type.Namespace;
                     string typeName = type.Name;
-                    
+
                     if (!string.IsNullOrEmpty(ns))
                     {
                         try
@@ -278,19 +278,19 @@ namespace PythonScript.Runtime
 
             // 验证方法存在并解决重载歧义
             MethodInfo? methodInfo = null;
-            
+
             if (parameterTypes != null)
             {
                 // 使用指定的参数类型查找方法
-                methodInfo = type.GetMethod(methodName, 
+                methodInfo = type.GetMethod(methodName,
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.FlattenHierarchy,
-                    null, 
-                    parameterTypes, 
+                    null,
+                    parameterTypes,
                     null);
-                
+
                 if (methodInfo == null)
                 {
-                    throw new MissingMethodException(type.FullName, 
+                    throw new MissingMethodException(type.FullName,
                         $"{methodName}({string.Join(", ", parameterTypes.Select(t => t.Name))})");
                 }
             }
@@ -300,7 +300,7 @@ namespace PythonScript.Runtime
                 var methods = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.FlattenHierarchy)
                     .Where(m => m.Name == methodName)
                     .ToArray();
-                
+
                 if (methods.Length == 0)
                 {
                     throw new MissingMethodException(type.FullName, methodName);
@@ -313,7 +313,7 @@ namespace PythonScript.Runtime
                 else
                 {
                     // 有多个重载，抛出更友好的异常
-                    var signatures = string.Join(", ", methods.Select(m => 
+                    var signatures = string.Join(", ", methods.Select(m =>
                         $"{m.Name}({string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name))})"));
                     throw new AmbiguousMatchException(
                         $"方法 '{methodName}' 有 {methods.Length} 个重载。请使用带参数类型的重载版本指定具体方法签名。可用签名: {signatures}");
@@ -336,10 +336,10 @@ namespace PythonScript.Runtime
             Session.WithGil(() =>
             {
                 var targetScope = EffectiveScope(scope);
-                
+
                 // 尝试通过已导入的类型对象获取静态方法
                 using var classObj = targetScope.Get(classAlias);
-                
+
                 // 检查是否有对应的静态方法
                 if (classObj.HasAttr(methodName))
                 {
@@ -353,7 +353,7 @@ namespace PythonScript.Runtime
                     // 这适用于嵌套类型或私有类型，pythonnet 无法直接暴露静态方法
                     var parameters = methodInfo.GetParameters();
                     int paramCount = parameters.Length;
-                    
+
                     // 创建一个 C# 委托，在调用时进行参数转换
                     Func<PyObject[], object?> wrapper = (PyObject[] pyArgs) =>
                     {
@@ -361,7 +361,7 @@ namespace PythonScript.Runtime
                         {
                             throw new ArgumentException($"Expected {paramCount} arguments, got {pyArgs.Length}");
                         }
-                        
+
                         var convertedArgs = new object?[paramCount];
                         for (int i = 0; i < paramCount; i++)
                         {
@@ -370,12 +370,12 @@ namespace PythonScript.Runtime
 
                         return methodInfo.Invoke(null, convertedArgs);
                     };
-                    
+
                     // 将包装器注入到 Python scope
                     string wrapperVarName = $"__cs_wrapper_{pythonName}_{Guid.NewGuid():N}";
                     using var pyWrapper = wrapper.ToPython();
                     targetScope.Set(wrapperVarName, pyWrapper);
-                    
+
                     // 生成 Python 包装函数
                     var code = new StringBuilder();
                     code.Append("def ").Append(pythonName).Append('(');
@@ -393,7 +393,7 @@ namespace PythonScript.Runtime
                     }
                     code.AppendLine("]");
                     code.Append("    return ").Append(wrapperVarName).AppendLine("(args)");
-                    
+
                     targetScope.Exec(code.ToString());
                 }
             });
@@ -409,31 +409,10 @@ namespace PythonScript.Runtime
             Session.WithGil(() =>
             {
                 dynamic clr = Py.Import("clr");
-                string? location = assembly.Location;
-
-                bool loaded = false;
-
-                if (!string.IsNullOrEmpty(location) && File.Exists(location))
-                {
-                    // pythonnet 2.x 提供 AddReferenceToFileAndPath，但在 3.x 已被移除
-                    if (clr.HasAttr("AddReferenceToFileAndPath"))
-                    {
-                        try
-                        {
-                            clr.AddReferenceToFileAndPath(location);
-                            loaded = true;
-                        }
-                        catch
-                        {
-                            // fall through to AddReference
-                        }
-                    }
-                }
-
-                if (!loaded)
-                {
-                    clr.AddReference(assembly.GetName().Name);
-                }
+                var assemblyName = assembly.GetName().Name
+                    ?? throw new InvalidOperationException(
+                        "A loaded assembly must have a simple name before it can be imported into Python.");
+                clr.AddReference(assemblyName);
             });
         }
 

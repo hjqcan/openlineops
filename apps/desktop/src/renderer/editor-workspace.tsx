@@ -25,12 +25,14 @@ const EditorDocumentContext = createContext<EditorDocumentContextValue | null>(n
 
 export interface EditorDocumentState {
   dirty: boolean;
+  editRevision: unknown;
   canSave: boolean;
   save(): Promise<void>;
   revert(): Promise<void>;
   focus?(targetId: string | null): void;
   problems?: EditorProblem[];
   conflict?: EditorDocumentConflict | null;
+  busy?: boolean;
 }
 
 export function EditorDocumentHost({
@@ -77,14 +79,16 @@ export function useEditorDocument(state: EditorDocumentState): {
     }
     context.registry.update(context.documentId, {
       dirty: state.dirty,
+      editRevision: state.editRevision,
       canSave: state.canSave,
       save: () => latestRef.current.save(),
       revert: () => latestRef.current.revert(),
       focus: targetId => latestRef.current.focus?.(targetId),
       problems: state.problems ?? [],
-      conflict: state.conflict ?? null
+      conflict: state.conflict ?? null,
+      busy: state.busy ?? false
     });
-  }, [context, state.canSave, state.conflict, state.dirty, state.problems]);
+  }, [context, state.busy, state.canSave, state.conflict, state.dirty, state.editRevision, state.problems]);
 
   return useMemo(() => ({
     markDirty: () => {
@@ -208,6 +212,7 @@ export function EditorConflictNotice({ document }: { document: EditorDocumentReg
   if (!conflict) {
     return null;
   }
+  const actionsDisabled = document.saving || document.busy;
 
   return (
     <div className="editor-conflict-notice" role="alert" data-testid="editor-external-conflict">
@@ -216,10 +221,10 @@ export function EditorConflictNotice({ document }: { document: EditorDocumentReg
         <strong>This file changed outside this editor.</strong>
         <small>Loaded {shortRevision(conflict.loadedRevision)} · Current {shortRevision(conflict.currentRevision)}</small>
       </span>
-      <button type="button" className="button" onClick={() => void conflict.reload()} data-testid="conflict-reload">
+      <button type="button" className="button" disabled={actionsDisabled} onClick={() => void conflict.reload().catch(() => undefined)} data-testid="conflict-reload">
         Reload
       </button>
-      <button type="button" className="button danger" onClick={() => void conflict.overwrite()} data-testid="conflict-keep-editor">
+      <button type="button" className="button danger" disabled={actionsDisabled} onClick={() => void conflict.overwrite().catch(() => undefined)} data-testid="conflict-keep-editor">
         Keep Editor &amp; Overwrite
       </button>
     </div>

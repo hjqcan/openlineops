@@ -3,24 +3,25 @@ using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class PlatformApiTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class PlatformApiTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
     private readonly HttpClient _client;
 
-    public PlatformApiTests(WebApplicationFactory<Program> factory)
+    public PlatformApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        _client = factory.CreateAuthenticatedClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
         });
     }
 
     [Fact]
-    public async Task HealthLiveReturnsOk()
+    public async Task HealthLiveReturnsMinimalNoContent()
     {
         using var response = await _client.GetAsync("/health/live");
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
     }
 
     [Fact]

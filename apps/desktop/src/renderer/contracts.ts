@@ -23,16 +23,6 @@ export type RuntimeSessionStatus =
   | 'Failed'
   | 'Canceled';
 
-export type RuntimeCommandStatus =
-  | 'Pending'
-  | 'Accepted'
-  | 'InProgress'
-  | 'Completed'
-  | 'Failed'
-  | 'TimedOut'
-  | 'Canceled'
-  | 'Rejected';
-
 export interface RuntimeMonitoringScope {
   projectId: string;
   applicationId: string;
@@ -98,7 +88,7 @@ export interface RuntimeTargetStatus {
   actionId: string;
   targetKind: string;
   targetId: string;
-  commandStatus: RuntimeCommandStatus;
+  commandStatus: ExecutionStatus;
   lastTransitionAtUtc: string;
   isTerminal: boolean;
   failureReason: string | null;
@@ -159,6 +149,7 @@ export interface RuntimeAlarmsResponse {
 export interface TraceRecordSummary {
   traceRecordId: string;
   productionRunId: string;
+  productionUnitId: string;
   projectId: string;
   applicationId: string;
   projectSnapshotId: string;
@@ -170,8 +161,8 @@ export interface TraceRecordSummary {
   lotId: string | null;
   carrierId: string | null;
   actorId: string;
-  executionStatus: ProductionExecutionStatus;
-  judgement: ProductionResultJudgement;
+  executionStatus: ExecutionStatus;
+  judgement: ResultJudgement;
   disposition: ProductionDisposition;
   completedAtUtc: string;
   operationCount: number;
@@ -181,6 +172,10 @@ export interface TraceRecordSummary {
   artifactCount: number;
   incidentCount: number;
   routeDecisionCount: number;
+  genealogyCount: number;
+  materialLocationTransitionCount: number;
+  slotOccupancyTransitionCount: number;
+  dispositionTransitionCount: number;
 }
 
 export interface TraceRecordQueryResponse {
@@ -194,6 +189,7 @@ export interface TraceRecordQueryResponse {
 export interface TraceRecordResponse {
   traceRecordId: string;
   productionRunId: string;
+  productionUnitId: string;
   projectId: string;
   applicationId: string;
   projectSnapshotId: string;
@@ -205,8 +201,8 @@ export interface TraceRecordResponse {
   lotId: string | null;
   carrierId: string | null;
   actorId: string;
-  executionStatus: ProductionExecutionStatus;
-  judgement: ProductionResultJudgement;
+  executionStatus: ExecutionStatus;
+  judgement: ResultJudgement;
   disposition: ProductionDisposition;
   createdAtUtc: string;
   startedAtUtc: string | null;
@@ -215,7 +211,84 @@ export interface TraceRecordResponse {
   failureReason: string | null;
   operations: TraceOperationExecutionResponse[];
   routeDecisions: TraceRouteDecisionResponse[];
+  genealogy: TraceMaterialGenealogyResponse[];
+  materialLocationTransitions: TraceMaterialLocationTransitionResponse[];
+  slotOccupancyTransitions: TraceSlotOccupancyTransitionResponse[];
+  dispositionTransitions: TraceDispositionTransitionResponse[];
   auditEntries: AuditEntryResponse[];
+}
+
+export interface TraceMaterialLocationResponse {
+  kind: MaterialLocationKind;
+  lineId: string | null;
+  stationSystemId: string | null;
+  slotId: string | null;
+  carrierId: string | null;
+  carrierPositionId: string | null;
+}
+
+export interface TraceMaterialLocationTransitionResponse {
+  evidenceId: string;
+  productionRunId: string | null;
+  materialKind: ProductionMaterialKind;
+  materialId: string;
+  source: TraceMaterialLocationResponse | null;
+  destination: TraceMaterialLocationResponse;
+  actorId: string;
+  occurredAtUtc: string;
+}
+
+export interface TraceSlotOccupancyTransitionResponse {
+  evidenceId: string;
+  productionRunId: string | null;
+  lineId: string;
+  stationSystemId: string;
+  slotId: string;
+  materialKind: ProductionMaterialKind | null;
+  materialId: string | null;
+  previousStatus: ProductionSlotOccupancyStatus;
+  currentStatus: ProductionSlotOccupancyStatus;
+  actorId: string;
+  occurredAtUtc: string;
+}
+
+export interface TraceDispositionTransitionResponse {
+  evidenceId: string;
+  productionUnitId: string;
+  productionRunId: string | null;
+  previousDisposition: ProductionDisposition;
+  currentDisposition: ProductionDisposition;
+  reason: string | null;
+  actorId: string;
+  occurredAtUtc: string;
+}
+
+export interface TraceMaterialGenealogyResponse {
+  linkId: string;
+  parentProductionUnitId: string;
+  childProductionUnitId: string;
+  relationship: string;
+  operationId: string;
+  linkedBy: string;
+  linkedAtUtc: string;
+}
+
+export interface ProductionUnitMaterialLifecycleResponse {
+  productionUnitId: string;
+  productModelId: string;
+  productionUnitIdentityInputKey: string;
+  productionUnitIdentityValue: string;
+  lotId: string | null;
+  currentDisposition: ProductionDisposition;
+  dispositionReason: string | null;
+  currentLocation: TraceMaterialLocationResponse | null;
+  currentCarrierLocation: TraceMaterialLocationResponse | null;
+  registeredAtUtc: string;
+  observedThroughUtc: string;
+  genealogy: TraceMaterialGenealogyResponse[];
+  materialLocationTransitions: TraceMaterialLocationTransitionResponse[];
+  slotOccupancyTransitions: TraceSlotOccupancyTransitionResponse[];
+  dispositionTransitions: TraceDispositionTransitionResponse[];
 }
 
 export interface TraceOperationExecutionResponse {
@@ -230,8 +303,8 @@ export interface TraceOperationExecutionResponse {
   recipeSnapshotId: string;
   runtimeSessionId: string | null;
   runtimeSessionStatus: string | null;
-  executionStatus: ProductionExecutionStatus;
-  judgement: ProductionResultJudgement;
+  executionStatus: ExecutionStatus;
+  judgement: ResultJudgement;
   startedAtUtc: string | null;
   completedAtUtc: string;
   failureCode: string | null;
@@ -250,8 +323,9 @@ export interface TraceOperationExecutionResponse {
 export interface TraceRouteDecisionResponse {
   sourceOperationRunId: string;
   transitionId: string;
-  targetOperationId: string;
-  sourceJudgement: ProductionResultJudgement;
+  targetOperationId: string | null;
+  terminalDisposition: ProductionTerminalDisposition | null;
+  sourceJudgement: ResultJudgement;
   traversal: number;
   decidedAtUtc: string;
 }
@@ -276,8 +350,8 @@ export interface TraceCommandResponse {
   targetId: string;
   targetCapabilityId: string;
   commandName: string;
-  status: string;
-  resultJudgement: ProductionResultJudgement | null;
+  executionStatus: ExecutionStatus;
+  resultJudgement: ResultJudgement;
   createdAtUtc: string;
   deadlineAtUtc: string;
   acceptedAtUtc: string | null;
@@ -298,7 +372,8 @@ export interface MeasurementRecordResponse {
   actionId: string;
   targetKind: string;
   targetId: string;
-  commandStatus: string;
+  commandExecutionStatus: ExecutionStatus;
+  commandResultJudgement: ResultJudgement;
   passed: boolean | null;
   measuredAtUtc: string;
 }
@@ -397,8 +472,8 @@ export interface EngineeringTraceSearchRowResponse {
   lotId: string | null;
   carrierId: string | null;
   actorId: string;
-  executionStatus: ProductionExecutionStatus;
-  judgement: ProductionResultJudgement;
+  executionStatus: ExecutionStatus;
+  judgement: ResultJudgement;
   disposition: ProductionDisposition;
   createdAtUtc: string;
   startedAtUtc: string | null;
@@ -412,6 +487,10 @@ export interface EngineeringTraceSearchRowResponse {
   artifactCount: number;
   incidentCount: number;
   routeDecisionCount: number;
+  genealogyCount: number;
+  materialLocationTransitionCount: number;
+  slotOccupancyTransitionCount: number;
+  dispositionTransitionCount: number;
 }
 
 export interface EngineeringTraceSearchFacetsResponse {
@@ -590,7 +669,6 @@ export interface SubmitProductionRunRequest {
   projectSnapshotId: string;
   productionRunId: string;
   productionUnitId: string;
-  actorId: string;
 }
 
 export interface RegisterProductionUnitRequest {
@@ -599,7 +677,6 @@ export interface RegisterProductionUnitRequest {
   identityKey: string;
   identityValue: string;
   lotId: string | null;
-  actorId: string;
   occurredAtUtc: string;
 }
 
@@ -611,7 +688,6 @@ export interface MaterialArrivalRequest {
   stationId: string;
   lineId: string;
   stationSystemId: string;
-  actorId: string;
   occurredAtUtc: string;
 }
 
@@ -635,7 +711,7 @@ export interface ProductionUnitResponse {
   location: MaterialLocationResponse | null;
 }
 
-export type ProductionExecutionStatus =
+export type ExecutionStatus =
   | 'Pending'
   | 'Running'
   | 'Completed'
@@ -644,7 +720,7 @@ export type ProductionExecutionStatus =
   | 'Canceled'
   | 'Rejected';
 
-export type ProductionResultJudgement =
+export type ResultJudgement =
   | 'Passed'
   | 'Failed'
   | 'Aborted'
@@ -657,6 +733,8 @@ export type ProductionDisposition =
   | 'Nonconforming'
   | 'Held'
   | 'Scrapped';
+
+export type ProductionTerminalDisposition = Exclude<ProductionDisposition, 'InProcess'>;
 
 export type ProductionRunControlState =
   | 'Active'
@@ -698,8 +776,8 @@ export interface ProductionRunReadModel {
   lotId: string | null;
   carrierId: string | null;
   actorId: string;
-  executionStatus: ProductionExecutionStatus;
-  judgement: ProductionResultJudgement;
+  executionStatus: ExecutionStatus;
+  judgement: ResultJudgement;
   disposition: ProductionDisposition;
   controlState: ProductionRunControlState;
   isTerminal: boolean;
@@ -729,8 +807,8 @@ export interface ProductionOperationRunReadModel {
   processVersionId: string;
   configurationSnapshotId: string;
   recipeSnapshotId: string;
-  executionStatus: ProductionExecutionStatus;
-  judgement: ProductionResultJudgement;
+  executionStatus: ExecutionStatus;
+  judgement: ResultJudgement;
   isTerminal: boolean;
   runtimeSessionId: string | null;
   startedAtUtc: string | null;
@@ -759,8 +837,9 @@ export interface ProductionRunOutputReadModel {
 export interface ProductionRouteDecisionReadModel {
   sourceOperationRunId: string;
   transitionId: string;
-  targetOperationId: string;
-  sourceJudgement: ProductionResultJudgement;
+  targetOperationId: string | null;
+  terminalDisposition: ProductionTerminalDisposition | null;
+  sourceJudgement: ResultJudgement;
   traversal: number;
   decidedAtUtc: string;
 }
@@ -774,7 +853,7 @@ export interface ProductionRecoveryDecisionReadModel {
   decidedAtUtc: string;
   operationRunId: string | null;
   operationId: string | null;
-  observedJudgement: ProductionResultJudgement | null;
+  observedJudgement: ResultJudgement | null;
   observedOutputs: ProductionRunOutputReadModel[];
 }
 
@@ -810,7 +889,7 @@ export interface ProductionLineProductionUnitStateResponse {
   identityKey: string;
   identityValue: string;
   disposition: ProductionDisposition;
-  judgement: ProductionResultJudgement;
+  judgement: ResultJudgement;
   productionRunId: string | null;
   location: MaterialLocationResponse | null;
   lastTransitionAtUtc: string;
@@ -827,10 +906,18 @@ export type ProductionLineStationRuntimeStatus =
 
 export type ProductionMaterialKind = 'ProductionUnit' | 'Carrier';
 
-export interface ProductionLineStationStateResponse {
-  stationSystemId: string;
-  status: ProductionLineStationRuntimeStatus;
-  queue: ProductionLineQueuedMaterialResponse[];
+  export interface ProductionLineStationStateResponse {
+    stationSystemId: string;
+    status: ProductionLineStationRuntimeStatus;
+    agentId: string | null;
+    stationId: string | null;
+    agentPresenceSessionId: string | null;
+    agentPresenceSequence: number | null;
+    agentPresenceState: 'Started' | 'Heartbeat' | 'Stopping' | null;
+    agentPresenceHealth: 'NotApplicable' | 'Missing' | 'Online' | 'Expired' | 'Stopping';
+    agentPresenceLastSeenAtUtc: string | null;
+    agentPresenceAgeSeconds: number | null;
+    queue: ProductionLineQueuedMaterialResponse[];
   activeOperations: ProductionLineStationOperationStateResponse[];
 }
 
@@ -846,8 +933,8 @@ export interface ProductionLineStationOperationStateResponse {
   productionUnitIdentity: RuntimeProductionUnitIdentityResponse;
   operationRunId: string;
   operationId: string;
-  executionStatus: ProductionExecutionStatus;
-  judgement: ProductionResultJudgement;
+  executionStatus: ExecutionStatus;
+  judgement: ResultJudgement;
   startedAtUtc: string | null;
   resources: ProductionLineResourceStateResponse[];
 }
@@ -900,7 +987,7 @@ export interface ProductionLineCarrierPositionStateResponse {
   carrierPositionId: string;
   productionUnitId: string;
   disposition: ProductionDisposition;
-  judgement: ProductionResultJudgement;
+  judgement: ResultJudgement;
 }
 
 export interface ProductionOperationsFilters {
@@ -910,7 +997,6 @@ export interface ProductionOperationsFilters {
 }
 
 export interface ProductionRunCommandRequest {
-  actorId: string;
   reason: string | null;
   operationId: string | null;
   recoveryDecision: ProductionRecoveryDecisionRequest | null;
@@ -939,7 +1025,6 @@ export interface RequestStationEmergencyStopRequest {
   projectId: string;
   applicationId: string;
   projectSnapshotId: string;
-  actorId: string;
   reason: string;
   requestedAtUtc: string;
 }
@@ -1062,6 +1147,8 @@ export interface AddAutomationSystemRequest {
 export interface UpdateAutomationSystemRequest {
   systemType?: string;
   displayName?: string;
+  requiredCapabilityIds?: string[];
+  providedCapabilityIds?: string[];
   metadata?: Record<string, string>;
 }
 
@@ -1279,6 +1366,7 @@ export interface ProductionLineResponse {
   operations: ProductionOperationResponse[];
   transitions: RouteTransitionResponse[];
   lineControllerAuthorizations: LineControllerAuthorization[];
+  routeLayout: ProductionRouteLayout;
   createdAtUtc: string;
   updatedAtUtc: string;
   revision: string;
@@ -1290,6 +1378,16 @@ export interface ProductModelResponse {
   identityInputKey: string;
 }
 
+export interface ProductionRouteLayout {
+  operationPositions: OperationCanvasPosition[];
+}
+
+export interface OperationCanvasPosition {
+  operationId: string;
+  x: number;
+  y: number;
+}
+
 export interface ProductionOperationResponse {
   operationId: string;
   displayName: string;
@@ -1297,6 +1395,14 @@ export interface ProductionOperationResponse {
   flowDefinitionId: string;
   configurationSnapshotId: string;
   resources: OperationResourceBinding[];
+  inputMappings: OperationInputMapping[];
+}
+
+export interface OperationInputMapping {
+  targetInputKey: string;
+  sourceOperationId: string;
+  sourceOutputKey: string;
+  expectedValueKind: ProductionContextValueKind;
 }
 
 export type OperationResourceKind = 'Station' | 'Fixture' | 'Device' | 'SlotGroup' | 'Slot';
@@ -1350,7 +1456,8 @@ export type RouteJudgement =
 export interface RouteTransitionResponse {
   transitionId: string;
   sourceOperationId: string;
-  targetOperationId: string;
+  targetOperationId: string | null;
+  terminalDisposition: ProductionTerminalDisposition | null;
   kind: RouteTransitionKind;
   requiredJudgement: RouteJudgement | null;
   maxTraversals: number | null;
@@ -1369,6 +1476,7 @@ export interface SaveProductionLineRequest {
   operations: ProductionOperationRequest[];
   transitions: RouteTransitionRequest[];
   lineControllerAuthorizations: LineControllerAuthorization[];
+  routeLayout: ProductionRouteLayout;
 }
 
 export interface ProductModelRequest {
@@ -1384,12 +1492,14 @@ export interface ProductionOperationRequest {
   flowDefinitionId: string;
   configurationSnapshotId: string;
   resources: OperationResourceBinding[];
+  inputMappings: OperationInputMapping[];
 }
 
 export interface RouteTransitionRequest {
   transitionId: string;
   sourceOperationId: string;
-  targetOperationId: string;
+  targetOperationId: string | null;
+  terminalDisposition: ProductionTerminalDisposition | null;
   kind: RouteTransitionKind;
   requiredJudgement: RouteJudgement | null;
   maxTraversals: number | null;
@@ -1680,10 +1790,14 @@ export interface ProcessGraphValidationReport {
   issues: ProcessGraphValidationIssue[];
 }
 
+export type ProcessGraphValidationTargetKind = 'Graph' | 'Node' | 'Transition';
+
 export interface ProcessGraphValidationIssue {
   severity: string;
   code: string;
   message: string;
+  targetKind: ProcessGraphValidationTargetKind;
+  targetId: string;
 }
 
 export interface CreateProcessDefinitionRequest {
@@ -1742,20 +1856,18 @@ export interface RegisterProcessBlocklyBlockDefinitionRequest {
   runtimeActionContract: Record<string, unknown>;
 }
 
-export interface PluginManagementOverviewResponse {
-  packages: PluginPackageResponse[];
-  capabilities: PluginCapabilityResponse[];
-  deviceCommands: PluginCommandResponse[];
-  processCommands: PluginCommandResponse[];
-  recentEvents: ExternalPluginProcessEventResponse[];
-}
-
-export interface PluginPackageResponse {
-  manifest: PluginManifestResponse;
-  packagePath: string;
+export interface ApplicationExtensionPackageResponse {
+  portableId: string;
+  pluginId: string;
+  version: string;
   manifestPath: string;
+  contentSha256: string;
+  manifestSha256: string;
+  entryAssemblySha256: string;
   isValid: boolean;
   validationIssues: PluginValidationIssueResponse[];
+  manifest: PluginManifestResponse;
+  files: ApplicationExtensionFileResponse[];
 }
 
 export interface PluginManifestResponse {
@@ -1767,6 +1879,8 @@ export interface PluginManifestResponse {
   entryType: string;
   contractVersion: string;
   minimumPlatformVersion: string;
+  runtimeIdentifier: string;
+  abiVersion: string;
   capabilities: string[];
   deviceCommands: PluginCommandDefinitionResponse[];
   processCommands: PluginCommandDefinitionResponse[];
@@ -1787,38 +1901,8 @@ export interface PluginValidationIssueResponse {
   message: string;
 }
 
-export interface PluginCapabilityResponse {
-  pluginId: string;
-  pluginName: string;
-  pluginKind: string;
-  capability: string;
-}
-
-export interface PluginCommandResponse {
-  pluginId: string;
-  pluginName: string;
-  pluginKind: string;
-  commandDefinitionId: string;
-  capability: string;
-  commandName: string;
-  inputSchema: string | null;
-  outputSchema: string | null;
-  timeoutMilliseconds: number;
-  maxRetries: number;
-}
-
-export interface PluginLifecycleRecordResponse {
-  manifest: PluginManifestResponse;
-  state: string;
-  initializationStatus: string;
-  validationIssues: PluginValidationIssueResponse[];
-  failureReason: string | null;
-}
-
-export interface ExternalPluginProcessEventResponse {
-  kind: string;
-  pluginId: string;
-  message: string;
-  occurredAtUtc: string;
-  detail: string | null;
+export interface ApplicationExtensionFileResponse {
+  relativePath: string;
+  sizeBytes: number;
+  sha256: string;
 }

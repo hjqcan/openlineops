@@ -16,12 +16,18 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="OpenLineOps.Application.Abstractions.ProjectWorkspaces" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\modules\OpenLineOps.Plugins.Application\OpenLineOps.Plugins.Application.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Plugins.Infrastructure\OpenLineOps.Plugins.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Projects.Infrastructure\OpenLineOps.Projects.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Projects.Application\OpenLineOps.Projects.Application.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Application.Abstractions\OpenLineOps.Application.Abstractions.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Plugin.Abstractions\OpenLineOps.Plugin.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\OpenLineOps.PluginHost\OpenLineOps.PluginHost.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\samples\plugins\OpenLineOps.SamplePlugins.QualityGate\OpenLineOps.SamplePlugins.QualityGate.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

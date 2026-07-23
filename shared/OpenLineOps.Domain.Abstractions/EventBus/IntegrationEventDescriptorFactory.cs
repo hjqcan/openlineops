@@ -14,7 +14,6 @@ public static class IntegrationEventDescriptorFactory
             {
                 yield return new IntegrationEventDescriptor(
                     integrationEvent.EventName,
-                    integrationEvent.Version,
                     domainEvent);
                 continue;
             }
@@ -24,7 +23,6 @@ public static class IntegrationEventDescriptorFactory
             {
                 yield return new IntegrationEventDescriptor(
                     attribute.EventName,
-                    attribute.Version,
                     domainEvent);
             }
         }

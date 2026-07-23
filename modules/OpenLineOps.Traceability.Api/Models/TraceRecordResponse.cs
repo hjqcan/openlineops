@@ -143,7 +143,8 @@ public sealed record TraceOperationExecutionResponse(
 public sealed record TraceRouteDecisionResponse(
     string SourceOperationRunId,
     string TransitionId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    string? TerminalDisposition,
     string SourceJudgement,
     int Traversal,
     DateTimeOffset DecidedAtUtc);
@@ -163,8 +164,8 @@ public sealed record TraceCommandResponse(
     string TargetId,
     string TargetCapabilityId,
     string CommandName,
-    string Status,
-    string? ResultJudgement,
+    string ExecutionStatus,
+    string ResultJudgement,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadlineAtUtc,
     DateTimeOffset? AcceptedAtUtc,
@@ -184,7 +185,8 @@ public sealed record MeasurementRecordResponse(
     string ActionId,
     string TargetKind,
     string TargetId,
-    string CommandStatus,
+    string CommandExecutionStatus,
+    string CommandResultJudgement,
     bool? Passed,
     DateTimeOffset MeasuredAtUtc);
 

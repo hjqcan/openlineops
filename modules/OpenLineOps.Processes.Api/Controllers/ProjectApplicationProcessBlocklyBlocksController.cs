@@ -9,6 +9,7 @@ using RegisterApiBlockRequest = OpenLineOps.Processes.Api.Models.RegisterProcess
 namespace OpenLineOps.Processes.Api.Controllers;
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.EngineeringPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Processes)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationProcessBlocklyBlocks)]
 public sealed class ProjectApplicationProcessBlocklyBlocksController : ControllerBase

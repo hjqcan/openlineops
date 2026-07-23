@@ -520,6 +520,58 @@ function Update-Or-Test-Notice {
     }
 }
 
+function Get-SdkAutoReferencedPackageKeys {
+    param([Parameter(Mandatory = $true)] $Assets)
+
+    $classifications = @{}
+    foreach ($target in @($Assets.targets.PSObject.Properties)) {
+        $frameworkName = $target.Name.Split("/")[0]
+        $framework = @($Assets.project.frameworks.PSObject.Properties | Where-Object {
+                $_.Name.Equals($frameworkName, [System.StringComparison]::OrdinalIgnoreCase)
+            } | Select-Object -First 1)
+
+        foreach ($targetLibrary in @($target.Value.PSObject.Properties)) {
+            if ($targetLibrary.Value.type -ne "package") {
+                continue
+            }
+
+            $parts = $targetLibrary.Name.Split("/")
+            if ($parts.Length -ne 2) {
+                continue
+            }
+
+            $isSdkAutoReferenced = $false
+            if ($framework.Count -gt 0) {
+                $dependencies = $framework[0].Value.dependencies
+                if ($null -ne $dependencies) {
+                    $dependency = @($dependencies.PSObject.Properties | Where-Object {
+                            $_.Name.Equals($parts[0], [System.StringComparison]::OrdinalIgnoreCase)
+                        } | Select-Object -First 1)
+                    $isSdkAutoReferenced = $dependency.Count -gt 0 -and $dependency[0].Value.autoReferenced -eq $true
+                }
+            }
+
+            $key = "$($parts[0])@$($parts[1])"
+            if (-not $classifications.ContainsKey($key)) {
+                $classifications[$key] = $isSdkAutoReferenced
+            }
+            elseif (-not $isSdkAutoReferenced) {
+                $classifications[$key] = $false
+            }
+        }
+    }
+
+    $result = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($classification in @($classifications.GetEnumerator())) {
+        if ($classification.Value) {
+            $result.Add($classification.Key) | Out-Null
+        }
+    }
+
+    return ,$result
+}
+
 function Get-NuGetPackages {
     $packages = @{}
 
@@ -529,6 +581,10 @@ function Get-NuGetPackages {
         if ([string]::IsNullOrWhiteSpace($packagesPath)) {
             continue
         }
+
+        # Publish properties can inject SDK build tools into restore assets. Packages
+        # that are auto-referenced in every target are not product dependencies.
+        $sdkAutoReferencedPackageKeys = Get-SdkAutoReferencedPackageKeys -Assets $assets
 
         foreach ($library in @($assets.libraries.PSObject.Properties)) {
             if ($library.Value.type -ne "package") {
@@ -543,7 +599,12 @@ function Get-NuGetPackages {
             $id = $parts[0]
             $version = $parts[1]
             $key = "$id@$version"
+            $isSdkAutoReferenced = $sdkAutoReferencedPackageKeys.Contains($key)
             if ($packages.ContainsKey($key)) {
+                if (-not $isSdkAutoReferenced) {
+                    $packages[$key].SdkAutoReferencedOnly = $false
+                }
+
                 continue
             }
 
@@ -560,11 +621,13 @@ function Get-NuGetPackages {
                 License = ""
                 LicenseSource = ""
                 Ecosystem = "nuget"
+                SdkAutoReferencedOnly = $isSdkAutoReferenced
             }
         }
     }
 
-    foreach ($package in @($packages.Values)) {
+    $declaredAndTransitivePackages = @($packages.Values | Where-Object { -not $_.SdkAutoReferencedOnly })
+    foreach ($package in $declaredAndTransitivePackages) {
         if ([string]::IsNullOrWhiteSpace($package.NuspecPath) -or -not (Test-Path -LiteralPath $package.NuspecPath -PathType Leaf)) {
             Add-Failure "NuGet package $($package.Name) $($package.Version) is missing local nuspec metadata."
             continue
@@ -585,7 +648,7 @@ function Get-NuGetPackages {
         }
     }
 
-    return @(Sort-PackageMetadata -Packages @($packages.Values) -Properties @("Name", "Version"))
+    return @(Sort-PackageMetadata -Packages $declaredAndTransitivePackages -Properties @("Name", "Version"))
 }
 
 function Get-NpmPackages {

@@ -7,6 +7,8 @@ namespace OpenLineOps.Plugins.Tests;
 
 public sealed class PluginProcessCommandInventoryTests
 {
+    private static readonly ProjectApplicationWorkspaceScope Scope = PluginTestScope.Create();
+
     [Fact]
     public async Task ListProcessCommandsAsyncReturnsCommandsFromCompatibleManifestsOnly()
     {
@@ -26,7 +28,7 @@ public sealed class PluginProcessCommandInventoryTests
                     contractVersion: "2.0.0"))),
             new PluginManifestValidator());
 
-        var commands = await inventory.ListProcessCommandsAsync();
+        var commands = await inventory.ListProcessCommandsAsync(Scope);
 
         Assert.Equal(2, commands.Count);
         Assert.Contains(commands, command =>
@@ -46,16 +48,16 @@ public sealed class PluginProcessCommandInventoryTests
                 [Command("process.vision:inspect", "process.vision", "Inspect")]))),
             new PluginManifestValidator());
 
-        var command = await inventory.FindProcessCommandAsync("process.vision", "Inspect");
+        var command = await inventory.FindProcessCommandAsync("process.vision", "Inspect", Scope);
 
         Assert.NotNull(command);
         Assert.Equal("process.vision:inspect", command.CommandDefinitionId);
-        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", "inspect"));
-        Assert.Null(await inventory.FindProcessCommandAsync(" process.vision ", "Inspect"));
-        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", " Inspect "));
-        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", "Classify"));
-        Assert.Null(await inventory.FindProcessCommandAsync("process.robot", "Inspect"));
-        Assert.Null(await inventory.FindProcessCommandAsync(" ", "Inspect"));
+        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", "inspect", Scope));
+        Assert.Null(await inventory.FindProcessCommandAsync(" process.vision ", "Inspect", Scope));
+        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", " Inspect ", Scope));
+        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", "Classify", Scope));
+        Assert.Null(await inventory.FindProcessCommandAsync("process.robot", "Inspect", Scope));
+        Assert.Null(await inventory.FindProcessCommandAsync(" ", "Inspect", Scope));
     }
 
     [Fact]
@@ -74,11 +76,11 @@ public sealed class PluginProcessCommandInventoryTests
                 30000,
                 0));
 
-        Assert.NotNull(await inventory.FindProcessCommandAsync("process.vision", "Inspect"));
-        Assert.Null(await inventory.FindProcessCommandAsync("Process.Vision", "Inspect"));
-        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", "inspect"));
-        Assert.Null(await inventory.FindProcessCommandAsync(" process.vision ", "Inspect"));
-        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", " Inspect "));
+        Assert.NotNull(await inventory.FindProcessCommandAsync("process.vision", "Inspect", Scope));
+        Assert.Null(await inventory.FindProcessCommandAsync("Process.Vision", "Inspect", Scope));
+        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", "inspect", Scope));
+        Assert.Null(await inventory.FindProcessCommandAsync(" process.vision ", "Inspect", Scope));
+        Assert.Null(await inventory.FindProcessCommandAsync("process.vision", " Inspect ", Scope));
     }
 
     private static PluginPackageDescriptor Package(PluginManifest manifest)
@@ -117,6 +119,7 @@ public sealed class PluginProcessCommandInventoryTests
         params PluginPackageDescriptor[] packages) : IPluginPackageCatalog
     {
         public ValueTask<IReadOnlyCollection<PluginPackageDescriptor>> DiscoverAsync(
+            ProjectApplicationWorkspaceScope scope,
             CancellationToken cancellationToken = default)
         {
             return ValueTask.FromResult<IReadOnlyCollection<PluginPackageDescriptor>>(packages);
@@ -127,6 +130,7 @@ public sealed class PluginProcessCommandInventoryTests
         params PluginProcessCommandDescriptor[] commands) : IPluginProcessCommandInventory
     {
         public ValueTask<IReadOnlyCollection<PluginProcessCommandDescriptor>> ListProcessCommandsAsync(
+            ProjectApplicationWorkspaceScope scope,
             CancellationToken cancellationToken = default)
         {
             return ValueTask.FromResult<IReadOnlyCollection<PluginProcessCommandDescriptor>>(commands);

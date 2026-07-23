@@ -1,78 +1,56 @@
-using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
-using OpenLineOps.Plugin.Abstractions;
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Plugins.Application.Discovery;
-using OpenLineOps.Plugins.Infrastructure.Serialization;
 
 namespace OpenLineOps.Plugins.Infrastructure.Discovery;
 
-public sealed class FileSystemPluginPackageCatalog : IPluginPackageCatalog
+public sealed class FileSystemPluginPackageCatalog(
+    IProjectApplicationPluginPackageReferenceStore referenceStore) : IPluginPackageCatalog
 {
-    public const string ManifestFileName = "manifest.json";
-
-    private readonly string _rootDirectory;
-
-    public FileSystemPluginPackageCatalog(string rootDirectory)
-    {
-        _rootDirectory = string.IsNullOrWhiteSpace(rootDirectory)
-            ? throw new ArgumentException("Plugin root directory is required.", nameof(rootDirectory))
-            : Path.GetFullPath(rootDirectory);
-    }
+    private static readonly StringComparison PathComparison = OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
 
     public async ValueTask<IReadOnlyCollection<PluginPackageDescriptor>> DiscoverAsync(
+        ProjectApplicationWorkspaceScope scope,
         CancellationToken cancellationToken = default)
     {
-        if (!Directory.Exists(_rootDirectory))
+        ArgumentNullException.ThrowIfNull(scope);
+        var references = ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(
+            await referenceStore.ReadAsync(scope, cancellationToken).ConfigureAwait(false));
+        if (references.Length == 0)
         {
             return [];
         }
 
-        List<PluginPackageDescriptor> packages = [];
-
-        foreach (var manifestPath in EnumerateManifestPaths())
+        EnsureDirectory(scope.ApplicationRootPath, "Application root");
+        EnsureDirectory(scope.PluginsRootPath, "Application plugins directory");
+        var packages = new List<PluginPackageDescriptor>(references.Length);
+        foreach (var reference in references)
         {
             cancellationToken.ThrowIfCancellationRequested();
-
-            await using var stream = File.OpenRead(manifestPath);
-            var manifest = await JsonSerializer
-                .DeserializeAsync<PluginManifest>(
-                    stream,
-                    PluginJsonContracts.ManifestOptions,
-                    cancellationToken)
+            var portableId = ProjectApplicationPluginPackageReferenceContract.GetPortableId(
+                reference.ManifestPath);
+            var packagePath = ResolveInsidePluginsRoot(scope.PluginsRootPath, portableId);
+            var expectedManifestPath = Path.Combine(
+                packagePath,
+                ProjectApplicationPluginPackageReferenceContract.ManifestFileName);
+            var descriptor = await FileSystemPluginPackageInspector
+                .InspectAsync(packagePath, cancellationToken)
                 .ConfigureAwait(false);
 
-            if (manifest is null)
+            if (!string.Equals(descriptor.ManifestPath, expectedManifestPath, PathComparison)
+                || !string.Equals(descriptor.Manifest.Id, reference.PluginId, StringComparison.Ordinal)
+                || !string.Equals(descriptor.Manifest.Version, reference.Version, StringComparison.Ordinal)
+                || !string.Equals(
+                    descriptor.PackageContentSha256,
+                    reference.ContentSha256,
+                    StringComparison.Ordinal))
             {
-                throw new InvalidDataException($"Plugin manifest '{manifestPath}' is empty or invalid.");
+                throw new InvalidDataException(
+                    $"Application plugin reference '{reference.PluginId}' does not match its exact package identity, version, path, or full-tree SHA-256.");
             }
 
-            var entryAssemblyRelativePath = PluginJsonContracts
-                .RequireCanonicalEntryAssembly(manifest.EntryAssembly);
-            var packagePath = Path.GetDirectoryName(manifestPath) ?? _rootDirectory;
-            var files = await InspectPackageAsync(packagePath, cancellationToken).ConfigureAwait(false);
-            var manifestRelativePath = GetRelativePath(packagePath, manifestPath);
-            var entryAssemblyPath = ResolveInsidePackage(packagePath, entryAssemblyRelativePath);
-            var manifestFile = files.Single(file => string.Equals(
-                file.RelativePath,
-                manifestRelativePath,
-                StringComparison.Ordinal));
-            var entryAssemblyFile = files.SingleOrDefault(file => string.Equals(
-                file.RelativePath,
-                entryAssemblyRelativePath,
-                StringComparison.Ordinal));
-
-            packages.Add(new PluginPackageDescriptor(
-                manifest,
-                packagePath,
-                manifestPath,
-                ComputePackageContentSha256(files),
-                manifestFile.Sha256,
-                entryAssemblyFile?.Sha256 ?? string.Empty,
-                manifestRelativePath,
-                File.Exists(entryAssemblyPath) ? entryAssemblyRelativePath : string.Empty,
-                files));
+            packages.Add(descriptor);
         }
 
         return packages
@@ -80,125 +58,28 @@ public sealed class FileSystemPluginPackageCatalog : IPluginPackageCatalog
             .ToArray();
     }
 
-    private IEnumerable<string> EnumerateManifestPaths()
+    private static string ResolveInsidePluginsRoot(string pluginsRootPath, string portableId)
     {
-        return Directory
-            .EnumerateFiles(_rootDirectory, "*.json", SearchOption.AllDirectories)
-            .Where(path => string.Equals(
-                Path.GetFileName(path),
-                ManifestFileName,
-                StringComparison.Ordinal))
-            .Select(Path.GetFullPath)
-            .OrderBy(path => path, StringComparer.Ordinal);
-    }
-
-    private static async ValueTask<PluginPackageFileDescriptor[]> InspectPackageAsync(
-        string packagePath,
-        CancellationToken cancellationToken)
-    {
-        RejectReparsePoint(packagePath);
-        var files = new List<PluginPackageFileDescriptor>();
-        var pendingDirectories = new Stack<string>();
-        pendingDirectories.Push(Path.GetFullPath(packagePath));
-
-        while (pendingDirectories.Count > 0)
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(pluginsRootPath));
+        var candidate = Path.GetFullPath(Path.Combine(root, portableId));
+        if (!candidate.StartsWith(root + Path.DirectorySeparatorChar, PathComparison))
         {
-            var directory = pendingDirectories.Pop();
-            foreach (var entry in Directory.EnumerateFileSystemEntries(
-                         directory,
-                         "*",
-                         SearchOption.TopDirectoryOnly))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                RejectReparsePoint(entry);
-                var attributes = File.GetAttributes(entry);
-                if ((attributes & FileAttributes.Directory) != 0)
-                {
-                    pendingDirectories.Push(entry);
-                    continue;
-                }
-
-                var relativePath = GetRelativePath(packagePath, entry);
-                await using var stream = new FileStream(
-                    entry,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.Read,
-                    64 * 1024,
-                    FileOptions.Asynchronous | FileOptions.SequentialScan);
-                var sha256 = Convert.ToHexString(
-                        await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false))
-                    .ToLowerInvariant();
-                files.Add(new PluginPackageFileDescriptor(
-                    relativePath,
-                    new FileInfo(entry).Length,
-                    sha256));
-            }
+            throw new InvalidDataException("Application plugin package path escapes the plugins directory.");
         }
 
-        return files.OrderBy(file => file.RelativePath, StringComparer.Ordinal).ToArray();
+        return candidate;
     }
 
-    private static string ComputePackageContentSha256(
-        IReadOnlyCollection<PluginPackageFileDescriptor> files)
+    private static void EnsureDirectory(string path, string description)
     {
-        var canonical = new StringBuilder();
-        foreach (var file in files.OrderBy(file => file.RelativePath, StringComparer.Ordinal))
+        if (!Directory.Exists(path))
         {
-            canonical.Append(file.RelativePath)
-                .Append('\0')
-                .Append(file.SizeBytes.ToString(CultureInfo.InvariantCulture))
-                .Append('\0')
-                .Append(file.Sha256)
-                .Append('\n');
+            throw new DirectoryNotFoundException($"{description} '{path}' does not exist.");
         }
 
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString())))
-            .ToLowerInvariant();
-    }
-
-    private static string GetRelativePath(string packagePath, string fullPath)
-    {
-        var relativePath = Path.GetRelativePath(packagePath, fullPath)
-            .Replace(Path.DirectorySeparatorChar, '/')
-            .Replace(Path.AltDirectorySeparatorChar, '/');
-        if (relativePath.StartsWith("../", StringComparison.Ordinal)
-            || string.Equals(relativePath, "..", StringComparison.Ordinal)
-            || relativePath.Any(char.IsControl))
-        {
-            throw new InvalidDataException(
-                $"Plugin package path '{fullPath}' is not a canonical package-relative path.");
-        }
-
-        return relativePath;
-    }
-
-    private static string ResolveInsidePackage(string packagePath, string relativePath)
-    {
-        var root = Path.GetFullPath(packagePath)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (string.IsNullOrWhiteSpace(relativePath))
-        {
-            return root;
-        }
-
-        var candidate = Path.GetFullPath(Path.Combine(
-            root,
-            relativePath.Replace('/', Path.DirectorySeparatorChar)));
-        var comparison = OperatingSystem.IsWindows()
-            ? StringComparison.OrdinalIgnoreCase
-            : StringComparison.Ordinal;
-        return candidate.StartsWith(root + Path.DirectorySeparatorChar, comparison)
-            ? candidate
-            : root;
-    }
-
-    private static void RejectReparsePoint(string path)
-    {
         if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
         {
-            throw new InvalidDataException(
-                $"Plugin package path '{path}' is a reparse point and cannot be hashed.");
+            throw new InvalidDataException($"{description} '{path}' is a reparse point.");
         }
     }
 }

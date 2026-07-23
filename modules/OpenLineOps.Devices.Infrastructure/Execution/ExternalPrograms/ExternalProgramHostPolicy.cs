@@ -1,5 +1,6 @@
 using System.Runtime.Versioning;
 using System.Security.Principal;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.Devices.Application.Execution.ExternalPrograms;
 using OpenLineOps.ProcessIsolation;
 
@@ -110,58 +111,40 @@ internal sealed record EffectiveExternalProgramPolicy(
 }
 
 internal sealed record ExternalProgramHostIdentity(
-    string Name,
-    string Sid,
-    bool IsAuthenticated,
-    bool IsSystem,
-    bool IsAdministrator);
+    string HostAccountSid,
+    string ServiceSid,
+    bool ServiceLogonSidEnabled,
+    bool IsRestrictedToken,
+    bool ServiceSidEnabled,
+    bool ServiceSidRestricted);
 
 internal interface IExternalProgramHostIdentityReader
 {
-    ExternalProgramHostIdentity Read();
+    ExternalProgramHostIdentity Read(string requiredServiceSid);
 }
 
 internal sealed class WindowsExternalProgramHostIdentityReader : IExternalProgramHostIdentityReader
 {
-    public ExternalProgramHostIdentity Read()
+    [SupportedOSPlatform("windows")]
+    internal static TokenAccessLevels RequiredTokenAccess =>
+        TokenAccessLevels.Query;
+
+    public ExternalProgramHostIdentity Read(string requiredServiceSid)
     {
         if (!OperatingSystem.IsWindows())
         {
-            return new ExternalProgramHostIdentity(
-                Environment.UserName,
-                Environment.UserName,
-                IsAuthenticated: true,
-                IsSystem: false,
-                IsAdministrator: false);
+            throw new PlatformNotSupportedException(
+                "Restricted Station service identity validation requires Windows.");
         }
 
-        return ReadWindows();
-    }
-
-    [SupportedOSPlatform("windows")]
-    private static ExternalProgramHostIdentity ReadWindows()
-    {
-        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
-        var sid = identity.User
-                  ?? throw new InvalidOperationException("External program host identity has no SID.");
-        var isAdministrator = false;
-        try
-        {
-            isAdministrator = new WindowsPrincipal(identity)
-                .IsInRole(WindowsBuiltInRole.Administrator);
-        }
-        catch (System.Security.SecurityException)
-        {
-            isAdministrator = true;
-        }
-
+        var identity = WindowsStationServiceIdentityReader.ReadRequired(requiredServiceSid);
         return new ExternalProgramHostIdentity(
-            identity.Name,
-            sid.Value,
-            !string.IsNullOrWhiteSpace(identity.AuthenticationType)
-            && !sid.IsWellKnown(WellKnownSidType.AnonymousSid),
-            sid.IsWellKnown(WellKnownSidType.LocalSystemSid),
-            isAdministrator);
+            identity.HostAccountSid,
+            identity.ServiceSid,
+            identity.ServiceLogonSidEnabled,
+            identity.IsRestrictedToken,
+            identity.ServiceSidEnabled,
+            identity.ServiceSidRestricted);
     }
 }
 
@@ -187,7 +170,6 @@ internal sealed class ExternalProgramHostPolicyEnforcer
                 "External program AppContainer isolation requires Windows and cannot be downgraded.");
         }
 
-        var identity = _identityReader.Read();
         if (!resourcePolicy.NetworkAccessAllowed && !_options.RequireAppContainerIsolation)
         {
             throw new InvalidOperationException(
@@ -196,25 +178,41 @@ internal sealed class ExternalProgramHostPolicyEnforcer
 
         if (!_options.RequireRestrictedHostIdentity)
         {
-            return identity;
+            return new ExternalProgramHostIdentity(
+                HostAccountSid: string.Empty,
+                ServiceSid: string.Empty,
+                ServiceLogonSidEnabled: false,
+                IsRestrictedToken: false,
+                ServiceSidEnabled: false,
+                ServiceSidRestricted: false);
         }
 
-        if (!identity.IsAuthenticated || identity.IsSystem || identity.IsAdministrator)
+        var requiredServiceSid = _options.RestrictedServiceSid
+                                 ?? throw new InvalidOperationException(
+                                     "Restricted external program hosting requires one exact Station service SID.");
+        if (!WindowsStationServiceIdentityReader.IsCanonicalServiceSid(requiredServiceSid))
         {
             throw new InvalidOperationException(
-                "External programs require an authenticated, non-SYSTEM, non-administrative service identity.");
+                "Restricted external program hosting requires a canonical Windows service SID.");
         }
 
-        var allowed = _options.AllowedRestrictedHostAccounts.Contains(
-                          identity.Name,
-                          StringComparer.OrdinalIgnoreCase)
-                      || _options.AllowedRestrictedHostSids.Contains(
-                          identity.Sid,
-                          StringComparer.OrdinalIgnoreCase);
-        if (!allowed)
+        var identity = _identityReader.Read(requiredServiceSid);
+        if (!string.Equals(
+                identity.HostAccountSid,
+                WindowsStationServiceIdentityReader.LocalServiceSid,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                identity.ServiceSid,
+                requiredServiceSid,
+                StringComparison.Ordinal)
+            || !identity.ServiceLogonSidEnabled
+            || !identity.IsRestrictedToken
+            || !identity.ServiceSidEnabled
+            || !identity.ServiceSidRestricted)
         {
             throw new InvalidOperationException(
-                $"External program host identity '{identity.Name}' ({identity.Sid}) is not allowed.");
+                "External programs require a restricted LocalService service token with the "
+                + "Windows service-logon SID and the exact enabled restricted Station service SID.");
         }
 
         return identity;

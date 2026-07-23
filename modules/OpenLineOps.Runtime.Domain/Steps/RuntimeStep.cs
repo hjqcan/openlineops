@@ -100,9 +100,24 @@ public sealed class RuntimeStep : Entity<RuntimeStepId>
 
     internal RuntimeOperationResult Fail(string reason, DateTimeOffset failedAtUtc)
     {
-        FailureReason = Required(reason, nameof(reason));
+        var canonicalReason = Required(reason, nameof(reason));
+        if (Status == RuntimeStepStatus.Failed)
+        {
+            return CompletedAtUtc == failedAtUtc
+                   && string.Equals(FailureReason, canonicalReason, StringComparison.Ordinal)
+                ? RuntimeOperationResult.Accepted()
+                : RuntimeOperationResult.Rejected(
+                    "Runtime.StepEvidenceConflict",
+                    $"Step {Id} was replayed with different terminal evidence.");
+        }
 
-        return TransitionTo(RuntimeStepStatus.Failed, failedAtUtc);
+        var result = TransitionTo(RuntimeStepStatus.Failed, failedAtUtc);
+        if (result.Succeeded)
+        {
+            FailureReason = canonicalReason;
+        }
+
+        return result;
     }
 
     internal RuntimeOperationResult Cancel(DateTimeOffset canceledAtUtc)
@@ -114,7 +129,11 @@ public sealed class RuntimeStep : Entity<RuntimeStepId>
     {
         if (Status == target)
         {
-            return RuntimeOperationResult.Accepted();
+            return CompletedAtUtc == utcNow
+                ? RuntimeOperationResult.Accepted()
+                : RuntimeOperationResult.Rejected(
+                    "Runtime.StepEvidenceConflict",
+                    $"Step {Id} was replayed with a different completion timestamp.");
         }
 
         if (IsTerminal)

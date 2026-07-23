@@ -34,6 +34,7 @@ public sealed class FileSystemProjectProductionLineDefinitionRepositoryTests : I
         Assert.Contains("\"productModel\"", sourceJson, StringComparison.Ordinal);
         Assert.Contains("\"operations\"", sourceJson, StringComparison.Ordinal);
         Assert.Contains("\"transitions\"", sourceJson, StringComparison.Ordinal);
+        Assert.Contains("\"routeLayout\"", sourceJson, StringComparison.Ordinal);
 
         CopyDirectory(sourceScope.ApplicationRootPath, targetScope.ApplicationRootPath);
         var targetPath = LinePath(targetScope);
@@ -50,7 +51,19 @@ public sealed class FileSystemProjectProductionLineDefinitionRepositoryTests : I
         Assert.Equal(
             ["operation.load", "operation.test"],
             restored.Operations.Select(operation => operation.Id.Value));
-        Assert.Equal(RouteTransitionKind.Sequence.ToString(), restored.Transitions.Single().Kind.ToString());
+        Assert.Equal(
+            [("operation.load", 120, 80), ("operation.test", 400, 80)],
+            restored.RouteLayout.OperationPositions.Select(position => (
+                position.OperationId.Value,
+                position.X,
+                position.Y)));
+        var operationTransition = Assert.Single(restored.Transitions, transition =>
+            transition.TargetOperationId is not null);
+        Assert.Equal(RouteTransitionKind.Sequence, operationTransition.Kind);
+        Assert.Equal(
+            TerminalDisposition.Completed,
+            Assert.Single(restored.Transitions, transition =>
+                transition.TerminalDisposition is not null).TerminalDisposition);
         await repository.SaveAsync(targetScope, restored);
         Assert.Equal(sourceBytes, await File.ReadAllBytesAsync(targetPath));
         Assert.Equal(copiedTimestamp, File.GetLastWriteTimeUtc(targetPath));
@@ -87,6 +100,25 @@ public sealed class FileSystemProjectProductionLineDefinitionRepositoryTests : I
             await repository.GetByIdAsync(scope, new ProductionLineDefinitionId("line.main")));
 
         Assert.Contains("invalid JSON", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task StrictReaderRejectsMissingRouteLayout()
+    {
+        var scope = Scope(Path.Combine(_root, "missing-route-layout"));
+        var repository = new FileSystemProjectProductionLineDefinitionRepository();
+        await repository.SaveAsync(scope, ProductionLineDefinitionDomainTests.Definition());
+        var path = LinePath(scope);
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
+        document.Remove("routeLayout");
+        await File.WriteAllTextAsync(
+            path,
+            document.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await repository.GetByIdAsync(scope, new ProductionLineDefinitionId("line.main")));
+
+        Assert.Contains("required semantic collections", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

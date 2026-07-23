@@ -65,6 +65,7 @@ public sealed record StationJobArtifact(
     string Name,
     string Kind,
     string StorageKey,
+    string ReceiptId,
     string? MediaType,
     long SizeBytes,
     string Sha256);
@@ -90,7 +91,7 @@ public sealed record StationJobCommandEvidence(
     string TargetId,
     string CapabilityId,
     string CommandName,
-    string Status,
+    ExecutionStatus ExecutionStatus,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadlineAtUtc,
     DateTimeOffset? AcceptedAtUtc,
@@ -163,6 +164,7 @@ public sealed record ResourceLeaseChanged(
     string IdempotencyKey,
     string AgentId,
     string StationId,
+    string StationSystemId,
     Guid JobId,
     Guid ProductionRunId,
     string OperationRunId,
@@ -252,8 +254,8 @@ public static class StationMessageContract
         }
 
         _ = Required(message.IdempotencyKey, nameof(message.IdempotencyKey));
-        _ = Required(message.AgentId, nameof(message.AgentId));
-        _ = Required(message.StationId, nameof(message.StationId));
+        StationIdentityContract.RequireMessage(message.AgentId, nameof(message.AgentId));
+        StationIdentityContract.RequireMessage(message.StationId, nameof(message.StationId));
         _ = Required(message.StationSystemId, nameof(message.StationSystemId));
         _ = Required(message.OperationRunId, nameof(message.OperationRunId));
         _ = Required(message.ProductModelId, nameof(message.ProductModelId));
@@ -279,6 +281,8 @@ public static class StationMessageContract
         {
             throw new InvalidDataException("Station job request payload is invalid.");
         }
+
+        _ = ProductionContextDocument.Read(message.Inputs);
 
         RequireUtc(message.RequestedAtUtc, "Station job request");
         if (message.ResourceFences is null
@@ -372,6 +376,8 @@ public static class StationMessageContract
             throw new InvalidDataException("Station job completion payload is incomplete.");
         }
 
+        _ = ProductionContextDocument.Read(message.Outputs);
+
         if (message.CompletedStepCount != message.Steps.Count(static step =>
                 string.Equals(step.Status, "Completed", StringComparison.Ordinal))
             || message.CommandCount != message.Commands.Count
@@ -392,6 +398,7 @@ public static class StationMessageContract
         {
             ExecutionStatus.Completed => message.Judgement is ResultJudgement.Passed
                 or ResultJudgement.Failed
+                or ResultJudgement.Aborted
                 or ResultJudgement.NotApplicable
                 && !hasFailureCode
                 && !hasFailureReason,
@@ -442,7 +449,12 @@ public static class StationMessageContract
             _ = Required(command.TargetId, nameof(command.TargetId));
             _ = Required(command.CapabilityId, nameof(command.CapabilityId));
             _ = Required(command.CommandName, nameof(command.CommandName));
-            _ = Required(command.Status, nameof(command.Status));
+            if (command.ExecutionStatus is ExecutionStatus.Pending or ExecutionStatus.Running
+                || !Enum.IsDefined(command.ExecutionStatus))
+            {
+                throw new InvalidDataException(
+                    "Station job command execution status must be terminal.");
+            }
             RequireUtc(command.CreatedAtUtc, "Station job command creation");
             RequireUtc(command.DeadlineAtUtc, "Station job command deadline");
             if (command.DeadlineAtUtc < command.CreatedAtUtc)
@@ -459,10 +471,29 @@ public static class StationMessageContract
                 command.CompletedAtUtc,
                 command.StartedAtUtc ?? command.AcceptedAtUtc ?? command.CreatedAtUtc,
                 "Station job command completion");
-            if (command.ResultJudgement is not null
-                && !Enum.IsDefined(command.ResultJudgement.Value))
+            var commandAxesAreValid = (command.ExecutionStatus, command.ResultJudgement) switch
             {
-                throw new InvalidDataException("Station job command judgement is invalid.");
+                (ExecutionStatus.Completed, ResultJudgement.Passed) => true,
+                (ExecutionStatus.Completed, ResultJudgement.Failed) => true,
+                (ExecutionStatus.Completed, ResultJudgement.Aborted) => true,
+                (ExecutionStatus.Completed, ResultJudgement.NotApplicable) => true,
+                (ExecutionStatus.Canceled, ResultJudgement.Aborted) => true,
+                (ExecutionStatus.Failed, ResultJudgement.Unknown) => true,
+                (ExecutionStatus.TimedOut, ResultJudgement.Unknown) => true,
+                (ExecutionStatus.Rejected, ResultJudgement.Unknown) => true,
+                _ => false
+            };
+            if (!commandAxesAreValid)
+            {
+                throw new InvalidDataException(
+                    "Station job command execution status and judgement are inconsistent.");
+            }
+
+            var commandHasFailure = command.FailureReason is not null;
+            if ((command.ExecutionStatus == ExecutionStatus.Completed) == commandHasFailure)
+            {
+                throw new InvalidDataException(
+                    "Only unsuccessful Station job commands may contain a failure reason.");
             }
 
             RequireNotAfter(command.CreatedAtUtc, message.CompletedAtUtc, "Station job command creation");
@@ -490,13 +521,33 @@ public static class StationMessageContract
             _ = Required(artifact.Name, nameof(artifact.Name));
             _ = Required(artifact.Kind, nameof(artifact.Kind));
             _ = Required(artifact.StorageKey, nameof(artifact.StorageKey));
+            _ = Required(artifact.ReceiptId, nameof(artifact.ReceiptId));
             _ = Required(artifact.Sha256, nameof(artifact.Sha256));
             if (artifact.SizeBytes < 0
                 || artifact.Sha256.Length != 64
                 || artifact.Sha256.Any(static character =>
+                    character is not (>= '0' and <= '9' or >= 'a' and <= 'f'))
+                || artifact.ReceiptId.Length != 64
+                || artifact.ReceiptId.Any(static character =>
                     character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
             {
                 throw new InvalidDataException("Station job artifact evidence is invalid.");
+            }
+
+            var expectedReceipt = StationArtifactReceiptIdentity.Create(
+                message.AgentId,
+                message.StationId,
+                message.JobId,
+                artifact.Name,
+                artifact.Kind,
+                artifact.MediaType,
+                artifact.SizeBytes,
+                artifact.Sha256);
+            if (!string.Equals(expectedReceipt.StorageKey, artifact.StorageKey, StringComparison.Ordinal)
+                || !string.Equals(expectedReceipt.ReceiptId, artifact.ReceiptId, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    "Station job artifact evidence does not match its durable receipt identity.");
             }
         }
     }
@@ -515,8 +566,8 @@ public static class StationMessageContract
 
         _ = Required(message.IdempotencyKey, nameof(message.IdempotencyKey));
         _ = Required(message.JobIdempotencyKey, nameof(message.JobIdempotencyKey));
-        _ = Required(message.AgentId, nameof(message.AgentId));
-        _ = Required(message.StationId, nameof(message.StationId));
+        StationIdentityContract.RequireMessage(message.AgentId, nameof(message.AgentId));
+        StationIdentityContract.RequireMessage(message.StationId, nameof(message.StationId));
         _ = Required(message.OperationRunId, nameof(message.OperationRunId));
         _ = Required(message.Reason, nameof(message.Reason));
         RequireUtc(message.DetectedAtUtc, "Station Job recovery-required");
@@ -532,7 +583,7 @@ public static class StationMessageContract
 
         _ = Required(message.IdempotencyKey, nameof(message.IdempotencyKey));
         _ = Required(message.ProducerId, nameof(message.ProducerId));
-        _ = Required(message.StationId, nameof(message.StationId));
+        StationIdentityContract.RequireMessage(message.StationId, nameof(message.StationId));
         _ = Required(message.ProjectId, nameof(message.ProjectId));
         _ = Required(message.ApplicationId, nameof(message.ApplicationId));
         _ = Required(message.ProjectSnapshotId, nameof(message.ProjectSnapshotId));
@@ -587,8 +638,9 @@ public static class StationMessageContract
         }
 
         _ = Required(message.IdempotencyKey, nameof(message.IdempotencyKey));
-        _ = Required(message.AgentId, nameof(message.AgentId));
-        _ = Required(message.StationId, nameof(message.StationId));
+        StationIdentityContract.RequireMessage(message.AgentId, nameof(message.AgentId));
+        StationIdentityContract.RequireMessage(message.StationId, nameof(message.StationId));
+        _ = Required(message.StationSystemId, nameof(message.StationSystemId));
         _ = Required(message.OperationRunId, nameof(message.OperationRunId));
         _ = Required(message.ResourceId, nameof(message.ResourceId));
         if (!ResourceKinds.Contains(message.ResourceKind))
@@ -680,8 +732,8 @@ public static class StationMessageContract
         }
 
         _ = Required(idempotencyKey, nameof(idempotencyKey));
-        _ = Required(agentId, nameof(agentId));
-        _ = Required(stationId, nameof(stationId));
+        StationIdentityContract.RequireMessage(agentId, nameof(agentId));
+        StationIdentityContract.RequireMessage(stationId, nameof(stationId));
         RequireUtc(occurredAtUtc, description);
     }
 }

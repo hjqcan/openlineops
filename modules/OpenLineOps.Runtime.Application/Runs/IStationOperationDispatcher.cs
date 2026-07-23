@@ -19,6 +19,7 @@ public sealed record StationOperationDispatchRequest
         OperationRunSnapshot operation,
         OperationExecutionPlan executionPlan,
         RuntimeSessionId runtimeSessionId,
+        IReadOnlyDictionary<string, ProductionContextValue> inputs,
         IReadOnlyCollection<ResourceLease> resourceLeases)
     {
         Run = run ?? throw new ArgumentNullException(nameof(run));
@@ -30,6 +31,8 @@ public sealed record StationOperationDispatchRequest
         }
 
         RuntimeSessionId = runtimeSessionId;
+        ArgumentNullException.ThrowIfNull(inputs);
+        Inputs = ProductionContextDocument.Read(ProductionContextDocument.Write(inputs));
         ArgumentNullException.ThrowIfNull(resourceLeases);
         ResourceLeases = resourceLeases.ToArray();
         IdempotencyKey = $"{run.RunId.Value:D}/{operation.OperationRunId}";
@@ -56,6 +59,8 @@ public sealed record StationOperationDispatchRequest
 
     public RuntimeSessionId RuntimeSessionId { get; }
 
+    public IReadOnlyDictionary<string, ProductionContextValue> Inputs { get; }
+
     public IReadOnlyCollection<ResourceLease> ResourceLeases { get; }
 
     public string IdempotencyKey { get; }
@@ -66,6 +71,7 @@ public sealed record StationOperationDispatchResult
     public StationOperationDispatchResult(
         ExecutionStatus executionStatus,
         ResultJudgement judgement,
+        OperationExecutionEvidence executionEvidence,
         IReadOnlyDictionary<string, ProductionContextValue>? outputs,
         int completedStepCount,
         int commandCount,
@@ -77,6 +83,14 @@ public sealed record StationOperationDispatchResult
         if (executionStatus is ExecutionStatus.Pending or ExecutionStatus.Running)
         {
             throw new ArgumentException("Station operation result must be terminal.", nameof(executionStatus));
+        }
+
+        ArgumentNullException.ThrowIfNull(executionEvidence);
+        if (executionEvidence.CompletedAtUtc != completedAtUtc)
+        {
+            throw new ArgumentException(
+                "Station operation evidence completion must match its result.",
+                nameof(executionEvidence));
         }
 
         if (completedStepCount < 0 || commandCount < 0 || incidentCount < 0)
@@ -95,6 +109,7 @@ public sealed record StationOperationDispatchResult
 
         ExecutionStatus = executionStatus;
         Judgement = judgement;
+        ExecutionEvidence = executionEvidence;
         Outputs = outputs?.ToDictionary() ?? [];
         CompletedStepCount = completedStepCount;
         CommandCount = commandCount;
@@ -107,6 +122,8 @@ public sealed record StationOperationDispatchResult
     public ExecutionStatus ExecutionStatus { get; }
 
     public ResultJudgement Judgement { get; }
+
+    public OperationExecutionEvidence ExecutionEvidence { get; }
 
     public IReadOnlyDictionary<string, ProductionContextValue> Outputs { get; }
 

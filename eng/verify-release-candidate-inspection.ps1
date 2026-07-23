@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $RequiredKinds = @("source", "api", "agent", "runner", "desktop", "plugin-host", "script-worker", "sample-plugin")
+$FixtureIndexEntries = [System.Collections.Generic.List[object]]::new()
 
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -36,6 +37,26 @@ function Assert-UnderRepoRoot {
     }
 }
 
+function Assert-DirectChildDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string] $Parent,
+        [Parameter(Mandatory = $true)][string] $Path
+    )
+
+    $resolvedParent = [System.IO.Path]::GetFullPath($Parent).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar)
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar)
+    $resolvedPathParent = [System.IO.Path]::GetDirectoryName($resolvedPath)
+    if (-not $resolvedPathParent.Equals(
+            $resolvedParent,
+            [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Fixture directory must be a direct child of its dedicated work root: $resolvedPath"
+    }
+}
+
 function New-CleanDirectory {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -51,6 +72,58 @@ function Get-FileSha256 {
     param([Parameter(Mandatory = $true)][string] $Path)
 
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-FixturePhysicalId {
+    param([Parameter(Mandatory = $true)][string] $Name)
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $nameBytes = [System.Text.Encoding]::UTF8.GetBytes($Name)
+        $hash = $sha256.ComputeHash($nameBytes)
+        $shortHash = [System.BitConverter]::ToString($hash, 0, 8).Replace("-", "").ToLowerInvariant()
+        return "f-$shortHash"
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function Write-FixtureIndex {
+    $fixtureNames = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    $fixturePaths = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    foreach ($entry in $FixtureIndexEntries) {
+        if (-not $fixtureNames.Add($entry.name)) {
+            throw "Fixture index contains duplicate logical name '$($entry.name)'."
+        }
+
+        if (-not $fixturePaths.Add($entry.relativeDirectory)) {
+            throw "Fixture index contains duplicate physical directory '$($entry.relativeDirectory)'."
+        }
+
+        $fixtureRoot = Join-Path $ResolvedWorkRoot $entry.relativeDirectory
+        Assert-DirectChildDirectory -Parent $ResolvedWorkRoot -Path $fixtureRoot
+        $expectedManifestRelativePath = "$($entry.relativeDirectory)/release-manifest.json"
+        if ($entry.manifestRelativePath -cne $expectedManifestRelativePath) {
+            throw "Fixture '$($entry.name)' has a non-canonical manifest path '$($entry.manifestRelativePath)'."
+        }
+
+        if (-not (Test-Path -LiteralPath (Join-Path $fixtureRoot "release-manifest.json") -PathType Leaf)) {
+            throw "Fixture '$($entry.name)' is missing release-manifest.json."
+        }
+    }
+
+    $index = [ordered]@{
+        schema = "openlineops.release-candidate-inspection-fixture-index"
+        schemaVersion = 1
+        fixtures = @($FixtureIndexEntries)
+    }
+    [System.IO.File]::WriteAllText(
+        (Join-Path $ResolvedWorkRoot "fixture-index.json"),
+        (($index | ConvertTo-Json -Depth 6) + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
 }
 
 function New-TestZip {
@@ -71,12 +144,21 @@ function New-TestZip {
     try {
         foreach ($entryName in $Entries) {
             $entry = $archive.CreateEntry($entryName)
-            $writer = [System.IO.StreamWriter]::new($entry.Open())
-            try {
-                $writer.WriteLine("test content for $entryName")
+            if ([System.IO.Path]::GetExtension($entryName) -ceq ".exe") {
+                $fixtureExecutable = Join-Path $env:SystemRoot "System32/where.exe"
+                $bytes = [System.IO.File]::ReadAllBytes($fixtureExecutable)
+                $stream = $entry.Open()
+                try { $stream.Write($bytes, 0, $bytes.Length) }
+                finally { $stream.Dispose() }
             }
-            finally {
-                $writer.Dispose()
+            else {
+                $writer = [System.IO.StreamWriter]::new($entry.Open())
+                try {
+                    $writer.WriteLine("test content for $entryName")
+                }
+                finally {
+                    $writer.Dispose()
+                }
             }
         }
     }
@@ -92,7 +174,22 @@ function New-TestWindowsBundleZip {
         [Parameter(Mandatory = $true)][string] $ArtifactKind,
         [Parameter(Mandatory = $true)][string[]] $Files,
         [Parameter(Mandatory = $true)][object[]] $EntryPoints,
-        [string] $TamperPath
+        [hashtable] $FileSourceOverrides = @{},
+        [string] $TamperPath,
+        [switch] $ExposeRemovedAgentContainerSetting,
+        [switch] $OmitAgentSafetyExecutablePath,
+        [switch] $OmitAgentStationSystemId,
+        [switch] $OmitAgentPackageCacheDirectory,
+        [switch] $OmitAgentWindowsServiceName,
+        [string] $AgentWindowsServiceName = "",
+        [string] $AgentPackageCacheDirectory = "",
+        [string] $AgentHeartbeatInterval = "00:00:05",
+        [string] $AgentBrokerUri = "amqps://localhost:5671",
+        [bool] $AgentRequireBrokerTls = $true,
+        [string] $AgentCoordinatorBaseUri = "https://localhost:7443/",
+        [string] $AgentArtifactUploadTimeout = "00:05:00",
+        [switch] $EmbedAgentArtifactUploadBearerToken,
+        [string] $AgentSafetyExecutablePath = ""
     )
 
     $stagingRoot = Join-Path $ResolvedWorkRoot ("bundle-staging/" + [System.Guid]::NewGuid().ToString("N"))
@@ -100,8 +197,79 @@ function New-TestWindowsBundleZip {
     foreach ($relativePath in $Files) {
         $path = Join-Path $stagingRoot $relativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
         New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
+        if ($FileSourceOverrides.ContainsKey($relativePath)) {
+            Copy-Item `
+                -LiteralPath $FileSourceOverrides[$relativePath] `
+                -Destination $path
+            continue
+        }
+        if ([System.IO.Path]::GetExtension($relativePath) -ceq ".exe") {
+            Copy-Item `
+                -LiteralPath (Join-Path $env:SystemRoot "System32/where.exe") `
+                -Destination $path
+            continue
+        }
         $content = if ($relativePath -ceq "appsettings.json") {
-            '{"OpenLineOps":{"Agent":{"RuntimeExecutablePath":"OpenLineOps.StationRuntime.exe"}}}'
+            $pythonSandbox = [ordered]@{
+                RequireLeastPrivilegeExecution = $true
+                IsolationMode = "LeastPrivilegeIdentity"
+                LeastPrivilegeIdentity = "PerExecutionAppContainer"
+                LeastPrivilegeLauncherExecutable = "OpenLineOps.LeastPrivilegeLauncher.exe"
+                LeastPrivilegeNoInteractivePrompt = $true
+            }
+            if ($ExposeRemovedAgentContainerSetting) {
+                $pythonSandbox["ContainerImage"] =
+                    "openlineops/python@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            }
+
+            $agentConfiguration = [ordered]@{
+                HeartbeatInterval = $AgentHeartbeatInterval
+                BrokerUri = $AgentBrokerUri
+                RequireBrokerTls = $AgentRequireBrokerTls
+                CoordinatorBaseUri = $AgentCoordinatorBaseUri
+                ArtifactUploadTimeout = $AgentArtifactUploadTimeout
+                RuntimeExecutablePath = "OpenLineOps.StationRuntime.exe"
+                PluginHostExecutablePath = "OpenLineOps.PluginHost.exe"
+                PythonScript = [ordered]@{
+                    WorkerExecutablePath = "OpenLineOps.ScriptWorker.exe"
+                    HostPythonRuntimeDllPath = ""
+                    Sandbox = $pythonSandbox
+                }
+            }
+            if (-not $OmitAgentStationSystemId) {
+                $agentConfiguration["StationSystemId"] = ""
+            }
+            if (-not $OmitAgentPackageCacheDirectory) {
+                $agentConfiguration["PackageCacheDirectory"] = $AgentPackageCacheDirectory
+            }
+            if ($EmbedAgentArtifactUploadBearerToken) {
+                $agentConfiguration["ArtifactUploadBearerToken"] =
+                    "embedded-release-template-secret"
+            }
+            if (-not $OmitAgentSafetyExecutablePath) {
+                $agentConfiguration["SafetyExecutablePath"] = $AgentSafetyExecutablePath
+            }
+
+            $openLineOpsConfiguration = [ordered]@{
+                Agent = $agentConfiguration
+            }
+            if (-not $OmitAgentWindowsServiceName) {
+                $openLineOpsConfiguration["WindowsServiceName"] = $AgentWindowsServiceName
+            }
+            ([ordered]@{
+                OpenLineOps = $openLineOpsConfiguration
+            } | ConvertTo-Json -Depth 8 -Compress)
+        }
+        elseif ($relativePath -ceq "DEPLOYMENT.md" -and $ArtifactKind -ceq "agent") {
+            @'
+# Station Agent Deployment
+
+Provision the dedicated content-cache namespace from an elevated Windows prompt:
+
+OpenLineOps.Agent.exe --provision-content-cache --OpenLineOps:WindowsServiceName OpenLineOpsStationAgent-LineA --OpenLineOps:Agent:PackageCacheDirectory C:\ProgramData\OpenLineOps\StationCaches\LineA\content-anchor\content
+
+OpenLineOps.Agent.exe --remove-content-cache-package 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef --OpenLineOps:WindowsServiceName OpenLineOpsStationAgent-LineA --OpenLineOps:Agent:PackageCacheDirectory C:\ProgramData\OpenLineOps\StationCaches\LineA\content-anchor\content
+'@
         }
         else {
             "test content for $relativePath"
@@ -238,10 +406,10 @@ function Write-TestProvenance {
         version = $RecordedVersion
         generatedAtUtc = [System.DateTimeOffset]::UtcNow.ToString("O")
         source = [ordered]@{
-            available = $false
-            commit = $null
-            branch = $null
-            dirty = $null
+            available = $true
+            commit = "0123456789abcdef0123456789abcdef01234567"
+            branch = "fixture"
+            dirty = $false
         }
         build = [ordered]@{
             configuration = "Release"
@@ -437,6 +605,7 @@ function New-MinimalReleaseCandidate {
     param(
         [Parameter(Mandatory = $true)][string] $Name,
         [string[]] $ExtraSourceEntries = @(),
+        [string] $OmitSourceEntry = "",
         [string] $ProvenanceVersion,
         [string] $ProvenanceMutation,
         [string] $DependencyInventoryVersion,
@@ -444,24 +613,70 @@ function New-MinimalReleaseCandidate {
         [switch] $BackslashDesktopEntry,
         [switch] $WrongCaseDesktopEntry,
         [switch] $TamperAgentBundle,
+        [switch] $IncludeServiceTokenTestRelayInAgent,
+        [switch] $IncludeRenamedServiceTokenTestRelayDirectoryInAgent,
+        [switch] $IncludeRenamedServiceTokenTestRelayBinaryInAgent,
+        [switch] $IncludeUnmanifestedServiceTokenTestRelayBinary,
+        [switch] $OmitServiceTokenTestRelaySource,
+        [switch] $ExposeRemovedAgentContainerSetting,
+        [switch] $OmitAgentSafetyExecutablePath,
+        [switch] $OmitAgentStationSystemId,
+        [switch] $OmitAgentPackageCacheDirectory,
+        [switch] $OmitAgentWindowsServiceName,
+        [string] $AgentWindowsServiceName = "",
+        [string] $AgentPackageCacheDirectory = "",
+        [string] $AgentHeartbeatInterval = "00:00:05",
+        [string] $AgentBrokerUri = "amqps://localhost:5671",
+        [bool] $AgentRequireBrokerTls = $true,
+        [string] $AgentCoordinatorBaseUri = "https://localhost:7443/",
+        [string] $AgentArtifactUploadTimeout = "00:05:00",
+        [switch] $EmbedAgentArtifactUploadBearerToken,
+        [string] $AgentSafetyExecutablePath = "",
         [switch] $SkipDependencyInventory,
         [switch] $SkipMetadataChecksums,
         [switch] $TamperMetadataChecksums,
         [switch] $SkipProvenance
     )
 
-    $root = Join-Path $ResolvedWorkRoot $Name
+    $fixturePhysicalId = Get-FixturePhysicalId $Name
+    $root = Join-Path $ResolvedWorkRoot $fixturePhysicalId
+    Assert-DirectChildDirectory -Parent $ResolvedWorkRoot -Path $root
     New-CleanDirectory $root
 
-    $version = "0.0.0-$Name"
-    New-TestZip -Root $root -Name "source/source-openlineops-$version.zip" -Entries (@(
+    $version = "0.0.0-$fixturePhysicalId"
+    $sourceEntries = @(
         "README.md",
         "THIRD-PARTY-NOTICES.md",
         "Directory.Build.props",
+        "OpenLineOps.sln",
+        "OpenLineOps.slnx",
+        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestBridge.cs",
+        "tests/OpenLineOps.Agent.Tests/WindowsSourceTokenRelayProcess.cs",
+        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestRelayContractTests.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/Program.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/RelayProtocol.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/WindowsNative.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/SourceTokenRelayOperation.cs",
         "docs/development-execution-plan.md",
         "eng/stage-release-artifacts.ps1",
         "eng/verify-ci-workflow-actions.ps1",
+        "eng/verify-staged-agent-bundle-e2e.ps1",
+        "eng/verify-staged-agent-rabbitmq-e2e.ps1",
+        "eng/invoke-run-scoped-agent-service-cleanup.ps1",
+        "eng/verify-agent-service-external-abort-cleanup.ps1",
+        "eng/verify-staged-agent-evidence.ps1",
+        "eng/verify-production-closure-evidence.ps1",
+        "eng/verify-studio-two-agent-production-closure.ps1",
+        "eng/verify-studio-two-agent-production-evidence.ps1",
+        "eng/verify-studio-two-agent-production-evidence.tests.ps1",
+        "eng/verify-runner-staged-agent-e2e.ps1",
+        "eng/verify-runner-staged-agent-evidence.ps1",
+        "eng/verify-runner-staged-agent-evidence.tests.ps1",
+        "eng/verify-evidence-validation.tests.ps1",
+        "eng/evidence-validation-test-fixtures.ps1",
         "eng/verify-solution-project-coverage.ps1",
+        "eng/verify-station-agent-content-cache-contract.ps1",
         "eng/inspect-ci-release-artifact.ps1",
         "eng/inspect-release-candidate.ps1",
         "eng/prepare-final-publication.ps1",
@@ -474,30 +689,95 @@ function New-MinimalReleaseCandidate {
         "eng/sign-windows-package.ps1",
         "eng/verify-windows-signing-readiness.ps1",
         "docs/station-agent-deployment.md",
+        "docs/coordinator-deployment.md",
+        "docs/coordinator-api-security.md",
+        "docs/trace-projection-recovery.md",
+        "apps/desktop/scripts/production-closure-e2e.mjs",
         "docs/headless-runner.md"
-    ) + $ExtraSourceEntries)
-    New-TestZip -Root $root -Name "api/api-openlineops-$version.zip" -Entries @("OpenLineOps.Api.dll")
+    )
+    if (-not [string]::IsNullOrEmpty($OmitSourceEntry)) {
+        $sourceEntryCount = $sourceEntries.Count
+        $sourceEntries = @($sourceEntries | Where-Object {
+                $_ -cne $OmitSourceEntry
+            })
+        if ($sourceEntries.Count -ne ($sourceEntryCount - 1)) {
+            throw "Fixture source entry '$OmitSourceEntry' is not present exactly once."
+        }
+    }
+    if ($OmitServiceTokenTestRelaySource) {
+        $sourceEntries = @($sourceEntries | Where-Object {
+                -not $_.StartsWith(
+                    "tests/OpenLineOps.WindowsServiceToken.TestRelay/",
+                    [System.StringComparison]::Ordinal)
+            })
+    }
+    New-TestZip `
+        -Root $root `
+        -Name "source/source-openlineops-$version.zip" `
+        -Entries ($sourceEntries + $ExtraSourceEntries)
+    New-TestZip -Root $root -Name "api/api-openlineops-$version.zip" -Entries @(
+        "OpenLineOps.Api.dll",
+        "appsettings.json")
+    $agentFiles = @(
+        "OpenLineOps.Agent.exe",
+        "OpenLineOps.Agent.deps.json",
+        "OpenLineOps.Agent.runtimeconfig.json",
+        "OpenLineOps.StationRuntime.exe",
+        "OpenLineOps.PluginHost.exe",
+        "OpenLineOps.ScriptWorker.exe",
+        "OpenLineOps.LeastPrivilegeLauncher.exe",
+        "appsettings.json",
+        "coreclr.dll",
+        "hostfxr.dll",
+        "DEPLOYMENT.md",
+        "LICENSE.txt",
+        "THIRD-PARTY-NOTICES.md")
+    $agentFileSourceOverrides = @{}
+    if ($IncludeServiceTokenTestRelayInAgent) {
+        $relayPath = "OpenLineOps.WindowsServiceToken.TestRelay.exe"
+        $agentFiles += $relayPath
+        $agentFileSourceOverrides[$relayPath] =
+            $script:ServiceTokenTestRelayFixtureExecutablePath
+    }
+    if ($IncludeRenamedServiceTokenTestRelayDirectoryInAgent) {
+        $relayPath = "WINDOWS-SERVICE-TOKEN-TEST-RELAY/renamed-relay.exe"
+        $agentFiles += $relayPath
+        $agentFileSourceOverrides[$relayPath] =
+            $script:ServiceTokenTestRelayFixtureExecutablePath
+    }
+    if ($IncludeRenamedServiceTokenTestRelayBinaryInAgent) {
+        $relayPath = "support/renamed-relay.bin"
+        $agentFiles += $relayPath
+        $agentFileSourceOverrides[$relayPath] =
+            $script:ServiceTokenTestRelayFixtureExecutablePath
+    }
+
     New-TestWindowsBundleZip `
         -Root $root `
         -Name "agent/agent-openlineops-win-x64-$version.zip" `
         -ArtifactKind "agent" `
-        -Files @(
-            "OpenLineOps.Agent.exe",
-            "OpenLineOps.Agent.deps.json",
-            "OpenLineOps.Agent.runtimeconfig.json",
-            "OpenLineOps.StationRuntime.exe",
-            "OpenLineOps.StationRuntime.deps.json",
-            "OpenLineOps.StationRuntime.runtimeconfig.json",
-            "appsettings.json",
-            "coreclr.dll",
-            "hostfxr.dll",
-            "DEPLOYMENT.md",
-            "LICENSE.txt",
-            "THIRD-PARTY-NOTICES.md") `
+        -Files $agentFiles `
+        -FileSourceOverrides $agentFileSourceOverrides `
         -EntryPoints @(
             [ordered]@{ role = "station-agent-service"; relativePath = "OpenLineOps.Agent.exe" },
-            [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" }) `
-        -TamperPath $(if ($TamperAgentBundle) { "OpenLineOps.Agent.exe" } else { "" })
+            [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" },
+            [ordered]@{ role = "plugin-host"; relativePath = "OpenLineOps.PluginHost.exe" },
+            [ordered]@{ role = "python-script-worker"; relativePath = "OpenLineOps.ScriptWorker.exe" }) `
+        -TamperPath $(if ($TamperAgentBundle) { "OpenLineOps.Agent.exe" } else { "" }) `
+        -ExposeRemovedAgentContainerSetting:$ExposeRemovedAgentContainerSetting `
+        -OmitAgentSafetyExecutablePath:$OmitAgentSafetyExecutablePath `
+        -OmitAgentStationSystemId:$OmitAgentStationSystemId `
+        -OmitAgentPackageCacheDirectory:$OmitAgentPackageCacheDirectory `
+        -OmitAgentWindowsServiceName:$OmitAgentWindowsServiceName `
+        -AgentWindowsServiceName $AgentWindowsServiceName `
+        -AgentPackageCacheDirectory $AgentPackageCacheDirectory `
+        -AgentHeartbeatInterval $AgentHeartbeatInterval `
+        -AgentBrokerUri $AgentBrokerUri `
+        -AgentRequireBrokerTls $AgentRequireBrokerTls `
+        -AgentCoordinatorBaseUri $AgentCoordinatorBaseUri `
+        -AgentArtifactUploadTimeout $AgentArtifactUploadTimeout `
+        -EmbedAgentArtifactUploadBearerToken:$EmbedAgentArtifactUploadBearerToken `
+        -AgentSafetyExecutablePath $AgentSafetyExecutablePath
     New-TestWindowsBundleZip `
         -Root $root `
         -Name "runner/runner-openlineops-win-x64-$version.zip" `
@@ -515,11 +795,34 @@ function New-MinimalReleaseCandidate {
             [ordered]@{ role = "headless-runner"; relativePath = "OpenLineOps.Runner.exe" })
     $desktopEntries = @(
         "dist/index.html",
+        "dist-electron/main/api-credential-security.js",
+        "dist-electron/main/application-extension-import-security.js",
+        "dist-electron/main/backend-api-security.js",
+        "dist-electron/main/backend-process-handshake.js",
+        "dist-electron/main/local-sqlite-connection.js",
         "dist-electron/main/main.js",
-        "dist-electron/preload/preload.js",
+        "dist-electron/main/renderer-navigation-security.js",
+        "dist-electron/main/trace-artifact-save.js",
+        "dist-electron/main/trace-artifact-save-core.js",
+        "dist-electron/preload/preload.cjs",
         "package/win-unpacked/OpenLineOps.exe",
         "package/win-unpacked/OPENLINEOPS-PACKAGE-NOTES.txt",
-        "package/win-unpacked/resources/app/package.json")
+        "package/win-unpacked/resources/app/package.json",
+        "package/win-unpacked/resources/app/dist/index.html",
+        "package/win-unpacked/resources/app/dist-electron/main/api-credential-security.js",
+        "package/win-unpacked/resources/app/dist-electron/main/application-extension-import-security.js",
+        "package/win-unpacked/resources/app/dist-electron/main/backend-api-security.js",
+        "package/win-unpacked/resources/app/dist-electron/main/backend-process-handshake.js",
+        "package/win-unpacked/resources/app/dist-electron/main/local-sqlite-connection.js",
+        "package/win-unpacked/resources/app/dist-electron/main/main.js",
+        "package/win-unpacked/resources/app/dist-electron/main/renderer-navigation-security.js",
+        "package/win-unpacked/resources/app/dist-electron/main/trace-artifact-save.js",
+        "package/win-unpacked/resources/app/dist-electron/main/trace-artifact-save-core.js",
+        "package/win-unpacked/resources/app/dist-electron/preload/preload.cjs",
+        "package/win-unpacked/resources/app/runtime/api/OpenLineOps.Api.exe",
+        "package/win-unpacked/resources/app/runtime/api/appsettings.json",
+        "package/win-unpacked/resources/app/runtime/plugin-host/OpenLineOps.PluginHost.exe",
+        "package/win-unpacked/resources/app/runtime/script-worker/OpenLineOps.ScriptWorker.exe")
     if ($BackslashDesktopEntry) {
         $desktopEntries[0] = "dist\index.html"
     }
@@ -555,6 +858,19 @@ function New-MinimalReleaseCandidate {
                 -Mutation $MetadataChecksumMutation
         }
     }
+
+    if ($IncludeUnmanifestedServiceTokenTestRelayBinary) {
+        $unmanifestedPath = Join-Path $root "agent/unmanifested-relay.bin"
+        Copy-Item `
+            -LiteralPath $script:ServiceTokenTestRelayFixtureExecutablePath `
+            -Destination $unmanifestedPath
+    }
+
+    $FixtureIndexEntries.Add([ordered]@{
+        name = $Name
+        relativeDirectory = $fixturePhysicalId
+        manifestRelativePath = "$fixturePhysicalId/release-manifest.json"
+    }) | Out-Null
 
     return $root
 }
@@ -608,6 +924,31 @@ function Assert-InspectionFails {
 $ResolvedWorkRoot = Resolve-RepoPath $WorkRoot
 Assert-UnderRepoRoot $ResolvedWorkRoot
 New-CleanDirectory $ResolvedWorkRoot
+$serviceTokenTestRelayFixtureOutput = Join-Path `
+    $ResolvedWorkRoot `
+    "service-token-test-relay-fixture"
+$serviceTokenTestRelayFixtureProject = Resolve-RepoPath `
+    "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj"
+$serviceTokenTestRelayBuildOutput = @(& dotnet build `
+        $serviceTokenTestRelayFixtureProject `
+        --configuration Release `
+        --runtime win-x64 `
+        --self-contained true `
+        --output $serviceTokenTestRelayFixtureOutput `
+        -p:DebugSymbols=false `
+        -p:DebugType=None 2>&1)
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ($serviceTokenTestRelayBuildOutput | Out-String)
+    throw "Could not build the real Windows service-token Test Relay payload fixture."
+}
+$script:ServiceTokenTestRelayFixtureExecutablePath = Join-Path `
+    $serviceTokenTestRelayFixtureOutput `
+    "OpenLineOps.WindowsServiceToken.TestRelay.exe"
+if (-not (Test-Path `
+        -LiteralPath $script:ServiceTokenTestRelayFixtureExecutablePath `
+        -PathType Leaf)) {
+    throw "The real Windows service-token Test Relay payload fixture is missing its executable."
+}
 
 $positiveRoot = New-MinimalReleaseCandidate -Name "positive"
 Assert-InspectionPasses -Root $positiveRoot -Name "positive"
@@ -620,11 +961,185 @@ Assert-InspectionFails `
     -Name "tampered-agent-bundle" `
     -ExpectedPattern "bundle (size|hash) mismatch for 'OpenLineOps\.Agent\.exe'"
 
+$serviceTokenTestRelayLeakRoot = New-MinimalReleaseCandidate `
+    -Name "test-only-service-token-test-relay-leak" `
+    -IncludeServiceTokenTestRelayInAgent
+Assert-InspectionFails `
+    -Root $serviceTokenTestRelayLeakRoot `
+    -Name "test-only-service-token-test-relay-leak" `
+    -ExpectedPattern "test-only Windows service-token Test Relay in a deployable artifact"
+
+$renamedServiceTokenTestRelayLeakRoot = New-MinimalReleaseCandidate `
+    -Name "renamed-test-only-service-token-test-relay-directory-leak" `
+    -IncludeRenamedServiceTokenTestRelayDirectoryInAgent
+Assert-InspectionFails `
+    -Root $renamedServiceTokenTestRelayLeakRoot `
+    -Name "renamed-test-only-service-token-test-relay-directory-leak" `
+    -ExpectedPattern "test-only Windows service-token Test Relay in a deployable artifact"
+
+$renamedServiceTokenTestRelayBinaryLeakRoot = New-MinimalReleaseCandidate `
+    -Name "renamed-test-only-service-token-test-relay-binary-leak" `
+    -IncludeRenamedServiceTokenTestRelayBinaryInAgent
+Assert-InspectionFails `
+    -Root $renamedServiceTokenTestRelayBinaryLeakRoot `
+    -Name "renamed-test-only-service-token-test-relay-binary-leak" `
+    -ExpectedPattern "test-only Windows service-token Test Relay in a deployable artifact"
+
+$unmanifestedServiceTokenTestRelayBinaryLeakRoot = New-MinimalReleaseCandidate `
+    -Name "unmanifested-test-only-service-token-test-relay-binary-leak" `
+    -IncludeUnmanifestedServiceTokenTestRelayBinary
+Assert-InspectionFails `
+    -Root $unmanifestedServiceTokenTestRelayBinaryLeakRoot `
+    -Name "unmanifested-test-only-service-token-test-relay-binary-leak" `
+    -ExpectedPattern "unmanifested file"
+
+$missingServiceTokenTestRelaySourceRoot = New-MinimalReleaseCandidate `
+    -Name "missing-service-token-test-relay-source" `
+    -OmitServiceTokenTestRelaySource
+Assert-InspectionFails `
+    -Root $missingServiceTokenTestRelaySourceRoot `
+    -Name "missing-service-token-test-relay-source" `
+    -ExpectedPattern "missing expected entry: tests/OpenLineOps\.WindowsServiceToken\.TestRelay/"
+
+foreach ($relaySourceEntry in @(
+        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestBridge.cs",
+        "tests/OpenLineOps.Agent.Tests/WindowsSourceTokenRelayProcess.cs",
+        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestRelayContractTests.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/Program.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/RelayProtocol.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/WindowsNative.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/SourceTokenRelayOperation.cs")) {
+    $fixtureName =
+        "missing-test-relay-source-" +
+        [System.IO.Path]::GetFileNameWithoutExtension($relaySourceEntry).ToLowerInvariant()
+    $missingRelaySourceRoot = New-MinimalReleaseCandidate `
+        -Name $fixtureName `
+        -OmitSourceEntry $relaySourceEntry
+    Assert-InspectionFails `
+        -Root $missingRelaySourceRoot `
+        -Name $fixtureName `
+        -ExpectedPattern ([regex]::Escape("missing expected entry: $relaySourceEntry"))
+}
+
+$removedAgentContainerSettingRoot = New-MinimalReleaseCandidate `
+    -Name "removed-agent-container-setting" `
+    -ExposeRemovedAgentContainerSetting
+Assert-InspectionFails `
+    -Root $removedAgentContainerSettingRoot `
+    -Name "removed-agent-container-setting" `
+    -ExpectedPattern "removed Station Agent Python Container settings"
+
+$missingAgentSafetyExecutablePathRoot = New-MinimalReleaseCandidate `
+    -Name "missing-agent-safety-executable-path" `
+    -OmitAgentSafetyExecutablePath
+Assert-InspectionFails `
+    -Root $missingAgentSafetyExecutablePathRoot `
+    -Name "missing-agent-safety-executable-path" `
+    -ExpectedPattern "must declare SafetyExecutablePath"
+
+$configuredAgentSafetyExecutablePathRoot = New-MinimalReleaseCandidate `
+    -Name "configured-agent-safety-executable-path" `
+    -AgentSafetyExecutablePath "C:\\MachineSafety\\station-safety.exe"
+Assert-InspectionFails `
+    -Root $configuredAgentSafetyExecutablePathRoot `
+    -Name "configured-agent-safety-executable-path" `
+    -ExpectedPattern "SafetyExecutablePath release template must be empty"
+
+$missingAgentPackageCacheDirectoryRoot = New-MinimalReleaseCandidate `
+    -Name "missing-agent-package-cache-directory" `
+    -OmitAgentPackageCacheDirectory
+Assert-InspectionFails `
+    -Root $missingAgentPackageCacheDirectoryRoot `
+    -Name "missing-agent-package-cache-directory" `
+    -ExpectedPattern "PackageCacheDirectory release template must be present and empty"
+
+$configuredAgentPackageCacheDirectoryRoot = New-MinimalReleaseCandidate `
+    -Name "configured-agent-package-cache-directory" `
+    -AgentPackageCacheDirectory "C:\\ProgramData\\OpenLineOps\\content"
+Assert-InspectionFails `
+    -Root $configuredAgentPackageCacheDirectoryRoot `
+    -Name "configured-agent-package-cache-directory" `
+    -ExpectedPattern "PackageCacheDirectory release template must be present and empty"
+
+$missingAgentWindowsServiceNameRoot = New-MinimalReleaseCandidate `
+    -Name "missing-agent-windows-service-name" `
+    -OmitAgentWindowsServiceName
+Assert-InspectionFails `
+    -Root $missingAgentWindowsServiceNameRoot `
+    -Name "missing-agent-windows-service-name" `
+    -ExpectedPattern "WindowsServiceName release template must be present and empty"
+
+$configuredAgentWindowsServiceNameRoot = New-MinimalReleaseCandidate `
+    -Name "configured-agent-windows-service-name" `
+    -AgentWindowsServiceName "OpenLineOpsStationAgent-LineA"
+Assert-InspectionFails `
+    -Root $configuredAgentWindowsServiceNameRoot `
+    -Name "configured-agent-windows-service-name" `
+    -ExpectedPattern "WindowsServiceName release template must be present and empty"
+
+$missingAgentStationSystemIdRoot = New-MinimalReleaseCandidate `
+    -Name "missing-agent-station-system-id" `
+    -OmitAgentStationSystemId
+Assert-InspectionFails `
+    -Root $missingAgentStationSystemIdRoot `
+    -Name "missing-agent-station-system-id" `
+    -ExpectedPattern "StationSystemId release template must be present and empty"
+
+$invalidAgentHeartbeatRoot = New-MinimalReleaseCandidate `
+    -Name "invalid-agent-heartbeat" `
+    -AgentHeartbeatInterval "00:00:30"
+Assert-InspectionFails `
+    -Root $invalidAgentHeartbeatRoot `
+    -Name "invalid-agent-heartbeat" `
+    -ExpectedPattern "HeartbeatInterval release template must be exactly"
+
+$insecureAgentBrokerRoot = New-MinimalReleaseCandidate `
+    -Name "insecure-agent-broker" `
+    -AgentBrokerUri "amqp://guest:guest@localhost:5672" `
+    -AgentRequireBrokerTls $false
+Assert-InspectionFails `
+    -Root $insecureAgentBrokerRoot `
+    -Name "insecure-agent-broker" `
+    -ExpectedPattern "must use an amqps broker template without embedded placeholder credentials"
+
+$insecureAgentCoordinatorRoot = New-MinimalReleaseCandidate `
+    -Name "insecure-agent-coordinator" `
+    -AgentCoordinatorBaseUri "http://coordinator.internal:7443/"
+Assert-InspectionFails `
+    -Root $insecureAgentCoordinatorRoot `
+    -Name "insecure-agent-coordinator" `
+    -ExpectedPattern "must use a credential-free HTTPS CoordinatorBaseUri"
+
+$embeddedAgentArtifactTokenRoot = New-MinimalReleaseCandidate `
+    -Name "embedded-agent-artifact-token" `
+    -EmbedAgentArtifactUploadBearerToken
+Assert-InspectionFails `
+    -Root $embeddedAgentArtifactTokenRoot `
+    -Name "embedded-agent-artifact-token" `
+    -ExpectedPattern "must not embed ArtifactUploadBearerToken"
+
 $unsafePathRoot = New-MinimalReleaseCandidate -Name "unsafe-path" -ExtraSourceEntries @("../evil.txt")
 Assert-InspectionFails `
     -Root $unsafePathRoot `
     -Name "unsafe-path" `
     -ExpectedPattern "unsafe zip entry path segment|path traversal zip entry"
+
+$windowsCanonicalAliasRoot = New-MinimalReleaseCandidate `
+    -Name "windows-canonical-alias-path" `
+    -ExtraSourceEntries @("windows-service-token-test-relay./renamed-relay.exe")
+Assert-InspectionFails `
+    -Root $windowsCanonicalAliasRoot `
+    -Name "windows-canonical-alias-path" `
+    -ExpectedPattern "unsafe zip entry path segment"
+
+$windowsSuperscriptDeviceAliasRoot = New-MinimalReleaseCandidate `
+    -Name "windows-superscript-device-alias-path" `
+    -ExtraSourceEntries @(("COM{0}.txt" -f [char]0x00B9))
+Assert-InspectionFails `
+    -Root $windowsSuperscriptDeviceAliasRoot `
+    -Name "windows-superscript-device-alias-path" `
+    -ExpectedPattern "unsafe zip entry path segment"
 
 $sensitiveSourceRoot = New-MinimalReleaseCandidate -Name "sensitive-source" -ExtraSourceEntries @("certs/openlineops-code-signing.pfx")
 Assert-InspectionFails `
@@ -758,5 +1273,6 @@ Assert-InspectionFails `
     -Name "wrong-case-zip-entry" `
     -ExpectedPattern "missing expected entry: dist/index\.html"
 
+Write-FixtureIndex
 Write-Host "Release candidate inspection verification passed."
 exit 0

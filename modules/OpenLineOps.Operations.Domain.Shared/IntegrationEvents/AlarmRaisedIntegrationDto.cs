@@ -13,6 +13,4 @@ public sealed record AlarmRaisedIntegrationDto(
     DateTimeOffset RaisedAtUtc)
 {
     public const string EventName = "Operations.Alarm.Raised";
-
-    public const string Version = "v1";
 }

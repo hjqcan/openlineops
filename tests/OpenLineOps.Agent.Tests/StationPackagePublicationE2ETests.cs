@@ -1,10 +1,13 @@
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Agent.Infrastructure.Execution;
 using OpenLineOps.Agent.Infrastructure.Packages;
 using OpenLineOps.ContentProtection;
+using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Projects.Infrastructure.Releases;
 using OpenLineOps.Runtime.Contracts;
@@ -115,6 +118,8 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
         Assert.NotEqual(route.PackageContentSha256, nextRoute.PackageContentSha256);
 
         var runtime = new RecordingRuntimeHost();
+        var hasRestrictedStationIdentity = OperatingSystem.IsWindows()
+                                           && AgentTestStationServiceIdentity.TryReadCurrent(out _);
         var executor = new PackageStationOperationExecutor(
             new PackageStationOperationExecutorOptions(distribution),
             new SignedStationPackageInstaller(new StationPackageTrustOptions(
@@ -122,7 +127,12 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
                 new Dictionary<string, string>(StringComparer.Ordinal)
                 {
                     ["release-signing"] = signingKey.ExportSubjectPublicKeyInfoPem()
-                })),
+                },
+                ImmutableStationServiceSid:
+                    AgentTestStationServiceIdentity.ConfiguredOrFixtureSid()),
+                hasRestrictedStationIdentity
+                    ? null
+                    : new InventoryOnlyTestContentProtector(markFilesReadOnly: true)),
             runtime);
         var result = await executor.ExecuteAsync(
             Job(release, route.PackageContentSha256, "station.test"),
@@ -149,6 +159,34 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
                 (_, _) => ValueTask.CompletedTask));
         Assert.Contains("identity", identityError.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, runtime.ExecutionCount);
+
+        if (OperatingSystem.IsWindows() && hasRestrictedStationIdentity)
+        {
+            using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+            var current = identity.User
+                          ?? throw new InvalidOperationException(
+                              "Current Windows identity has no SID.");
+            var frozenApplication = Path.Combine(
+                runtime.Request.PackageContentDirectory,
+                "source",
+                "applications",
+                "portable",
+                "application.oloapp");
+            var security = new FileSecurity();
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            security.AddAccessRule(new FileSystemAccessRule(
+                current,
+                FileSystemRights.FullControl,
+                AccessControlType.Allow));
+            FileSystemAclExtensions.SetAccessControl(new FileInfo(frozenApplication), security);
+
+            var driftError = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                await executor.ExecuteAsync(
+                    Job(release, route.PackageContentSha256, "station.test"),
+                    (_, _) => ValueTask.CompletedTask));
+            Assert.Contains("owner and ACL", driftError.Message, StringComparison.Ordinal);
+            Assert.Equal(1, runtime.ExecutionCount);
+        }
     }
 
     [Fact]
@@ -190,7 +228,10 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
                 ["release-signing"] = signingKey.ExportSubjectPublicKeyInfoPem()
-            }));
+            },
+            ImmutableStationServiceSid:
+                AgentTestStationServiceIdentity.ConfiguredOrFixtureSid()),
+            new InventoryOnlyTestContentProtector(markFilesReadOnly: true));
         var firstInstalled = await installer.InstallAsync(first.PackagePath, first.PackageContentSha256);
         var secondInstalled = await installer.InstallAsync(second.PackagePath, second.PackageContentSha256);
         Assert.Equal("project.a", firstInstalled.Manifest.ProjectId);
@@ -266,17 +307,20 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
             return;
         }
 
-        var protector = new ImmutableContentProtector();
-        foreach (var contentDirectory in Directory.EnumerateDirectories(cacheRoot).ToArray())
-        {
-            var leaf = Path.GetFileName(contentDirectory);
-            if (leaf.Length == 64
-                && leaf.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'))
-            {
-                protector.DeleteProtectedInstallation(cacheRoot, contentDirectory);
-            }
-        }
+        AgentTestStationPackageCache.RemovePackageInstallations(
+            cacheRoot,
+            new InventoryOnlyTestContentProtector(),
+            CleanupPolicy());
+
+        Directory.Delete(cacheRoot);
     }
+
+    private static ImmutableContentProtectionPolicy CleanupPolicy() => new(
+        OperatingSystem.IsWindows()
+            ? WindowsAppContainerIdentity.EnsureCapabilitySid(
+                WindowsAppContainerIdentity.ExternalProgramContentCapabilityName)
+            : "unix-reader",
+        AgentTestStationServiceIdentity.ConfiguredOrFixtureSid());
 
     private static FileSystemProjectReleaseStationPackagePublisher CreatePublisher(
         string distribution,
@@ -339,7 +383,21 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
                 station,
                 "Fixed",
                 [])],
+            [],
             [])).ToArray();
+        var transitions = operations.Select((operation, index) =>
+            new ProjectReleaseRouteTransition(
+                $"transition.{index}",
+                operation.OperationId,
+                index + 1 < operations.Length ? operations[index + 1].OperationId : null,
+                index + 1 < operations.Length ? null : "Completed",
+                "Sequence",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null)).ToArray();
         return new ProjectReleaseSourceMetadata(
             "topology.portable",
             ["layout.portable"],
@@ -350,7 +408,7 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
                 new ProjectReleaseProductModel("product.portable", "PORTABLE", "serialNumber"),
                 operations[0].OperationId,
                 operations,
-                [],
+                transitions,
                 []),
             [],
             [],

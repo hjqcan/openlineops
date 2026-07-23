@@ -20,7 +20,10 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
     public void Record(ExternalPluginProcessEvent processEvent)
     {
         ArgumentNullException.ThrowIfNull(processEvent);
+        RequireCanonical(processEvent.ProjectId, nameof(processEvent.ProjectId));
+        RequireCanonical(processEvent.ApplicationId, nameof(processEvent.ApplicationId));
         RequireCanonicalPluginId(processEvent.PluginId, nameof(processEvent));
+        RequireSha256(processEvent.PackageContentSha256, nameof(processEvent.PackageContentSha256));
 
         lock (_syncRoot)
         {
@@ -34,7 +37,10 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
                 INSERT INTO external_plugin_process_events (
                     kind,
                     kind_name,
+                    project_id,
+                    application_id,
                     plugin_id,
+                    package_content_sha256,
                     message,
                     detail,
                     occurred_at_utc,
@@ -42,7 +48,10 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
                 VALUES (
                     $kind,
                     $kind_name,
+                    $project_id,
+                    $application_id,
                     $plugin_id,
+                    $package_content_sha256,
                     $message,
                     $detail,
                     $occurred_at_utc,
@@ -50,7 +59,12 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
                 """;
             command.Parameters.AddWithValue("$kind", (int)processEvent.Kind);
             command.Parameters.AddWithValue("$kind_name", processEvent.Kind.ToString());
+            command.Parameters.AddWithValue("$project_id", processEvent.ProjectId);
+            command.Parameters.AddWithValue("$application_id", processEvent.ApplicationId);
             command.Parameters.AddWithValue("$plugin_id", processEvent.PluginId);
+            command.Parameters.AddWithValue(
+                "$package_content_sha256",
+                processEvent.PackageContentSha256);
             command.Parameters.AddWithValue("$message", processEvent.Message);
             command.Parameters.AddWithValue("$detail", (object?)processEvent.Detail ?? DBNull.Value);
             command.Parameters.AddWithValue("$occurred_at_utc", FormatTimestamp(processEvent.OccurredAtUtc));
@@ -64,7 +78,7 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
         ExternalPluginProcessEventQuery? query = null,
         CancellationToken cancellationToken = default)
     {
-        query ??= new ExternalPluginProcessEventQuery();
+        ArgumentNullException.ThrowIfNull(query);
         ValidateQuery(query);
 
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
@@ -84,8 +98,11 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
                 (ExternalPluginProcessEventKind)reader.GetInt32(0),
                 reader.GetString(1),
                 reader.GetString(2),
-                ParseTimestamp(reader.GetString(3)),
-                reader.IsDBNull(4) ? null : reader.GetString(4)));
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                ParseTimestamp(reader.GetString(6)),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
         }
 
         return events;
@@ -158,10 +175,9 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
     private static string BuildListSql(ExternalPluginProcessEventQuery query)
     {
         var filters = new List<string>();
-        if (query.PluginId is not null)
-        {
-            filters.Add("plugin_id = $plugin_id");
-        }
+        filters.Add("project_id = $project_id");
+        filters.Add("application_id = $application_id");
+        filters.Add("package_content_sha256 = $package_content_sha256");
 
         if (query.Kind is not null)
         {
@@ -183,7 +199,8 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
             : $"{Environment.NewLine}WHERE {string.Join(" AND ", filters)}";
 
         return $"""
-            SELECT kind, plugin_id, message, occurred_at_utc, detail
+            SELECT kind, project_id, application_id, plugin_id, package_content_sha256,
+                   message, occurred_at_utc, detail
             FROM external_plugin_process_events{whereClause}
             ORDER BY occurred_at_utc, event_id
             LIMIT $take OFFSET $skip;
@@ -194,10 +211,9 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
         SqliteCommand command,
         ExternalPluginProcessEventQuery query)
     {
-        if (query.PluginId is not null)
-        {
-            command.Parameters.AddWithValue("$plugin_id", query.PluginId);
-        }
+        command.Parameters.AddWithValue("$project_id", query.ProjectId);
+        command.Parameters.AddWithValue("$application_id", query.ApplicationId);
+        command.Parameters.AddWithValue("$package_content_sha256", query.PackageContentSha256);
 
         if (query.Kind is not null)
         {
@@ -220,10 +236,9 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
 
     private static void ValidateQuery(ExternalPluginProcessEventQuery query)
     {
-        if (query.PluginId is not null)
-        {
-            RequireCanonicalPluginId(query.PluginId, nameof(query));
-        }
+        RequireCanonical(query.ProjectId, nameof(query.ProjectId));
+        RequireCanonical(query.ApplicationId, nameof(query.ApplicationId));
+        RequireSha256(query.PackageContentSha256, nameof(query.PackageContentSha256));
 
         if (query.Skip < 0)
         {
@@ -243,6 +258,29 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
         {
             throw new ArgumentException(
                 "External plugin process event plugin id must be non-empty and must not contain surrounding whitespace.",
+                parameterName);
+        }
+    }
+
+    private static void RequireCanonical(string value, string parameterName)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || !string.Equals(value, value.Trim(), StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "External plugin process event scope must be canonical non-empty text.",
+                parameterName);
+        }
+    }
+
+    private static void RequireSha256(string value, string parameterName)
+    {
+        if (value.Length != 64
+            || !string.Equals(value, value.ToLowerInvariant(), StringComparison.Ordinal)
+            || value.Any(character => character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f')))
+        {
+            throw new ArgumentException(
+                "External plugin process event package hash must be a lowercase SHA-256 value.",
                 parameterName);
         }
     }
@@ -294,15 +332,23 @@ public sealed class SqliteExternalPluginProcessEventLog : IExternalPluginProcess
             event_id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
             kind INTEGER NOT NULL,
             kind_name TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            application_id TEXT NOT NULL,
             plugin_id TEXT NOT NULL,
+            package_content_sha256 TEXT NOT NULL,
             message TEXT NOT NULL,
             detail TEXT NULL,
             occurred_at_utc TEXT NOT NULL,
             recorded_at_utc TEXT NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS ix_external_plugin_process_events_plugin_time
-            ON external_plugin_process_events(plugin_id, occurred_at_utc, event_id);
+        CREATE INDEX IF NOT EXISTS ix_external_plugin_process_events_scope_time
+            ON external_plugin_process_events(
+                project_id,
+                application_id,
+                package_content_sha256,
+                occurred_at_utc,
+                event_id);
 
         CREATE INDEX IF NOT EXISTS ix_external_plugin_process_events_kind_time
             ON external_plugin_process_events(kind, occurred_at_utc, event_id);

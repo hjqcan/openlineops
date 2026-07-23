@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -7,6 +8,7 @@ using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
@@ -16,6 +18,7 @@ namespace OpenLineOps.Agent.Infrastructure.Execution;
 
 public sealed record ProcessStationRuntimeHostOptions(
     string ExecutablePath,
+    string PluginHostExecutablePath,
     string WorkingDirectoryRoot,
     string ArtifactRoot,
     TimeSpan Timeout,
@@ -25,11 +28,11 @@ public sealed record ProcessStationRuntimeHostOptions(
     long MaximumJobMemoryBytes = 4L * 1024 * 1024 * 1024,
     TimeSpan? MaximumCpuTime = null,
     bool RequireRestrictedExternalProgramHostIdentity = false,
-    IReadOnlyCollection<string>? AllowedRestrictedExternalProgramHostAccounts = null,
-    IReadOnlyCollection<string>? AllowedRestrictedExternalProgramHostSids = null,
+    string? RestrictedServiceSid = null,
     bool RequireExternalProgramAppContainerIsolation = false,
     string? ExternalProgramAppContainerProfileNamespace = null,
-    bool RequireImmutableExternalProgramContent = false);
+    bool RequireImmutableExternalProgramContent = false,
+    StationRuntimePythonScriptOptions? PythonScript = null);
 
 public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRuntimeIsolationCleaner
 {
@@ -37,6 +40,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         StationOperationDocumentJson.CreateOptions();
 
     private readonly string _executablePath;
+    private readonly string _pluginHostExecutablePath;
     private readonly string _workingDirectoryRoot;
     private readonly string _artifactRoot;
     private readonly TimeSpan _timeout;
@@ -45,11 +49,13 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
     private readonly IClock _clock;
     private readonly WindowsProcessLimits _processLimits;
     private readonly bool _requireRestrictedExternalProgramHostIdentity;
-    private readonly string[] _allowedRestrictedExternalProgramHostAccounts;
-    private readonly string[] _allowedRestrictedExternalProgramHostSids;
+    private readonly string? _restrictedServiceSid;
     private readonly bool _requireExternalProgramAppContainerIsolation;
     private readonly string? _externalProgramAppContainerProfileNamespace;
     private readonly bool _requireImmutableExternalProgramContent;
+    private readonly string _pythonScriptWorkerExecutablePath;
+    private readonly string _hostPythonRuntimeDllPath;
+    private readonly StationRuntimePythonScriptSandboxOptions _pythonScriptSandbox;
     private readonly IStationResourceFenceValidator _resourceFenceValidator;
 
     public ProcessStationRuntimeHost(
@@ -62,6 +68,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         _resourceFenceValidator = resourceFenceValidator
             ?? throw new ArgumentNullException(nameof(resourceFenceValidator));
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ExecutablePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(options.PluginHostExecutablePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.WorkingDirectoryRoot);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ArtifactRoot);
         if (options.Timeout <= TimeSpan.Zero)
@@ -73,7 +80,16 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaximumProcessCount);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaximumProcessMemoryBytes);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaximumJobMemoryBytes);
+        if (!Path.IsPathFullyQualified(options.ExecutablePath)
+            || !Path.IsPathFullyQualified(options.PluginHostExecutablePath))
+        {
+            throw new ArgumentException(
+                "Station Runtime and bundled Plugin Host executable paths must be absolute.",
+                nameof(options));
+        }
+
         _executablePath = Path.GetFullPath(options.ExecutablePath);
+        _pluginHostExecutablePath = Path.GetFullPath(options.PluginHostExecutablePath);
         _workingDirectoryRoot = Path.GetFullPath(options.WorkingDirectoryRoot);
         _artifactRoot = Path.GetFullPath(options.ArtifactRoot);
         _timeout = options.Timeout;
@@ -88,21 +104,57 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         _processLimits.Validate();
         _requireRestrictedExternalProgramHostIdentity =
             options.RequireRestrictedExternalProgramHostIdentity;
-        _allowedRestrictedExternalProgramHostAccounts =
-            options.AllowedRestrictedExternalProgramHostAccounts?.ToArray() ?? [];
-        _allowedRestrictedExternalProgramHostSids =
-            options.AllowedRestrictedExternalProgramHostSids?.ToArray() ?? [];
+        _restrictedServiceSid = options.RestrictedServiceSid is null
+            ? null
+            : WindowsStationServiceIdentityReader.RequireCanonicalServiceSid(
+                options.RestrictedServiceSid,
+                nameof(options.RestrictedServiceSid));
         _requireExternalProgramAppContainerIsolation =
             options.RequireExternalProgramAppContainerIsolation;
         _externalProgramAppContainerProfileNamespace =
             options.ExternalProgramAppContainerProfileNamespace;
         _requireImmutableExternalProgramContent = options.RequireImmutableExternalProgramContent;
-        if (_requireRestrictedExternalProgramHostIdentity
-            && _allowedRestrictedExternalProgramHostAccounts.Length == 0
-            && _allowedRestrictedExternalProgramHostSids.Length == 0)
+        var pythonScript = options.PythonScript
+            ?? throw new ArgumentException(
+                "Station Runtime Python script execution requires an explicit worker and sandbox policy.",
+                nameof(options));
+        ArgumentException.ThrowIfNullOrWhiteSpace(pythonScript.WorkerExecutablePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(pythonScript.HostPythonRuntimeDllPath);
+        ArgumentNullException.ThrowIfNull(pythonScript.Sandbox);
+        if (!Path.IsPathFullyQualified(pythonScript.WorkerExecutablePath)
+            || !Path.IsPathFullyQualified(pythonScript.HostPythonRuntimeDllPath))
         {
             throw new ArgumentException(
-                "Restricted external program hosting requires an allowed service account or SID.",
+                "Station Runtime Python worker and host Python runtime DLL paths must be absolute.",
+                nameof(options));
+        }
+
+        _pythonScriptWorkerExecutablePath = Path.GetFullPath(pythonScript.WorkerExecutablePath);
+        _hostPythonRuntimeDllPath = Path.GetFullPath(pythonScript.HostPythonRuntimeDllPath);
+        _pythonScriptSandbox = pythonScript.Sandbox;
+        ValidatePythonScriptSandbox(_pythonScriptSandbox, options);
+        if (_requireRestrictedExternalProgramHostIdentity
+            && _restrictedServiceSid is null)
+        {
+            throw new ArgumentException(
+                "Restricted external program hosting requires one exact Station service SID.",
+                nameof(options));
+        }
+
+        if (_requireImmutableExternalProgramContent
+            && (!_requireRestrictedExternalProgramHostIdentity
+                || _restrictedServiceSid is null))
+        {
+            throw new ArgumentException(
+                "Immutable external program content requires the exact restricted Station service SID.",
+                nameof(options));
+        }
+
+        if (_requireImmutableExternalProgramContent
+            && !_requireExternalProgramAppContainerIsolation)
+        {
+            throw new ArgumentException(
+                "Immutable external program content requires AppContainer isolation.",
                 nameof(options));
         }
 
@@ -128,6 +180,24 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         if (!File.Exists(_executablePath))
         {
             throw new FileNotFoundException("Station runtime executable does not exist.", _executablePath);
+        }
+        if (!File.Exists(_pluginHostExecutablePath))
+        {
+            throw new FileNotFoundException(
+                "Co-packaged OpenLineOps Plugin Host executable does not exist.",
+                _pluginHostExecutablePath);
+        }
+        if (!File.Exists(_pythonScriptWorkerExecutablePath))
+        {
+            throw new FileNotFoundException(
+                "Co-packaged Python script worker executable does not exist.",
+                _pythonScriptWorkerExecutablePath);
+        }
+        if (!File.Exists(_hostPythonRuntimeDllPath))
+        {
+            throw new FileNotFoundException(
+                "Configured host Python runtime DLL does not exist.",
+                _hostPythonRuntimeDllPath);
         }
 
         Directory.CreateDirectory(_workingDirectoryRoot);
@@ -165,7 +235,8 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         var resultPath = Path.Combine(workDirectory, "result.json");
         var fenceAuthority = new StationResourceFenceAuthorityServer(
             request.Job,
-            _resourceFenceValidator);
+            _resourceFenceValidator,
+            ResolveFenceAuthorityPrincipalSid());
         using var fenceAuthorityCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken);
         var fenceAuthorityTask = fenceAuthority.RunAsync(fenceAuthorityCancellation.Token);
@@ -335,7 +406,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
                     command.TargetId,
                     command.CapabilityId,
                     command.CommandName,
-                    command.Status,
+                    command.ExecutionStatus,
                     command.CreatedAtUtc,
                     command.DeadlineAtUtc,
                     command.AcceptedAtUtc,
@@ -383,7 +454,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         }
     }
 
-    public ValueTask CleanupAsync(
+    public async ValueTask CleanupAsync(
         StationJobSnapshot job,
         CancellationToken cancellationToken = default)
     {
@@ -394,7 +465,8 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         {
             foreach (var workDirectory in ResolveJobWorkingDirectories(job.JobId))
             {
-                DeleteWorkingDirectory(workDirectory);
+                await DeleteWorkingDirectoryAsync(workDirectory, cancellationToken)
+                    .ConfigureAwait(false);
             }
         }
         catch (Exception exception) when (exception is IOException
@@ -427,7 +499,6 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
                 failures.Count == 1 ? failures[0] : new AggregateException(failures));
         }
 
-        return ValueTask.CompletedTask;
     }
 
     private string[] ResolveJobWorkingDirectories(StationJobId jobId)
@@ -505,6 +576,23 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         string resultPath,
         string? appContainerProfileName)
     {
+        var environment = CreateRuntimeEnvironment(workDirectory, appContainerProfileName);
+        var arguments = new List<string>();
+        AddArgument(arguments, "execute-operation");
+        AddOption(arguments, "request-file", requestPath);
+        AddOption(arguments, "result-file", resultPath);
+        return new IsolatedProcessStartRequest(
+            _executablePath,
+            arguments,
+            workDirectory,
+            environment,
+            _processLimits);
+    }
+
+    internal Dictionary<string, string> CreateRuntimeEnvironment(
+        string workDirectory,
+        string? appContainerProfileName)
+    {
         var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         CopyEnvironment(environment, "SystemRoot");
         CopyEnvironment(environment, "WINDIR");
@@ -517,6 +605,9 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             _requireImmutableExternalProgramContent ? "true" : "false";
         environment["OpenLineOps__Devices__ExternalProgramHost__RequireAppContainerIsolation"] =
             _requireExternalProgramAppContainerIsolation ? "true" : "false";
+        environment["OpenLineOps__Plugins__ExternalHost__ExecutablePath"] =
+            _pluginHostExecutablePath;
+        AddPythonScriptEnvironment(environment);
         if (appContainerProfileName is not null)
         {
             environment["OpenLineOps__Devices__ExternalProgramHost__AppContainerProfileName"] =
@@ -525,30 +616,164 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
                 "true";
         }
 
-        var accountIndex = 0;
-        foreach (var account in _allowedRestrictedExternalProgramHostAccounts)
+        if (_restrictedServiceSid is not null)
         {
-            environment[$"OpenLineOps__Devices__ExternalProgramHost__AllowedRestrictedHostAccounts__{accountIndex}"] =
-                account;
-            accountIndex++;
+            environment["OpenLineOps__Devices__ExternalProgramHost__RestrictedServiceSid"] =
+                _restrictedServiceSid;
         }
 
-        var sidIndex = 0;
-        foreach (var sid in _allowedRestrictedExternalProgramHostSids)
-        {
-            environment[$"OpenLineOps__Devices__ExternalProgramHost__AllowedRestrictedHostSids__{sidIndex}"] = sid;
-            sidIndex++;
-        }
-        var arguments = new List<string>();
-        AddArgument(arguments, "execute-operation");
-        AddOption(arguments, "request-file", requestPath);
-        AddOption(arguments, "result-file", resultPath);
-        return new IsolatedProcessStartRequest(
-            _executablePath,
-            arguments,
-            workDirectory,
+        return environment;
+    }
+
+    private void AddPythonScriptEnvironment(Dictionary<string, string> environment)
+    {
+        const string prefix = "OpenLineOps__Runtime__Scripting__Python";
+        var sandbox = _pythonScriptSandbox;
+        environment[$"{prefix}__ExecutionMode"] = "ProcessIsolated";
+        environment[$"{prefix}__WorkerFileName"] = _pythonScriptWorkerExecutablePath;
+        environment[$"{prefix}__WorkerWorkingDirectory"] =
+            Path.GetDirectoryName(_pythonScriptWorkerExecutablePath)
+            ?? throw new InvalidOperationException("Python script worker has no parent directory.");
+        environment[$"{prefix}__Sandbox__RequireLeastPrivilegeExecution"] =
+            sandbox.RequireLeastPrivilegeExecution ? "true" : "false";
+        environment[$"{prefix}__Sandbox__IsolationMode"] = sandbox.IsolationMode;
+        environment[$"{prefix}__Sandbox__LeastPrivilegeNoInteractivePrompt"] =
+            sandbox.LeastPrivilegeNoInteractivePrompt ? "true" : "false";
+        environment["PYTHONNET_PYDLL"] = _hostPythonRuntimeDllPath;
+        AddOptionalEnvironment(
             environment,
-            _processLimits);
+            $"{prefix}__Sandbox__LeastPrivilegeIdentity",
+            sandbox.LeastPrivilegeIdentity);
+        AddOptionalEnvironment(
+            environment,
+            $"{prefix}__Sandbox__LeastPrivilegeLauncherExecutable",
+            sandbox.LeastPrivilegeLauncherExecutable);
+        AddOptionalEnvironment(
+            environment,
+            $"{prefix}__Sandbox__LeastPrivilegeArgumentsTemplate",
+            sandbox.LeastPrivilegeArgumentsTemplate);
+    }
+
+    private static void AddOptionalEnvironment(
+        Dictionary<string, string> environment,
+        string key,
+        string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            environment[key] = value;
+        }
+    }
+
+    private static void ValidatePythonScriptSandbox(
+        StationRuntimePythonScriptSandboxOptions sandbox,
+        ProcessStationRuntimeHostOptions options)
+    {
+        var mode = sandbox.IsolationMode switch
+        {
+            StationRuntimePythonScriptIsolationModes.ExternalProcess =>
+                StationRuntimePythonScriptIsolationModes.ExternalProcess,
+            StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity =>
+                StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
+            _ => throw new ArgumentException(
+                $"Unsupported Station Agent Python isolation mode '{sandbox.IsolationMode}'. "
+                + "Use LeastPrivilegeIdentity for production or ExternalProcess only when "
+                + "least-privilege execution is explicitly disabled for development or testing.",
+                nameof(options))
+        };
+        if (sandbox.RequireLeastPrivilegeExecution
+            && string.Equals(
+                mode,
+                StationRuntimePythonScriptIsolationModes.ExternalProcess,
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "Required least-privilege Python execution cannot use ExternalProcess isolation.",
+                nameof(options));
+        }
+
+        if (string.Equals(
+                mode,
+                StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
+                StringComparison.Ordinal)
+            && string.IsNullOrWhiteSpace(sandbox.LeastPrivilegeIdentity))
+        {
+            throw new ArgumentException(
+                "Least-privilege Python isolation requires an identity.",
+                nameof(options));
+        }
+
+        if (string.Equals(
+                mode,
+                StationRuntimePythonScriptIsolationModes.LeastPrivilegeIdentity,
+                StringComparison.Ordinal))
+        {
+            ValidateSandboxExecutable(
+                sandbox.LeastPrivilegeLauncherExecutable,
+                "least-privilege launcher",
+                sandbox.RequireLeastPrivilegeExecution || OperatingSystem.IsWindows(),
+                options);
+            if (sandbox.RequireLeastPrivilegeExecution
+                && !sandbox.LeastPrivilegeNoInteractivePrompt)
+            {
+                throw new ArgumentException(
+                    "Required least-privilege Python isolation must disable interactive launcher prompts.",
+                    nameof(options));
+            }
+
+            if (sandbox.RequireLeastPrivilegeExecution
+                && !string.IsNullOrWhiteSpace(sandbox.LeastPrivilegeArgumentsTemplate))
+            {
+                throw new ArgumentException(
+                    "Required least-privilege Python isolation does not permit a custom launcher arguments template.",
+                    nameof(options));
+            }
+        }
+
+        if (sandbox.LeastPrivilegeIdentity is not null
+            && (string.IsNullOrWhiteSpace(sandbox.LeastPrivilegeIdentity)
+                || char.IsWhiteSpace(sandbox.LeastPrivilegeIdentity[0])
+                || char.IsWhiteSpace(sandbox.LeastPrivilegeIdentity[^1])
+                || sandbox.LeastPrivilegeIdentity.Any(char.IsControl)))
+        {
+            throw new ArgumentException(
+                "Station Agent Python least-privilege identity must be canonical text.",
+                nameof(options));
+        }
+    }
+
+    private static void ValidateSandboxExecutable(
+        string? executablePath,
+        string displayName,
+        bool required,
+        ProcessStationRuntimeHostOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath))
+        {
+            if (required)
+            {
+                throw new ArgumentException(
+                    $"Station Runtime Python {displayName} executable is required.",
+                    nameof(options));
+            }
+
+            return;
+        }
+
+        if (!Path.IsPathFullyQualified(executablePath))
+        {
+            throw new ArgumentException(
+                $"Station Runtime Python {displayName} executable path must be absolute.",
+                nameof(options));
+        }
+
+        var canonicalPath = Path.GetFullPath(executablePath);
+        if (!File.Exists(canonicalPath))
+        {
+            throw new FileNotFoundException(
+                $"Station Runtime Python {displayName} executable does not exist.",
+                canonicalPath);
+        }
     }
 
     private string? ResolveAppContainerProfileName(StationJobSnapshot job) =>
@@ -795,17 +1020,61 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             ? throw new InvalidDataException($"{parameterName} must be canonical non-empty text.")
             : value;
 
-    private static void DeleteWorkingDirectory(string path)
+    private string ResolveFenceAuthorityPrincipalSid()
     {
-        if (!Directory.Exists(path))
+        if (_restrictedServiceSid is not null)
         {
-            return;
+            return _restrictedServiceSid;
         }
 
-        RejectReparsePoint(path, "Station runtime Job working directory");
-        DeleteDirectoryContents(path);
-        Directory.Delete(path, recursive: false);
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Station resource fencing requires a Windows identity-bound named pipe.");
+        }
+
+        using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+        return identity.User?.Value
+               ?? throw new InvalidOperationException(
+                   "Current Station Runtime host token has no user SID.");
     }
+
+    private static async ValueTask DeleteWorkingDirectoryAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        const int maximumAttempts = 24;
+        var retryDelay = TimeSpan.FromMilliseconds(25);
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!Directory.Exists(path))
+            {
+                return;
+            }
+
+            try
+            {
+                RejectReparsePoint(path, "Station runtime Job working directory");
+                DeleteDirectoryContents(path);
+                Directory.Delete(path, recursive: false);
+                return;
+            }
+            catch (IOException exception) when (
+                OperatingSystem.IsWindows()
+                && attempt < maximumAttempts
+                && IsTransientWindowsDeletionFailure(exception))
+            {
+                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+                retryDelay = TimeSpan.FromMilliseconds(Math.Min(
+                    retryDelay.TotalMilliseconds * 2,
+                    200));
+            }
+        }
+    }
+
+    private static bool IsTransientWindowsDeletionFailure(IOException exception) =>
+        (exception.HResult & 0xffff) is 32 or 33 or 145;
 
     private static void DeleteDirectoryContents(string directory)
     {

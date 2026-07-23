@@ -27,12 +27,18 @@ public interface IStationEmergencyStopGateway
 public sealed record StationSafetyRequest(
     ProductionRunSnapshot Run,
     string ActorId,
-    string Reason);
+    string Reason,
+    DateTimeOffset RequestedAtUtc);
 
-public sealed record StationSafetyResult(bool Accepted, string? FailureCode, string? FailureReason)
+public sealed record StationSafetyResult(
+    bool Accepted,
+    string? FailureCode,
+    string? FailureReason,
+    DateTimeOffset? AcknowledgedAtUtc)
 {
-    public static StationSafetyResult Success() => new(true, null, null);
+    public static StationSafetyResult Success(DateTimeOffset? acknowledgedAtUtc = null) =>
+        new(true, null, null, acknowledgedAtUtc);
 
     public static StationSafetyResult Failure(string code, string reason) =>
-        new(false, code, reason);
+        new(false, code, reason, null);
 }

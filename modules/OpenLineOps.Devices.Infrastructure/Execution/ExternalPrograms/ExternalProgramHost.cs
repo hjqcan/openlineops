@@ -73,7 +73,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                     [WindowsAppContainerIdentity.ExternalProgramContentCapabilityName])
                 : null;
             contentReaderSid = appContainerPolicy is null
-                ? hostIdentity.Sid
+                ? hostIdentity.ServiceSid
                 : WindowsAppContainerIdentity.EnsureCapabilitySid(
                     WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
             resourceRootPath = ResolveFrozenPath(
@@ -115,7 +115,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                     resourceRootPath,
                     immutableInventory,
                     contentReaderSid,
-                    hostIdentity.Sid,
+                    hostIdentity.ServiceSid,
                     cancellationToken)
                 .ConfigureAwait(false);
             executablePath = ResolveFrozenPath(
@@ -195,7 +195,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                         resourceRootPath,
                         immutableInventory,
                         contentReaderSid,
-                        hostIdentity.Sid,
+                        hostIdentity.ServiceSid,
                         CancellationToken.None)
                     .ConfigureAwait(false);
             }
@@ -320,6 +320,12 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                 []);
         }
 
+        var excludeIncompleteAtomicWriteResidue = executionFailure is not null
+                                                  || outputLimitCancellation.IsCancellationRequested
+                                                  || cancellationToken.IsCancellationRequested
+                                                  || timeoutCancellation.IsCancellationRequested
+                                                  || !processExited
+                                                  || process.ExitCode != 0;
         var artifacts = await PersistEvidenceAsync(
                 request,
                 policy,
@@ -327,6 +333,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                 outputDirectory,
                 standardOutputPath,
                 standardErrorPath,
+                excludeIncompleteAtomicWriteResidue,
                 CancellationToken.None)
             .ConfigureAwait(false);
         if (executionFailure is not null)
@@ -447,6 +454,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         string outputDirectory,
         string standardOutputPath,
         string standardErrorPath,
+        bool excludeIncompleteAtomicWriteResidue,
         CancellationToken cancellationToken)
     {
         var candidates = new List<(string SourcePath, string RelativePath)>
@@ -456,6 +464,13 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         };
         foreach (var path in EnumerateOutputFiles(outputDirectory))
         {
+            var outputRelativePath = Path.GetRelativePath(outputDirectory, path).Replace('\\', '/');
+            if (excludeIncompleteAtomicWriteResidue
+                && IsIncompleteAtomicWriteResidue(outputRelativePath))
+            {
+                continue;
+            }
+
             if (candidates.Count == policy.MaximumArtifactCount)
             {
                 throw new InvalidDataException(
@@ -464,7 +479,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
 
             candidates.Add((
                 path,
-                "output/" + Path.GetRelativePath(outputDirectory, path).Replace('\\', '/')));
+                "output/" + outputRelativePath));
         }
 
         if (candidates.Count > policy.MaximumArtifactCount)
@@ -680,14 +695,68 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         string outputDirectory,
         EffectiveExternalProgramPolicy policy)
     {
-        try
+        return InspectOutputDirectoryWithBoundedSnapshotRetries(
+            () => InspectOutputDirectory(outputDirectory, policy));
+    }
+
+    internal static string? InspectOutputDirectoryWithBoundedSnapshotRetries(
+        Func<string?> inspectSnapshot)
+    {
+        ArgumentNullException.ThrowIfNull(inspectSnapshot);
+
+        const int maximumSnapshotAttempts = 4;
+        for (var attempt = 1; attempt <= maximumSnapshotAttempts; attempt++)
         {
-            return InspectOutputDirectory(outputDirectory, policy);
+            try
+            {
+                return inspectSnapshot();
+            }
+            catch (Exception exception) when (
+                attempt < maximumSnapshotAttempts
+                && exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                Thread.Yield();
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return $"output workspace could not be inspected: {exception.Message}";
+            }
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+
+        throw new InvalidOperationException("The bounded output workspace inspection did not terminate.");
+    }
+
+    internal static bool IsIncompleteAtomicWriteResidue(string relativePath)
+    {
+        if (!IsCanonical(relativePath)
+            || relativePath.Contains('\\', StringComparison.Ordinal))
         {
-            return $"output workspace could not be inspected: {exception.Message}";
+            return false;
         }
+
+        var segments = relativePath.Split('/');
+        if (segments.Length == 0
+            || segments[..^1].Any(segment => !IsPortableArtifactPathSegment(segment)))
+        {
+            return false;
+        }
+
+        var fileName = segments[^1];
+        const int identifierLength = 32;
+        const string suffix = ".tmp";
+        var identifierSeparator = fileName.Length - suffix.Length - identifierLength - 1;
+        if (identifierSeparator <= 1
+            || fileName[0] != '.'
+            || fileName[identifierSeparator] != '.'
+            || !fileName.EndsWith(suffix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var destinationName = fileName[1..identifierSeparator];
+        var identifier = fileName.AsSpan(identifierSeparator + 1, identifierLength);
+        return IsPortableArtifactPathSegment(destinationName)
+               && Guid.TryParseExact(identifier, "N", out _);
     }
 
     private static string? InspectOutputDirectory(
@@ -875,7 +944,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         string resourceRootPath,
         IReadOnlyCollection<ImmutableContentFile> inventory,
         string contentReaderSid,
-        string contentHostReaderSid,
+        string stationServiceSid,
         CancellationToken cancellationToken)
     {
         if (_options.RequireImmutableContentProtection)
@@ -883,7 +952,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
             await _contentProtector.VerifyAsync(
                 resourceRootPath,
                 inventory,
-                new ImmutableContentProtectionPolicy(contentReaderSid, contentHostReaderSid),
+                new ImmutableContentProtectionPolicy(contentReaderSid, stationServiceSid),
                     cancellationToken)
                 .ConfigureAwait(false);
             return;
@@ -1038,6 +1107,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
             || request.ResourceRootRelativePath.Contains('\\')
             || request.ResourceRootRelativePath.Split('/').Any(segment => segment is "" or "." or "..")
             || !IsCanonical(request.EntryPointRelativePath)
+            || !request.EntryPointRelativePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
             || request.EntryPointSizeBytes < 0
             || !IsLowercaseSha256(request.EntryPointSha256)
             || request.Files is null

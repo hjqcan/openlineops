@@ -2,6 +2,7 @@ using OpenLineOps.Domain.Abstractions.Entities;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.Targets;
+using CommandExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus;
 using CommandResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
 
 namespace OpenLineOps.Runtime.Domain.Commands;
@@ -32,7 +33,7 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         CreatedAtUtc = createdAtUtc;
         Timeout = timeout;
         DeadlineAtUtc = createdAtUtc.Add(timeout);
-        Status = RuntimeCommandStatus.Pending;
+        Status = CommandExecutionStatus.Pending;
     }
 
     public RuntimeStepId StepId { get; }
@@ -49,7 +50,7 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
 
     public string CommandName { get; }
 
-    public RuntimeCommandStatus Status { get; private set; }
+    public CommandExecutionStatus Status { get; private set; }
 
     public DateTimeOffset CreatedAtUtc { get; }
 
@@ -69,11 +70,11 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
 
     public CommandResultJudgement? ResultJudgement { get; private set; }
 
-    public bool IsTerminal => Status is RuntimeCommandStatus.Completed
-        or RuntimeCommandStatus.Failed
-        or RuntimeCommandStatus.TimedOut
-        or RuntimeCommandStatus.Canceled
-        or RuntimeCommandStatus.Rejected;
+    public bool IsTerminal => Status is CommandExecutionStatus.Completed
+        or CommandExecutionStatus.Failed
+        or CommandExecutionStatus.TimedOut
+        or CommandExecutionStatus.Canceled
+        or CommandExecutionStatus.Rejected;
 
     public static RuntimeCommand Create(
         RuntimeCommandId id,
@@ -101,7 +102,7 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         RuntimeStepId stepId,
         RuntimeCapabilityId targetCapability,
         string commandName,
-        RuntimeCommandStatus status,
+        CommandExecutionStatus status,
         DateTimeOffset createdAtUtc,
         TimeSpan timeout,
         DateTimeOffset? acceptedAtUtc,
@@ -132,19 +133,43 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
             ResultJudgement = resultJudgement
         };
 
-        ValidateResultJudgement(status, resultJudgement);
+        ValidateRestoredLifecycle(command);
 
         return command;
     }
 
     internal RuntimeOperationResult Accept(DateTimeOffset acceptedAtUtc)
     {
-        return TransitionTo(RuntimeCommandStatus.Accepted, acceptedAtUtc);
+        if (Status != CommandExecutionStatus.Pending)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.CommandTransitionRejected",
+                $"Command {Id} cannot be accepted while execution status is {Status}.");
+        }
+
+        if (AcceptedAtUtc is not null)
+        {
+            return AcceptedAtUtc == acceptedAtUtc
+                ? RuntimeOperationResult.Accepted()
+                : RuntimeOperationResult.Rejected(
+                    "Runtime.CommandEvidenceConflict",
+                    $"Command {Id} was replayed with a different acceptance timestamp.");
+        }
+
+        AcceptedAtUtc = acceptedAtUtc;
+        return RuntimeOperationResult.Accepted();
     }
 
     internal RuntimeOperationResult Start(DateTimeOffset startedAtUtc)
     {
-        return TransitionTo(RuntimeCommandStatus.InProgress, startedAtUtc);
+        if (AcceptedAtUtc is null)
+        {
+            return RuntimeOperationResult.Rejected(
+                "Runtime.CommandTransitionRejected",
+                $"Command {Id} must be accepted before it can start running.");
+        }
+
+        return TransitionTo(CommandExecutionStatus.Running, startedAtUtc);
     }
 
     internal RuntimeOperationResult Complete(
@@ -152,8 +177,18 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         DateTimeOffset completedAtUtc,
         CommandResultJudgement resultJudgement = CommandResultJudgement.NotApplicable)
     {
-        ValidateResultJudgement(RuntimeCommandStatus.Completed, resultJudgement);
-        var result = TransitionTo(RuntimeCommandStatus.Completed, completedAtUtc);
+        ValidateResultJudgement(CommandExecutionStatus.Completed, resultJudgement);
+        if (Status == CommandExecutionStatus.Completed)
+        {
+            return ReplayTerminalEvidence(
+                CommandExecutionStatus.Completed,
+                completedAtUtc,
+                resultPayload,
+                null,
+                resultJudgement);
+        }
+
+        var result = TransitionTo(CommandExecutionStatus.Completed, completedAtUtc);
         if (!result.Succeeded)
         {
             return result;
@@ -170,9 +205,19 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         string? resultPayload = null,
         CommandResultJudgement resultJudgement = CommandResultJudgement.Unknown)
     {
-        ValidateResultJudgement(RuntimeCommandStatus.Failed, resultJudgement);
+        ValidateResultJudgement(CommandExecutionStatus.Failed, resultJudgement);
         var canonicalReason = Required(reason, nameof(reason));
-        var result = TransitionTo(RuntimeCommandStatus.Failed, failedAtUtc);
+        if (Status == CommandExecutionStatus.Failed)
+        {
+            return ReplayTerminalEvidence(
+                CommandExecutionStatus.Failed,
+                failedAtUtc,
+                resultPayload,
+                canonicalReason,
+                resultJudgement);
+        }
+
+        var result = TransitionTo(CommandExecutionStatus.Failed, failedAtUtc);
         if (!result.Succeeded)
         {
             return result;
@@ -188,22 +233,48 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         DateTimeOffset timedOutAtUtc,
         string? resultPayload = null)
     {
-        FailureReason = "Command timed out.";
+        const string reason = "Command timed out.";
+        if (Status == CommandExecutionStatus.TimedOut)
+        {
+            return ReplayTerminalEvidence(
+                CommandExecutionStatus.TimedOut,
+                timedOutAtUtc,
+                resultPayload,
+                reason,
+                CommandResultJudgement.Unknown);
+        }
+
+        var result = TransitionTo(CommandExecutionStatus.TimedOut, timedOutAtUtc);
+        if (!result.Succeeded)
+        {
+            return result;
+        }
+
+        FailureReason = reason;
         ResultPayload = resultPayload;
         ResultJudgement = CommandResultJudgement.Unknown;
-
-        return TransitionTo(RuntimeCommandStatus.TimedOut, timedOutAtUtc);
+        return result;
     }
 
     internal RuntimeOperationResult Cancel(
         DateTimeOffset canceledAtUtc,
         string reason = "Command canceled.",
         string? resultPayload = null,
-        CommandResultJudgement resultJudgement = CommandResultJudgement.Unknown)
+        CommandResultJudgement resultJudgement = CommandResultJudgement.Aborted)
     {
-        ValidateResultJudgement(RuntimeCommandStatus.Canceled, resultJudgement);
+        ValidateResultJudgement(CommandExecutionStatus.Canceled, resultJudgement);
         var canonicalReason = Required(reason, nameof(reason));
-        var result = TransitionTo(RuntimeCommandStatus.Canceled, canceledAtUtc);
+        if (Status == CommandExecutionStatus.Canceled)
+        {
+            return ReplayTerminalEvidence(
+                CommandExecutionStatus.Canceled,
+                canceledAtUtc,
+                resultPayload,
+                canonicalReason,
+                resultJudgement);
+        }
+
+        var result = TransitionTo(CommandExecutionStatus.Canceled, canceledAtUtc);
         if (!result.Succeeded)
         {
             return result;
@@ -217,17 +288,42 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
 
     internal RuntimeOperationResult Reject(string reason, DateTimeOffset rejectedAtUtc)
     {
-        FailureReason = Required(reason, nameof(reason));
-        ResultJudgement = CommandResultJudgement.Unknown;
+        var canonicalReason = Required(reason, nameof(reason));
+        if (Status == CommandExecutionStatus.Rejected)
+        {
+            return ReplayTerminalEvidence(
+                CommandExecutionStatus.Rejected,
+                rejectedAtUtc,
+                null,
+                canonicalReason,
+                CommandResultJudgement.Unknown);
+        }
 
-        return TransitionTo(RuntimeCommandStatus.Rejected, rejectedAtUtc);
+        var result = TransitionTo(CommandExecutionStatus.Rejected, rejectedAtUtc);
+        if (!result.Succeeded)
+        {
+            return result;
+        }
+
+        FailureReason = canonicalReason;
+        ResultJudgement = CommandResultJudgement.Unknown;
+        return result;
     }
 
-    private RuntimeOperationResult TransitionTo(RuntimeCommandStatus target, DateTimeOffset utcNow)
+    private RuntimeOperationResult TransitionTo(CommandExecutionStatus target, DateTimeOffset utcNow)
     {
         if (Status == target)
         {
-            return RuntimeOperationResult.Accepted();
+            var recordedAtUtc = target switch
+            {
+                CommandExecutionStatus.Running => StartedAtUtc,
+                _ => CompletedAtUtc
+            };
+            return recordedAtUtc == utcNow
+                ? RuntimeOperationResult.Accepted()
+                : RuntimeOperationResult.Rejected(
+                    "Runtime.CommandEvidenceConflict",
+                    $"Command {Id} was replayed with a different transition timestamp.");
         }
 
         if (!CanTransition(Status, target))
@@ -239,12 +335,7 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
 
         Status = target;
 
-        if (target == RuntimeCommandStatus.Accepted)
-        {
-            AcceptedAtUtc = utcNow;
-        }
-
-        if (target == RuntimeCommandStatus.InProgress)
+        if (target == CommandExecutionStatus.Running)
         {
             StartedAtUtc = utcNow;
         }
@@ -257,30 +348,45 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
         return RuntimeOperationResult.Accepted();
     }
 
-    private static bool CanTransition(RuntimeCommandStatus from, RuntimeCommandStatus to)
+    private RuntimeOperationResult ReplayTerminalEvidence(
+        CommandExecutionStatus status,
+        DateTimeOffset completedAtUtc,
+        string? resultPayload,
+        string? failureReason,
+        CommandResultJudgement resultJudgement)
     {
-        if (from is RuntimeCommandStatus.Completed
-            or RuntimeCommandStatus.Failed
-            or RuntimeCommandStatus.TimedOut
-            or RuntimeCommandStatus.Canceled
-            or RuntimeCommandStatus.Rejected)
+        return Status == status
+               && CompletedAtUtc == completedAtUtc
+               && string.Equals(ResultPayload, resultPayload, StringComparison.Ordinal)
+               && string.Equals(FailureReason, failureReason, StringComparison.Ordinal)
+               && ResultJudgement == resultJudgement
+            ? RuntimeOperationResult.Accepted()
+            : RuntimeOperationResult.Rejected(
+                "Runtime.CommandEvidenceConflict",
+                $"Command {Id} was replayed with different terminal evidence.");
+    }
+
+    private static bool CanTransition(CommandExecutionStatus from, CommandExecutionStatus to)
+    {
+        if (from is CommandExecutionStatus.Completed
+            or CommandExecutionStatus.Failed
+            or CommandExecutionStatus.TimedOut
+            or CommandExecutionStatus.Canceled
+            or CommandExecutionStatus.Rejected)
         {
             return false;
         }
 
         return (from, to) switch
         {
-            (RuntimeCommandStatus.Pending, RuntimeCommandStatus.Accepted) => true,
-            (RuntimeCommandStatus.Pending, RuntimeCommandStatus.Rejected) => true,
-            (RuntimeCommandStatus.Pending, RuntimeCommandStatus.Canceled) => true,
-            (RuntimeCommandStatus.Accepted, RuntimeCommandStatus.Rejected) => true,
-            (RuntimeCommandStatus.Accepted, RuntimeCommandStatus.InProgress) => true,
-            (RuntimeCommandStatus.Accepted, RuntimeCommandStatus.Canceled) => true,
-            (RuntimeCommandStatus.InProgress, RuntimeCommandStatus.Completed) => true,
-            (RuntimeCommandStatus.InProgress, RuntimeCommandStatus.Failed) => true,
-            (RuntimeCommandStatus.InProgress, RuntimeCommandStatus.TimedOut) => true,
-            (RuntimeCommandStatus.InProgress, RuntimeCommandStatus.Canceled) => true,
-            (RuntimeCommandStatus.InProgress, RuntimeCommandStatus.Rejected) => true,
+            (CommandExecutionStatus.Pending, CommandExecutionStatus.Running) => true,
+            (CommandExecutionStatus.Pending, CommandExecutionStatus.Rejected) => true,
+            (CommandExecutionStatus.Pending, CommandExecutionStatus.Canceled) => true,
+            (CommandExecutionStatus.Running, CommandExecutionStatus.Completed) => true,
+            (CommandExecutionStatus.Running, CommandExecutionStatus.Failed) => true,
+            (CommandExecutionStatus.Running, CommandExecutionStatus.TimedOut) => true,
+            (CommandExecutionStatus.Running, CommandExecutionStatus.Canceled) => true,
+            (CommandExecutionStatus.Running, CommandExecutionStatus.Rejected) => true,
             _ => false
         };
     }
@@ -291,14 +397,14 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
     }
 
     private static void ValidateResultJudgement(
-        RuntimeCommandStatus status,
+        CommandExecutionStatus status,
         CommandResultJudgement? resultJudgement)
     {
-        var isTerminal = status is RuntimeCommandStatus.Completed
-            or RuntimeCommandStatus.Failed
-            or RuntimeCommandStatus.TimedOut
-            or RuntimeCommandStatus.Canceled
-            or RuntimeCommandStatus.Rejected;
+        var isTerminal = status is CommandExecutionStatus.Completed
+            or CommandExecutionStatus.Failed
+            or CommandExecutionStatus.TimedOut
+            or CommandExecutionStatus.Canceled
+            or CommandExecutionStatus.Rejected;
         if (!isTerminal)
         {
             if (resultJudgement is not null)
@@ -320,14 +426,14 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
 
         var valid = (status, resultJudgement.Value) switch
         {
-            (RuntimeCommandStatus.Completed, CommandResultJudgement.Passed) => true,
-            (RuntimeCommandStatus.Completed, CommandResultJudgement.Failed) => true,
-            (RuntimeCommandStatus.Completed, CommandResultJudgement.Aborted) => true,
-            (RuntimeCommandStatus.Completed, CommandResultJudgement.NotApplicable) => true,
-            (RuntimeCommandStatus.Failed, CommandResultJudgement.Unknown) => true,
-            (RuntimeCommandStatus.TimedOut, CommandResultJudgement.Unknown) => true,
-            (RuntimeCommandStatus.Canceled, CommandResultJudgement.Unknown) => true,
-            (RuntimeCommandStatus.Rejected, CommandResultJudgement.Unknown) => true,
+            (CommandExecutionStatus.Completed, CommandResultJudgement.Passed) => true,
+            (CommandExecutionStatus.Completed, CommandResultJudgement.Failed) => true,
+            (CommandExecutionStatus.Completed, CommandResultJudgement.Aborted) => true,
+            (CommandExecutionStatus.Completed, CommandResultJudgement.NotApplicable) => true,
+            (CommandExecutionStatus.Failed, CommandResultJudgement.Unknown) => true,
+            (CommandExecutionStatus.TimedOut, CommandResultJudgement.Unknown) => true,
+            (CommandExecutionStatus.Canceled, CommandResultJudgement.Aborted) => true,
+            (CommandExecutionStatus.Rejected, CommandResultJudgement.Unknown) => true,
             _ => false
         };
 
@@ -336,6 +442,102 @@ public sealed class RuntimeCommand : Entity<RuntimeCommandId>
             throw new ArgumentException(
                 $"Result judgement {resultJudgement} is invalid for command status {status}.",
                 nameof(resultJudgement));
+        }
+    }
+
+    private static void ValidateRestoredLifecycle(RuntimeCommand command)
+    {
+        if (!Enum.IsDefined(command.Status))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(command),
+                command.Status,
+                "Restored command execution status is not defined.");
+        }
+
+        ValidateResultJudgement(command.Status, command.ResultJudgement);
+
+        if (command.AcceptedAtUtc is not null
+                && command.AcceptedAtUtc < command.CreatedAtUtc
+            || command.StartedAtUtc is not null
+                && (command.AcceptedAtUtc is null || command.StartedAtUtc < command.AcceptedAtUtc)
+            || command.CompletedAtUtc is not null
+                && command.CompletedAtUtc < (command.StartedAtUtc ?? command.AcceptedAtUtc ?? command.CreatedAtUtc))
+        {
+            throw new ArgumentException("Restored command lifecycle timestamps are not ordered.");
+        }
+
+        var hasTerminalEvidence = command.CompletedAtUtc is not null
+            || command.ResultPayload is not null
+            || command.FailureReason is not null
+            || command.ResultJudgement is not null;
+
+        switch (command.Status)
+        {
+            case CommandExecutionStatus.Pending:
+                if (command.StartedAtUtc is not null || hasTerminalEvidence)
+                {
+                    throw new ArgumentException(
+                        "A pending restored command cannot contain start or terminal evidence.");
+                }
+
+                break;
+            case CommandExecutionStatus.Running:
+                if (command.AcceptedAtUtc is null
+                    || command.StartedAtUtc is null
+                    || hasTerminalEvidence)
+                {
+                    throw new ArgumentException(
+                        "A running restored command requires acceptance and start evidence only.");
+                }
+
+                break;
+            case CommandExecutionStatus.Completed:
+                if (command.AcceptedAtUtc is null
+                    || command.StartedAtUtc is null
+                    || command.CompletedAtUtc is null
+                    || command.FailureReason is not null)
+                {
+                    throw new ArgumentException(
+                        "A completed restored command requires a complete successful lifecycle without failure evidence.");
+                }
+
+                break;
+            case CommandExecutionStatus.Failed:
+            case CommandExecutionStatus.TimedOut:
+                if (command.AcceptedAtUtc is null
+                    || command.StartedAtUtc is null
+                    || command.CompletedAtUtc is null
+                    || command.FailureReason is null)
+                {
+                    throw new ArgumentException(
+                        "A failed or timed-out restored command requires a complete lifecycle and failure evidence.");
+                }
+
+                break;
+            case CommandExecutionStatus.Canceled:
+                if (command.CompletedAtUtc is null || command.FailureReason is null)
+                {
+                    throw new ArgumentException(
+                        "A canceled restored command requires completion and cancellation evidence.");
+                }
+
+                break;
+            case CommandExecutionStatus.Rejected:
+                if (command.CompletedAtUtc is null
+                    || command.FailureReason is null
+                    || command.ResultPayload is not null)
+                {
+                    throw new ArgumentException(
+                        "A rejected restored command requires rejection evidence and cannot contain a result payload.");
+                }
+
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(
+                    nameof(command),
+                    command.Status,
+                    "Unsupported restored command execution status.");
         }
     }
 

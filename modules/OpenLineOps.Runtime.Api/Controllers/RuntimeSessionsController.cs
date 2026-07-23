@@ -12,6 +12,7 @@ namespace OpenLineOps.Runtime.Api.Controllers;
 [ApiController]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
 [Route(OpenLineOpsApiRoutes.RuntimeSessions)]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 public sealed class RuntimeSessionsController : ControllerBase
 {
     private readonly IRuntimeSessionRepository _sessionRepository;

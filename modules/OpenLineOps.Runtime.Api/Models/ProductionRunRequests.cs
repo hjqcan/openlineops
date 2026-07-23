@@ -4,7 +4,6 @@ namespace OpenLineOps.Runtime.Api.Models;
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ProductionRunCommandApiRequest(
-    string ActorId,
     string? Reason,
     string? OperationId,
     ProductionRecoveryDecisionApiRequest? RecoveryDecision);

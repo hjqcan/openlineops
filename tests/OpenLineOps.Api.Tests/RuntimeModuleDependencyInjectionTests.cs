@@ -12,6 +12,7 @@ using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Infrastructure.Commands;
 using OpenLineOps.Runtime.Infrastructure.Events;
+using OpenLineOps.Runtime.Infrastructure.Execution;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 using OpenLineOps.Runtime.Infrastructure.Scripting;
 using OpenLineOps.Runtime.Infrastructure.Transport;
@@ -44,12 +45,29 @@ public sealed class RuntimeModuleDependencyInjectionTests
             serviceProvider.GetRequiredService<IResourceLeaseRepository>());
         Assert.IsType<ProductionLineRuntimeStateReader>(
             scope.ServiceProvider.GetRequiredService<IProductionLineRuntimeStateReader>());
+        Assert.IsType<InMemoryAgentPresenceRepository>(
+            serviceProvider.GetRequiredService<IAgentPresenceRepository>());
+        Assert.False(serviceProvider
+            .GetRequiredService<AgentPresenceMonitoringOptions>()
+            .PresenceRequired);
         Assert.NotNull(scope.ServiceProvider.GetRequiredService<IProductionRunRecoveryService>());
+        Assert.Same(
+            serviceProvider.GetRequiredService<IRuntimeSessionRepository>(),
+            serviceProvider.GetRequiredService<IRuntimeMonitoringStore>());
+        Assert.IsType<InMemoryRuntimeSessionRepository>(
+            serviceProvider.GetRequiredService<IRuntimeMonitoringStore>());
+        Assert.Same(
+            serviceProvider.GetRequiredService<IRuntimeMonitoringService>(),
+            serviceProvider.GetRequiredService<IRuntimeMonitoringProjectionInitializer>());
         var hostedServices = serviceProvider.GetServices<IHostedService>().ToArray();
+        var monitoringIndex = Array.FindIndex(
+            hostedServices,
+            service => service is RuntimeMonitoringProjectionStartupHostedService);
         var recoveryIndex = Array.FindIndex(
             hostedServices,
             service => service.GetType().Name == "ProductionRunStartupRecoveryHostedService");
-        Assert.True(recoveryIndex >= 0);
+        Assert.True(monitoringIndex >= 0);
+        Assert.True(recoveryIndex > monitoringIndex);
         Assert.Contains(
             hostedServices,
             service => service is ProductionRunCoordinatorHostedService);
@@ -98,8 +116,49 @@ public sealed class RuntimeModuleDependencyInjectionTests
         using var serviceProvider = services.BuildServiceProvider();
         Assert.IsType<SqliteRuntimeSessionRepository>(
             serviceProvider.GetRequiredService<IRuntimeSessionRepository>());
+        Assert.Same(
+            serviceProvider.GetRequiredService<IRuntimeSessionRepository>(),
+            serviceProvider.GetRequiredService<IRuntimeMonitoringStore>());
         Assert.IsType<SqliteProductionRunRepository>(
             serviceProvider.GetRequiredService<IProductionRunRepository>());
+        var hostedServices = serviceProvider.GetServices<IHostedService>().ToArray();
+        var leaseIndex = Array.FindIndex(
+            hostedServices,
+            service => service is SqliteRuntimeStoreLeaseHostedService);
+        var monitoringIndex = Array.FindIndex(
+            hostedServices,
+            service => service is RuntimeMonitoringProjectionStartupHostedService);
+        var recoveryIndex = Array.FindIndex(
+            hostedServices,
+            service => service is ProductionRunStartupRecoveryHostedService);
+        Assert.True(leaseIndex >= 0);
+        Assert.True(monitoringIndex > leaseIndex);
+        Assert.True(recoveryIndex > monitoringIndex);
+    }
+
+    [Fact]
+    public async Task RuntimeMonitoringHostedServiceFailsClosedUntilDurableRebuildCompletes()
+    {
+        var services = new ServiceCollection();
+        services.AddOpenLineOpsRuntimeModule(CreateLocalConfiguration());
+        using var serviceProvider = services.BuildServiceProvider();
+        var monitoring = serviceProvider.GetRequiredService<IRuntimeMonitoringService>();
+        var scope = new RuntimeMonitoringScope(
+            "project-hosted",
+            "application-hosted",
+            "snapshot-hosted",
+            "topology-hosted");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await monitoring.GetStationStatusesAsync(scope));
+
+        var hosted = Assert.Single(
+            serviceProvider.GetServices<IHostedService>(),
+            service => service is RuntimeMonitoringProjectionStartupHostedService);
+        await hosted.StartAsync(CancellationToken.None);
+
+        Assert.Empty(await monitoring.GetStationStatusesAsync(scope));
+        await hosted.StopAsync(CancellationToken.None);
     }
 
     [Fact]
@@ -324,6 +383,145 @@ public sealed class RuntimeModuleDependencyInjectionTests
             services.AddOpenLineOpsRuntimeModule(configuration));
 
         Assert.Contains("exactly 'true' or 'false'", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(
+        ProductionCoordinationPersistenceProviders.InMemory,
+        StationCoordinatorTransportProviders.RabbitMq,
+        StationExecutionProviders.Agent,
+        "requires PostgreSql Production coordination")]
+    [InlineData(
+        ProductionCoordinationPersistenceProviders.Sqlite,
+        StationCoordinatorTransportProviders.RabbitMq,
+        StationExecutionProviders.Agent,
+        "requires PostgreSql Production coordination")]
+    [InlineData(
+        ProductionCoordinationPersistenceProviders.PostgreSql,
+        StationCoordinatorTransportProviders.Disabled,
+        StationExecutionProviders.Agent,
+        "requires RabbitMq Station transport")]
+    [InlineData(
+        ProductionCoordinationPersistenceProviders.PostgreSql,
+        StationCoordinatorTransportProviders.RabbitMq,
+        StationExecutionProviders.InProcess,
+        "InProcess Station execution is allowed only")]
+    [InlineData(
+        ProductionCoordinationPersistenceProviders.InMemory,
+        StationCoordinatorTransportProviders.RabbitMq,
+        StationExecutionProviders.InProcess,
+        "InProcess Station execution is allowed only")]
+    [InlineData(
+        ProductionCoordinationPersistenceProviders.Sqlite,
+        StationCoordinatorTransportProviders.RabbitMq,
+        StationExecutionProviders.InProcess,
+        "InProcess Station execution is allowed only")]
+    public void RemoteAndLocalExecutionCompositionsFailClosed(
+        string coordinationProvider,
+        string transportProvider,
+        string stationExecutionProvider,
+        string expectedMessage)
+    {
+        var services = new ServiceCollection();
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            services.AddOpenLineOpsRuntimeModule(CreateCompositionConfiguration(
+                coordinationProvider,
+                transportProvider,
+                stationExecutionProvider)));
+
+        Assert.Contains(expectedMessage, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RemoteAgentCompositionRequiresAndAcceptsPostgreSqlWithRabbitMq()
+    {
+        var services = new ServiceCollection();
+
+        services.AddOpenLineOpsRuntimeModule(CreateCompositionConfiguration(
+            ProductionCoordinationPersistenceProviders.PostgreSql,
+            StationCoordinatorTransportProviders.RabbitMq,
+            StationExecutionProviders.Agent));
+
+        Assert.Contains(
+            services,
+            descriptor => descriptor.ServiceType == typeof(IStationJobCoordinationStore)
+                && descriptor.ImplementationFactory is not null);
+        Assert.Contains(
+            services,
+            descriptor => descriptor.ServiceType == typeof(IStationJobOutboxPublisher));
+        var hostedTypes = services
+            .Where(descriptor => descriptor.ServiceType == typeof(IHostedService))
+            .Select(static descriptor => descriptor.ImplementationType)
+            .ToArray();
+        var recoveryIndex = Array.IndexOf(
+            hostedTypes,
+            typeof(ProductionRunStartupRecoveryHostedService));
+        var inboxIndex = Array.IndexOf(
+            hostedTypes,
+            typeof(StationResultInboxHostedService));
+        var outboxIndex = Array.IndexOf(
+            hostedTypes,
+            typeof(StationJobOutboxHostedService));
+        var coordinatorIndex = Array.IndexOf(
+            hostedTypes,
+            typeof(ProductionRunCoordinatorHostedService));
+        Assert.True(recoveryIndex >= 0);
+        Assert.True(inboxIndex > recoveryIndex);
+        Assert.True(outboxIndex > inboxIndex);
+        Assert.True(coordinatorIndex > outboxIndex);
+        Assert.DoesNotContain(
+            services,
+            descriptor => descriptor.ServiceType == typeof(InMemoryStationJobCoordinationStore));
+        using var serviceProvider = services.BuildServiceProvider();
+        Assert.IsType<PostgreSqlAgentPresenceRepository>(
+            serviceProvider.GetRequiredService<IAgentPresenceRepository>());
+        Assert.True(serviceProvider
+            .GetRequiredService<AgentPresenceMonitoringOptions>()
+            .PresenceRequired);
+    }
+
+    [Theory]
+    [InlineData("OpenLineOps:Runtime:AgentPresence:TimeToLive", "00:00:00")]
+    [InlineData("OpenLineOps:Runtime:AgentPresence:TimeToLive", "15")]
+    [InlineData("OpenLineOps:Runtime:AgentPresence:PresenceRequired", "false")]
+    public void AgentPresencePolicyCannotBeDisabledOrConfiguredWithInvalidTtl(
+        string key,
+        string value)
+    {
+        var values = CreateLocalConfiguration().AsEnumerable()
+            .Where(static entry => entry.Value is not null)
+            .ToDictionary(static entry => entry.Key, static entry => entry.Value);
+        values[key] = value;
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(values)
+            .Build();
+
+        Assert.Throws<InvalidOperationException>(() =>
+            new ServiceCollection().AddOpenLineOpsRuntimeModule(configuration));
+    }
+
+    private static IConfiguration CreateCompositionConfiguration(
+        string coordinationProvider,
+        string transportProvider,
+        string stationExecutionProvider)
+    {
+        var values = new Dictionary<string, string?>
+        {
+            ["OpenLineOps:Runtime:Persistence:Provider"] = RuntimeSessionPersistenceProviders.InMemory,
+            ["OpenLineOps:Runtime:Coordination:Provider"] = coordinationProvider,
+            ["OpenLineOps:Runtime:AgentTransport:Provider"] = transportProvider,
+            ["OpenLineOps:Runtime:AgentTransport:BrokerUri"] =
+                "amqps://coordinator:coordinator-secret@localhost:5671",
+            ["OpenLineOps:Runtime:AgentTransport:RequireTls"] = "true",
+            ["OpenLineOps:Runtime:StationExecution:Provider"] = stationExecutionProvider,
+            ["OpenLineOps:Runtime:Coordination:ConnectionString"] =
+                "Host=localhost;Port=5432;Database=openlineops;Username=openlineops;Password=test",
+            ["OpenLineOps:Runtime:Coordination:SqliteDatabasePath"] = Path.Combine(
+                Path.GetTempPath(),
+                $"openlineops-composition-{Guid.NewGuid():N}.sqlite")
+        };
+        return new ConfigurationBuilder().AddInMemoryCollection(values).Build();
     }
 
     private static IConfiguration CreateLocalConfiguration() => new ConfigurationBuilder()

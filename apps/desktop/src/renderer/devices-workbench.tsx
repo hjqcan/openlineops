@@ -24,6 +24,15 @@ import {
   registerDeviceInstance,
   resetDeviceFault
 } from './api';
+import {
+  acceptSubmittedEditorDraft,
+  createEditorDraftBaseline,
+  isEditorDraftDirty,
+  replaceEditorDraft,
+  revertEditorDraft
+} from './editor-draft-baseline-model';
+import { useEditorDocument } from './editor-workspace';
+import type { EditorProblem } from './editor-workspace-model';
 
 interface DevicesWorkbenchProps {
   isBackendHealthy: boolean;
@@ -62,7 +71,17 @@ export function DevicesWorkbench({
   onMessage
 }: DevicesWorkbenchProps): React.ReactElement {
   const [resources, setResources] = useState<DeviceResources>(emptyResources);
-  const [draft, setDraft] = useState<DeviceDraft>(() => createDeviceDraft());
+  const [draftState, setDraftState] = useState(
+    () => createEditorDraftBaseline(createDeviceDraft()));
+  const draft = draftState.current;
+  const setDraft = useCallback((update: React.SetStateAction<DeviceDraft>) => {
+    setDraftState(state => replaceEditorDraft(
+      state,
+      typeof update === 'function'
+        ? update(state.current)
+        : update));
+  }, []);
+  const draftDirty = isEditorDraftDirty(draftState, deviceDraftsEqual);
   const [selectedInstanceId, setSelectedInstanceId] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -73,6 +92,45 @@ export function DevicesWorkbench({
     [resources.instances, selectedInstanceId]);
   const canCreate = isBackendHealthy && !busy;
   const canOperate = canCreate && selectedInstance !== null;
+  const editorProblems = useMemo<EditorProblem[]>(() => {
+    const problems: EditorProblem[] = [];
+    const requiredFields: Array<[keyof DeviceDraft, string, string]> = [
+      ['definitionId', 'Device definition ID is required.', 'device-definition-id'],
+      ['definitionName', 'Device definition name is required.', 'device-definition-name'],
+      ['pluginId', 'Provider plugin ID is required.', 'device-plugin-id'],
+      ['capabilityId', 'Device capability ID is required.', 'device-capability-id'],
+      ['capabilityName', 'Device capability name is required.', 'device-capability-name'],
+      ['commandDefinitionId', 'Command definition ID is required.', 'device-command-id'],
+      ['commandName', 'Command name is required.', 'device-command-name'],
+      ['instanceId', 'Device instance ID is required.', 'device-instance-id'],
+      ['stationId', 'Station identity is required.', 'device-station-id'],
+      ['instanceName', 'Device instance name is required.', 'device-instance-name'],
+      ['protocol', 'Device protocol is required.', 'device-protocol'],
+      ['address', 'Device address is required.', 'device-address']
+    ];
+    for (const [field, message, targetId] of requiredFields) {
+      if (typeof draft[field] === 'string' && !draft[field].trim()) {
+        problems.push({ id: `device-${field}`, severity: 'Error', message, targetId });
+      }
+    }
+    if (!Number.isInteger(draft.timeoutSeconds) || draft.timeoutSeconds <= 0) {
+      problems.push({
+        id: 'device-timeout',
+        severity: 'Error',
+        message: 'Command timeout must be a positive whole number of seconds.',
+        targetId: 'device-command-id'
+      });
+    }
+    if (!Number.isInteger(draft.maxRetries) || draft.maxRetries < 0) {
+      problems.push({
+        id: 'device-retries',
+        severity: 'Error',
+        message: 'Command retries must be a non-negative whole number.',
+        targetId: 'device-command-id'
+      });
+    }
+    return problems;
+  }, [draft]);
 
   const loadResources = useCallback(async () => {
     if (!isBackendHealthy) {
@@ -95,56 +153,91 @@ export function DevicesWorkbench({
     setDraft(createDeviceDraft());
   }, []);
 
+  const revertDraft = useCallback(async () => {
+    setDraftState(revertEditorDraft);
+    onMessage('Device fields discarded; the last registered values were restored.');
+  }, [onMessage]);
+
   const createBundle = useCallback(async () => {
+    const submittedDraft = draft;
     setBusy(true);
     try {
-      const definition = await createDeviceDefinition({
-        deviceDefinitionId: draft.definitionId,
-        displayName: draft.definitionName,
-        pluginId: draft.pluginId,
-        capabilities: [
-          {
-            capabilityId: draft.capabilityId,
-            displayName: draft.capabilityName
-          }
-        ],
-        commands: [
-          {
-            commandDefinitionId: draft.commandDefinitionId,
-            capabilityId: draft.capabilityId,
-            commandName: draft.commandName,
-            inputSchema: null,
-            outputSchema: null,
-            timeoutSeconds: draft.timeoutSeconds,
-            maxRetries: draft.maxRetries
-          }
-        ]
-      });
-      if (!definition.ok) {
-        onMessage(`Device definition failed: ${definition.status} ${definition.text}`);
-        return;
+      const existingDefinition = resources.definitions.find(
+        definition => definition.deviceDefinitionId === submittedDraft.definitionId) ?? null;
+      if (existingDefinition && !deviceDefinitionMatchesDraft(existingDefinition, submittedDraft)) {
+        throw new Error(
+          `Device definition ${submittedDraft.definitionId} already exists with different immutable content.`);
+      }
+      if (!existingDefinition) {
+        const definition = await createDeviceDefinition({
+          deviceDefinitionId: submittedDraft.definitionId,
+          displayName: submittedDraft.definitionName,
+          pluginId: submittedDraft.pluginId,
+          capabilities: [
+            {
+              capabilityId: submittedDraft.capabilityId,
+              displayName: submittedDraft.capabilityName
+            }
+          ],
+          commands: [
+            {
+              commandDefinitionId: submittedDraft.commandDefinitionId,
+              capabilityId: submittedDraft.capabilityId,
+              commandName: submittedDraft.commandName,
+              inputSchema: null,
+              outputSchema: null,
+              timeoutSeconds: submittedDraft.timeoutSeconds,
+              maxRetries: submittedDraft.maxRetries
+            }
+          ]
+        });
+        if (!definition.ok) {
+          throw new Error(`Device definition failed: ${definition.status} ${definition.text}`);
+        }
       }
 
-      const instance = await registerDeviceInstance({
-        deviceInstanceId: draft.instanceId,
-        deviceDefinitionId: draft.definitionId,
-        stationId: draft.stationId,
-        displayName: draft.instanceName,
-        protocol: draft.protocol,
-        address: draft.address
-      });
-      if (!instance.ok || !instance.body) {
-        onMessage(`Device instance failed: ${instance.status} ${instance.text}`);
-        return;
+      const existingInstance = resources.instances.find(
+        instance => instance.deviceInstanceId === submittedDraft.instanceId) ?? null;
+      if (existingInstance && !deviceInstanceMatchesDraft(existingInstance, submittedDraft)) {
+        throw new Error(
+          `Device instance ${submittedDraft.instanceId} already exists with different immutable content.`);
+      }
+      let registeredInstance = existingInstance;
+      if (!registeredInstance) {
+        const instance = await registerDeviceInstance({
+          deviceInstanceId: submittedDraft.instanceId,
+          deviceDefinitionId: submittedDraft.definitionId,
+          stationId: submittedDraft.stationId,
+          displayName: submittedDraft.instanceName,
+          protocol: submittedDraft.protocol,
+          address: submittedDraft.address
+        });
+        if (!instance.ok || !instance.body) {
+          throw new Error(`Device instance failed: ${instance.status} ${instance.text}`);
+        }
+        registeredInstance = instance.body;
       }
 
-      setSelectedInstanceId(instance.body.deviceInstanceId);
-      onMessage(`Device registered ${instance.body.deviceInstanceId}`);
-      await loadResources();
+      setSelectedInstanceId(registeredInstance.deviceInstanceId);
+      setDraftState(state => acceptSubmittedEditorDraft(state, submittedDraft));
+      onMessage(`Device registered ${registeredInstance.deviceInstanceId}`);
+      try {
+        await loadResources();
+      } catch (error) {
+        onMessage(
+          `Device registered ${registeredInstance.deviceInstanceId}; resource refresh failed: ${String(error)}`);
+      }
+    } catch (error) {
+      try {
+        await loadResources();
+      } catch (refreshError) {
+        onMessage(`Device save failed and resource refresh also failed: ${String(refreshError)}`);
+      }
+      throw error;
     } finally {
       setBusy(false);
     }
-  }, [draft, loadResources, onMessage]);
+  }, [draft, loadResources, onMessage, resources.definitions, resources.instances]);
 
   const changeStatus = useCallback(async (
     action: 'connect' | 'disconnect' | 'fault' | 'reset'
@@ -179,6 +272,20 @@ export function DevicesWorkbench({
     }
   }, [loadResources, onMessage, selectedInstance]);
 
+  useEditorDocument({
+    dirty: draftDirty,
+    editRevision: draft,
+    canSave: canCreate && editorProblems.length === 0,
+    save: createBundle,
+    revert: revertDraft,
+    focus: targetId => {
+      if (targetId) {
+        document.querySelector<HTMLElement>(`[data-testid="${targetId}"]`)?.focus();
+      }
+    },
+    problems: editorProblems
+  });
+
   return (
     <section className="devices-workbench">
       <div className="panel devices-builder-panel">
@@ -201,9 +308,19 @@ export function DevicesWorkbench({
           </button>
           <button
             type="button"
+            className="button ghost"
+            onClick={() => void revertDraft()}
+            disabled={!draftDirty || busy}
+            data-testid="discard-device-draft"
+          >
+            <RotateCcw size={15} />
+            Discard Changes
+          </button>
+          <button
+            type="button"
             className="button primary"
-            onClick={createBundle}
-            disabled={!canCreate}
+            onClick={() => void createBundle().catch(error => onMessage(String(error)))}
+            disabled={!canCreate || editorProblems.length > 0}
             data-testid="create-device-bundle"
           >
             <Send size={15} />
@@ -214,22 +331,22 @@ export function DevicesWorkbench({
         <div className="devices-layout">
           <div className="devices-form">
             <FieldGroup title="Definition">
-              <TextField label="Definition ID" value={draft.definitionId} onChange={value => setDraft(current => ({ ...current, definitionId: value }))} />
-              <TextField label="Display Name" value={draft.definitionName} onChange={value => setDraft(current => ({ ...current, definitionName: value }))} />
-              <TextField label="Plugin ID" value={draft.pluginId} onChange={value => setDraft(current => ({ ...current, pluginId: value }))} />
+              <TextField testId="device-definition-id" label="Definition ID" value={draft.definitionId} onChange={value => setDraft(current => ({ ...current, definitionId: value }))} />
+              <TextField testId="device-definition-name" label="Display Name" value={draft.definitionName} onChange={value => setDraft(current => ({ ...current, definitionName: value }))} />
+              <TextField testId="device-plugin-id" label="Plugin ID" value={draft.pluginId} onChange={value => setDraft(current => ({ ...current, pluginId: value }))} />
             </FieldGroup>
             <FieldGroup title="Capability And Command">
-              <TextField label="Capability ID" value={draft.capabilityId} onChange={value => setDraft(current => ({ ...current, capabilityId: value }))} />
-              <TextField label="Capability Name" value={draft.capabilityName} onChange={value => setDraft(current => ({ ...current, capabilityName: value }))} />
-              <TextField label="Command ID" value={draft.commandDefinitionId} onChange={value => setDraft(current => ({ ...current, commandDefinitionId: value }))} />
-              <TextField label="Command Name" value={draft.commandName} onChange={value => setDraft(current => ({ ...current, commandName: value }))} />
+              <TextField testId="device-capability-id" label="Capability ID" value={draft.capabilityId} onChange={value => setDraft(current => ({ ...current, capabilityId: value }))} />
+              <TextField testId="device-capability-name" label="Capability Name" value={draft.capabilityName} onChange={value => setDraft(current => ({ ...current, capabilityName: value }))} />
+              <TextField testId="device-command-id" label="Command ID" value={draft.commandDefinitionId} onChange={value => setDraft(current => ({ ...current, commandDefinitionId: value }))} />
+              <TextField testId="device-command-name" label="Command Name" value={draft.commandName} onChange={value => setDraft(current => ({ ...current, commandName: value }))} />
             </FieldGroup>
             <FieldGroup title="Instance">
-              <TextField label="Instance ID" value={draft.instanceId} onChange={value => setDraft(current => ({ ...current, instanceId: value }))} />
-              <TextField label="Station ID" value={draft.stationId} onChange={value => setDraft(current => ({ ...current, stationId: value }))} />
-              <TextField label="Display Name" value={draft.instanceName} onChange={value => setDraft(current => ({ ...current, instanceName: value }))} />
-              <TextField label="Protocol" value={draft.protocol} onChange={value => setDraft(current => ({ ...current, protocol: value }))} />
-              <TextField label="Address" value={draft.address} onChange={value => setDraft(current => ({ ...current, address: value }))} />
+              <TextField testId="device-instance-id" label="Instance ID" value={draft.instanceId} onChange={value => setDraft(current => ({ ...current, instanceId: value }))} />
+              <TextField testId="device-station-id" label="Station ID" value={draft.stationId} onChange={value => setDraft(current => ({ ...current, stationId: value }))} />
+              <TextField testId="device-instance-name" label="Display Name" value={draft.instanceName} onChange={value => setDraft(current => ({ ...current, instanceName: value }))} />
+              <TextField testId="device-protocol" label="Protocol" value={draft.protocol} onChange={value => setDraft(current => ({ ...current, protocol: value }))} />
+              <TextField testId="device-address" label="Address" value={draft.address} onChange={value => setDraft(current => ({ ...current, address: value }))} />
             </FieldGroup>
           </div>
 
@@ -312,16 +429,18 @@ function FieldGroup({
 function TextField({
   label,
   value,
+  testId,
   onChange
 }: {
   label: string;
   value: string;
+  testId?: string;
   onChange(value: string): void;
 }): React.ReactElement {
   return (
     <label>
       <span>{label}</span>
-      <input value={value} onChange={event => onChange(event.target.value)} />
+      <input data-testid={testId} value={value} onChange={event => onChange(event.target.value)} />
     </label>
   );
 }
@@ -415,4 +534,49 @@ function createDeviceDraft(): DeviceDraft {
     protocol: 'simulator',
     address: 'loopback://desktop-01'
   };
+}
+
+function deviceDraftsEqual(left: DeviceDraft, right: DeviceDraft): boolean {
+  return left.definitionId === right.definitionId
+    && left.definitionName === right.definitionName
+    && left.pluginId === right.pluginId
+    && left.capabilityId === right.capabilityId
+    && left.capabilityName === right.capabilityName
+    && left.commandDefinitionId === right.commandDefinitionId
+    && left.commandName === right.commandName
+    && left.timeoutSeconds === right.timeoutSeconds
+    && left.maxRetries === right.maxRetries
+    && left.instanceId === right.instanceId
+    && left.stationId === right.stationId
+    && left.instanceName === right.instanceName
+    && left.protocol === right.protocol
+    && left.address === right.address;
+}
+
+function deviceDefinitionMatchesDraft(
+  definition: DeviceDefinitionResponse,
+  draft: DeviceDraft
+): boolean {
+  const capability = definition.capabilities.length === 1 ? definition.capabilities[0] : null;
+  const command = definition.commands.length === 1 ? definition.commands[0] : null;
+  return definition.displayName === draft.definitionName
+    && definition.pluginId === draft.pluginId
+    && capability?.capabilityId === draft.capabilityId
+    && capability.displayName === draft.capabilityName
+    && command?.commandDefinitionId === draft.commandDefinitionId
+    && command.capabilityId === draft.capabilityId
+    && command.commandName === draft.commandName
+    && command.timeoutSeconds === draft.timeoutSeconds
+    && command.maxRetries === draft.maxRetries;
+}
+
+function deviceInstanceMatchesDraft(
+  instance: DeviceInstanceResponse,
+  draft: DeviceDraft
+): boolean {
+  return instance.deviceDefinitionId === draft.definitionId
+    && instance.stationId === draft.stationId
+    && instance.displayName === draft.instanceName
+    && instance.protocol === draft.protocol
+    && instance.address === draft.address;
 }

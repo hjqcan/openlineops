@@ -57,6 +57,10 @@ public sealed record ProjectApplicationWorkspaceScope
 
     public string ApplicationRootPath { get; }
 
+    public string PluginsRootPath => Path.Combine(
+        ApplicationRootPath,
+        ProjectApplicationPluginPackageReferenceContract.PluginsDirectoryName);
+
     private static string NormalizeApplicationProjectRelativePath(
         string applicationProjectRelativePath)
     {

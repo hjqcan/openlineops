@@ -298,6 +298,8 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
         AutomationSystemId systemId,
         string systemType,
         string displayName,
+        IReadOnlyCollection<CapabilityContractId> requiredCapabilityIds,
+        IReadOnlyCollection<CapabilityContractId> providedCapabilityIds,
         IReadOnlyDictionary<string, string> metadata)
     {
         var system = FindSystem(systemId);
@@ -308,7 +310,38 @@ public sealed class AutomationTopology : AggregateRoot<AutomationTopologyId>
                 $"Automation system {systemId} was not found in topology {Id}.");
         }
 
-        system.Update(systemType, displayName, metadata);
+        ArgumentNullException.ThrowIfNull(requiredCapabilityIds);
+        ArgumentNullException.ThrowIfNull(providedCapabilityIds);
+        var declaredCapabilityIds = requiredCapabilityIds
+            .Concat(providedCapabilityIds)
+            .Distinct()
+            .ToHashSet();
+        var missingCapabilityId = declaredCapabilityIds
+            .FirstOrDefault(capabilityId => _capabilities.All(candidate => candidate.Id != capabilityId));
+        if (missingCapabilityId is not null)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.SystemCapabilityMissing",
+                $"Capability contract {missingCapabilityId} must exist before system {systemId} can reference it.");
+        }
+
+        var boundCapabilityId = _driverBindings
+            .Where(binding => binding.OwnerSystemId == systemId)
+            .Select(binding => binding.CapabilityId)
+            .FirstOrDefault(capabilityId => !declaredCapabilityIds.Contains(capabilityId));
+        if (boundCapabilityId is not null)
+        {
+            return TopologyOperationResult.Rejected(
+                "Topology.SystemCapabilityInUse",
+                $"System {systemId} cannot remove capability {boundCapabilityId} while a Driver binding uses it.");
+        }
+
+        system.Update(
+            systemType,
+            displayName,
+            requiredCapabilityIds,
+            providedCapabilityIds,
+            metadata);
         return TopologyOperationResult.Accepted("Automation system updated.");
     }
 

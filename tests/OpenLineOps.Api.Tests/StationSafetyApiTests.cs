@@ -12,15 +12,15 @@ using OpenLineOps.Runtime.Infrastructure.Persistence;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class StationSafetyApiTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
     private const string Endpoint =
         "/api/operations/stations/station-system.api/emergency-stop";
     private static readonly DateTimeOffset RequestedAtUtc =
         new(2026, 7, 11, 10, 15, 0, TimeSpan.Zero);
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly OpenLineOpsApiWebApplicationFactory _factory;
 
-    public StationSafetyApiTests(WebApplicationFactory<Program> factory)
+    public StationSafetyApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
         _factory = factory;
     }
@@ -30,7 +30,8 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
     {
         var gateway = new RecordingEmergencyGateway(Acknowledge);
         using var factory = Factory(gateway, new DeploymentResolver());
-        using var client = factory.CreateClient();
+        using var client = factory.CreateAuthenticatedClient(
+            token: ApiTestAuthentication.SafetyToken);
         var request = Body();
 
         using var first = await client.PostAsJsonAsync(Endpoint, request);
@@ -42,6 +43,9 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
         Assert.Equal("agent.api", firstJson.RootElement.GetProperty("agentId").GetString());
         Assert.Equal("station.api", firstJson.RootElement.GetProperty("stationId").GetString());
         Assert.Equal("Acknowledged", firstJson.RootElement.GetProperty("status").GetString());
+        Assert.Equal(
+            ApiTestAuthentication.SafetyActorId,
+            firstJson.RootElement.GetProperty("actorId").GetString());
         Assert.True(replayJson.RootElement.GetProperty("replayed").GetBoolean());
         Assert.Equal(1, gateway.InvocationCount);
 
@@ -52,7 +56,9 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
         var persisted = Assert.Single(eventsJson.RootElement.GetProperty("events").EnumerateArray());
         Assert.Equal(2, persisted.GetProperty("evidence").GetArrayLength());
 
-        using var trace = await client.GetAsync(
+        using var operatorClient = factory.CreateAuthenticatedClient(
+            token: ApiTestAuthentication.OperatorToken);
+        using var trace = await operatorClient.GetAsync(
             "/api/traceability/station-safety-evidence?projectId=project.api&applicationId=application.api&stationSystemId=station-system.api");
         using var traceJson = await ReadJsonAsync(trace);
         Assert.Equal(HttpStatusCode.OK, trace.StatusCode);
@@ -68,7 +74,8 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
     {
         var gateway = new RecordingEmergencyGateway(Acknowledge);
         using var factory = Factory(gateway, new DeploymentResolver());
-        using var client = factory.CreateClient();
+        using var client = factory.CreateAuthenticatedClient(
+            token: ApiTestAuthentication.SafetyToken);
         var request = Body();
 
         using var response = await client.PostAsJsonAsync(Endpoint, new
@@ -78,7 +85,6 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
             request.ProjectId,
             request.ApplicationId,
             request.ProjectSnapshotId,
-            request.ActorId,
             request.Reason,
             request.RequestedAtUtc,
             agentId = "agent.spoofed"
@@ -93,7 +99,8 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
     {
         var gateway = new RecordingEmergencyGateway(Acknowledge);
         using (var missingFactory = Factory(gateway, new RejectingDeploymentResolver()))
-        using (var missingClient = missingFactory.CreateClient())
+        using (var missingClient = missingFactory.CreateAuthenticatedClient(
+                   token: ApiTestAuthentication.SafetyToken))
         using (var missing = await missingClient.PostAsJsonAsync(Endpoint, Body()))
         {
             Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
@@ -101,7 +108,8 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
         }
 
         using var factory = Factory(gateway, new DeploymentResolver());
-        using var client = factory.CreateClient();
+        using var client = factory.CreateAuthenticatedClient(
+            token: ApiTestAuthentication.SafetyToken);
         var request = Body();
         using var accepted = await client.PostAsJsonAsync(Endpoint, request);
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
@@ -112,7 +120,6 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
             request.ProjectId,
             request.ApplicationId,
             request.ProjectSnapshotId,
-            request.ActorId,
             reason = "Different safety evidence.",
             request.RequestedAtUtc
         });
@@ -126,7 +133,8 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
         var gateway = new RecordingEmergencyGateway(_ =>
             throw new IOException("RabbitMQ publish confirmation failed."));
         using var factory = Factory(gateway, new DeploymentResolver());
-        using var client = factory.CreateClient();
+        using var client = factory.CreateAuthenticatedClient(
+            token: ApiTestAuthentication.SafetyToken);
         var request = Body();
 
         using var pending = await client.PostAsJsonAsync(Endpoint, request);
@@ -142,7 +150,6 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
             request.ProjectId,
             request.ApplicationId,
             request.ProjectSnapshotId,
-            request.ActorId,
             request.Reason,
             request.RequestedAtUtc
         });
@@ -155,7 +162,6 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
             request.ProjectId,
             request.ApplicationId,
             request.ProjectSnapshotId,
-            request.ActorId,
             request.Reason,
             requestedAtUtc = "2026-07-11T18:15:00.0000000+08:00"
         });
@@ -168,7 +174,6 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
             request.ProjectId,
             request.ApplicationId,
             request.ProjectSnapshotId,
-            request.ActorId,
             request.Reason,
             requestedAtUtc = "0001-01-01T00:00:00.000Z"
         });
@@ -181,7 +186,6 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
             request.ProjectId,
             request.ApplicationId,
             request.ProjectSnapshotId,
-            request.ActorId,
             request.Reason,
             requestedAtUtc = "9999-12-31T23:59:59.999Z"
         });
@@ -216,7 +220,6 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
         "project.api",
         "application.api",
         "snapshot.api",
-        "operator.api",
         "Operator observed an unsafe guarded-cell entry.",
         RequestedAtUtc.ToString(
             "yyyy-MM-dd'T'HH:mm:ss.fff'Z'",
@@ -280,7 +283,6 @@ public sealed class StationSafetyApiTests : IClassFixture<WebApplicationFactory<
         string ProjectId,
         string ApplicationId,
         string ProjectSnapshotId,
-        string ActorId,
         string Reason,
         string RequestedAtUtc);
 }

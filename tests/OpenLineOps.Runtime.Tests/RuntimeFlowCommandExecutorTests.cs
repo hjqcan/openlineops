@@ -1,5 +1,6 @@
 using System.Text.Json;
 using OpenLineOps.Runtime.Application.Commands;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Infrastructure.Commands;
@@ -167,6 +168,7 @@ public sealed class RuntimeFlowCommandExecutorTests
             "project.main",
             "application.main",
             "snapshot.release",
+            new Dictionary<string, ProductionContextValue>(),
             RuntimeTestReleaseIdentity.ResourceFences());
     }
 }

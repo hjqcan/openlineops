@@ -128,6 +128,23 @@ foreach ($requiredFile in @(
     Test-RequiredFile $requiredFile | Out-Null
 }
 
+$trackedOrUntrackedPackageLocks = @(
+    & git -C $RepoRoot ls-files --cached --others --exclude-standard -- "*package-lock.json" |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Where-Object { Test-Path -LiteralPath (Resolve-RepoPath $_) -PathType Leaf } |
+        ForEach-Object { $_.Replace('\', '/') } |
+        Sort-Object -Unique
+)
+if ($LASTEXITCODE -ne 0) {
+    Add-Failure "Unable to enumerate package-lock.json files with git."
+}
+$expectedPackageLocks = @("apps/desktop/package-lock.json")
+if (($trackedOrUntrackedPackageLocks -join "`n") -cne ($expectedPackageLocks -join "`n")) {
+    Add-Failure (
+        "Every package-lock.json must have an explicit CI audit; expected " +
+        "'$($expectedPackageLocks -join ', ')', found '$($trackedOrUntrackedPackageLocks -join ', ')'.")
+}
+
 $directoryBuildPropsPath = Resolve-RepoPath "Directory.Build.props"
 if (Test-Path -LiteralPath $directoryBuildPropsPath -PathType Leaf) {
     [xml] $directoryBuildProps = Get-Content -LiteralPath $directoryBuildPropsPath -Raw

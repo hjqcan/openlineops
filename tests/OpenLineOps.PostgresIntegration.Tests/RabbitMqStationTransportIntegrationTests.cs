@@ -7,6 +7,7 @@ using OpenLineOps.Agent.Infrastructure.Transport;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
+using OpenLineOps.Runtime.Infrastructure.Time;
 using OpenLineOps.Runtime.Infrastructure.Transport;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Exceptions;
@@ -40,16 +41,32 @@ public sealed class RabbitMqStationTransportIntegrationTests
             RequireTls = false,
             CoordinatorId = coordinatorId,
             JobExchange = jobExchange,
-            EventExchange = eventExchange
+            EventExchange = eventExchange,
+            Deployments =
+            [
+                new StationDeploymentOptions
+                {
+                    ProjectId = "project.main",
+                    ApplicationId = "application.main",
+                    AgentId = agentId,
+                    StationId = stationId,
+                    StationSystemId = "station-system.main"
+                }
+            ]
         };
+        var presenceRepository = new InMemoryAgentPresenceRepository();
         await using var coordinator = new RabbitMqStationCoordinatorTransport(
             coordinatorOptions,
-            store);
+            store,
+            presenceRepository,
+            ArtifactFreeStationArtifactReceiptVerifier.Instance,
+            new SystemClock());
         await using var agent = new RabbitMqStationTransport(
             new RabbitMqStationTransportOptions(
                 brokerUri,
                 agentId,
                 stationId,
+                "station-system.main",
                 jobExchange,
                 eventExchange,
                 PrefetchCount: 1,
@@ -113,7 +130,7 @@ public sealed class RabbitMqStationTransportIntegrationTests
         Assert.Equal(1, Volatile.Read(ref physicalExecutions));
 
         using var resultStop = new CancellationTokenSource();
-        var resultLoop = coordinator.RunResultInboxAsync(
+        await coordinator.StartResultInboxAsync(
             static (_, cancellationToken) =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -124,7 +141,37 @@ public sealed class RabbitMqStationTransportIntegrationTests
                 cancellationToken.ThrowIfCancellationRequested();
                 return ValueTask.CompletedTask;
             },
+            resultStop.Token,
             resultStop.Token);
+        var presenceSessionId = Guid.NewGuid();
+        var startedPresence = new AgentPresenceReported(
+            agentId,
+            stationId,
+            "station-system.main",
+            presenceSessionId,
+            1,
+            AgentPresenceState.Started,
+            DateTimeOffset.UtcNow);
+        await agent.PublishAsync(
+            nameof(AgentPresenceReported),
+            JsonSerializer.Serialize(startedPresence, JsonOptions()));
+        await WaitUntilAsync(
+            async () => (await presenceRepository.GetAsync(agentId, stationId))?.SessionId
+                == presenceSessionId,
+            TimeSpan.FromSeconds(10));
+        await agent.PublishAsync(
+            nameof(AgentPresenceReported),
+            JsonSerializer.Serialize(
+                startedPresence with
+                {
+                    Sequence = 2,
+                    State = AgentPresenceState.Heartbeat,
+                    ObservedAtUtc = DateTimeOffset.UtcNow
+                },
+                JsonOptions()));
+        await WaitUntilAsync(
+            async () => (await presenceRepository.GetAsync(agentId, stationId))?.Sequence == 2,
+            TimeSpan.FromSeconds(10));
         await store.RecordAcceptedAsync(new StationJobAccepted(
             Guid.NewGuid(),
             request.JobId,
@@ -141,14 +188,20 @@ public sealed class RabbitMqStationTransportIntegrationTests
             TimeSpan.FromSeconds(10));
 
         var unroutable = JobRequest(agentId, $"missing-{suffix}");
-        await Assert.ThrowsAsync<PublishException>(async () =>
+        var returned = await Assert.ThrowsAsync<PublishReturnException>(async () =>
             await coordinator.PublishAsync(unroutable));
+        Assert.Equal(312, returned.ReplyCode);
+        Assert.Equal("NO_ROUTE", returned.ReplyText);
+        Assert.Equal(jobExchange, returned.Exchange);
+        Assert.Equal(
+            StationTransportRoute.Job(unroutable.AgentId, unroutable.StationId),
+            returned.RoutingKey);
         await coordinator.PublishAsync(JobRequest(agentId, stationId));
         await resumedAfterReturn.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
         resultStop.Cancel();
+        await coordinator.StopResultInboxAsync();
         agentStop.Cancel();
-        await ObserveCancellationAsync(resultLoop);
         await ObserveCancellationAsync(agentLoop);
     }
 
@@ -268,22 +321,28 @@ public sealed class RabbitMqStationTransportIntegrationTests
         await using var channel = await connection.CreateChannelAsync();
         await channel.ExchangeDeclareAsync(jobExchange, ExchangeType.Direct, true, false);
         await channel.ExchangeDeclareAsync(eventExchange, ExchangeType.Topic, true, false);
-        var jobQueue = $"openlineops.station.{agentId}.{stationId}.jobs";
+        var jobQueue = StationTransportRoute.JobQueue(agentId, stationId);
         await channel.QueueDeclareAsync(jobQueue, true, false, false);
         await channel.QueueBindAsync(
             jobQueue,
             jobExchange,
-            $"station.{agentId}.{stationId}");
+            StationTransportRoute.Job(agentId, stationId));
         var resultQueue = $"openlineops.coordinator.{coordinatorId}.station-results";
         await channel.QueueDeclareAsync(resultQueue, true, false, false);
         foreach (var type in new[]
                  {
                      nameof(StationJobAccepted),
                      nameof(StationJobProgressed),
-                     nameof(StationJobCompleted)
+                     nameof(StationJobCompleted),
+                     nameof(StationJobRecoveryRequired),
+                     nameof(MaterialArrived),
+                     nameof(AgentPresenceReported)
                  })
         {
-            await channel.QueueBindAsync(resultQueue, eventExchange, $"station.*.{type}");
+            await channel.QueueBindAsync(
+                resultQueue,
+                eventExchange,
+                StationTransportRoute.EventPattern(type));
         }
     }
 
@@ -305,12 +364,12 @@ public sealed class RabbitMqStationTransportIntegrationTests
         };
         foreach (var suffix in new[] { "emergency-stop", "safe-stop", "job-cancel" })
         {
-            var queue = $"openlineops.station.{agentId}.{stationId}.{suffix}";
+            var queue = StationTransportRoute.SafetyQueue(agentId, stationId, suffix);
             await channel.QueueDeclareAsync(queue, true, false, false, arguments);
             await channel.QueueBindAsync(
                 queue,
                 commandExchange,
-                $"station.{agentId}.{stationId}.{suffix}");
+                StationTransportRoute.Safety(agentId, stationId, suffix));
         }
     }
 

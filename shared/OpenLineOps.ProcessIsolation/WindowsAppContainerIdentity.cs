@@ -12,6 +12,9 @@ public static class WindowsAppContainerIdentity
     public const string ExternalProgramContentCapabilityName =
         "OpenLineOps.externalProgramContent";
 
+    public const string PythonRuntimeCapabilityName =
+        "OpenLineOps.pythonRuntime";
+
     private const int ErrorFileNotFoundHResult = unchecked((int)0x80070002);
     private const int ErrorNotFoundHResult = unchecked((int)0x80070490);
 
@@ -91,7 +94,7 @@ public static class WindowsAppContainerIdentity
         return mapping is not null;
     }
 
-    internal static string GetProfileFolderPath(string appContainerSid)
+    public static string GetProfileFolderPath(string appContainerSid)
     {
         if (!OperatingSystem.IsWindows())
         {

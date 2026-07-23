@@ -83,17 +83,27 @@ public sealed record ProductionContextValue
                     CanonicalValue,
                     StringComparison.Ordinal),
             ProductionContextValueKind.FixedPoint => decimal.TryParse(
-                CanonicalValue,
-                NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
-                CultureInfo.InvariantCulture,
-                out _),
+                    CanonicalValue,
+                    NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                    CultureInfo.InvariantCulture,
+                    out var fixedPoint)
+                && string.Equals(
+                    fixedPoint.ToString(
+                        "0.############################",
+                        CultureInfo.InvariantCulture),
+                    CanonicalValue,
+                    StringComparison.Ordinal),
             ProductionContextValueKind.DateTimeUtc => DateTimeOffset.TryParseExact(
-                CanonicalValue,
-                "O",
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.None,
-                out var timestamp)
-                && timestamp.Offset == TimeSpan.Zero,
+                    CanonicalValue,
+                    "O",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out var timestamp)
+                && timestamp.Offset == TimeSpan.Zero
+                && string.Equals(
+                    timestamp.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+                    CanonicalValue,
+                    StringComparison.Ordinal),
             _ => false
         };
         if (!valid)

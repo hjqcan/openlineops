@@ -13,19 +13,43 @@ permissions:
 jobs:
   verify:
     name: Verify
-    runs-on: windows-latest
+    runs-on: windows-2025
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Verify CI workflow actions
         shell: powershell
         run: ./eng/verify-ci-workflow-actions.ps1
 
+      - name: Test CI workflow verifier
+        shell: powershell
+        run: ./eng/verify-ci-workflow-actions.tests.ps1
+
+      - name: Test publication evidence validators
+        shell: powershell
+        run: ./eng/verify-evidence-validation.tests.ps1
+
+      - name: Test GitHub fixture PowerShell host
+        shell: powershell
+        run: ./eng/github-fixture-process.tests.ps1
+
+      - name: Test Studio two-Agent evidence validator
+        shell: powershell
+        run: ./eng/verify-studio-two-agent-production-evidence.tests.ps1
+
+      - name: Test Runner staged-Agent evidence validator
+        shell: powershell
+        run: ./eng/verify-runner-staged-agent-evidence.tests.ps1
+
       - name: Reject version-suffixed implementations
         shell: powershell
         run: ./eng/verify-no-version-suffix-implementations.ps1
+
+      - name: Test version-suffix verifier
+        shell: powershell
+        run: ./eng/verify-no-version-suffix-implementations.tests.ps1
 
       - name: Reject technical-debt markers
         shell: powershell
@@ -36,16 +60,16 @@ jobs:
         run: ./eng/verify-no-legacy-production-contracts.ps1
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.301
 
       - name: Verify solution project coverage
         shell: powershell
         run: ./eng/verify-solution-project-coverage.ps1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -87,16 +111,29 @@ jobs:
         run: dotnet format OpenLineOps.sln style --no-restore --verify-no-changes --exclude lib/pythonscript --exclude lib/NetDevPack --severity warn --verbosity minimal
 
       - name: Build .NET
-        run: dotnet build OpenLineOps.sln --no-restore -v minimal --property:TreatWarningsAsErrors=true
+        run: dotnet build OpenLineOps.sln --configuration Release --no-restore -v minimal --property:TreatWarningsAsErrors=true
 
       - name: Build PythonScript component
-        run: dotnet build lib/pythonscript/PythonScript.sln --no-restore -v minimal --property:TreatWarningsAsErrors=true
+        run: dotnet build lib/pythonscript/PythonScript.sln --configuration Release --no-restore -v minimal --property:TreatWarningsAsErrors=true
 
       - name: Test .NET with isolated Windows process hosts
-        run: dotnet test OpenLineOps.sln --no-build -v minimal -m:1
+        run: dotnet test OpenLineOps.sln --configuration Release --no-build -v minimal -m:1
 
       - name: Check .NET package vulnerabilities
-        run: dotnet list OpenLineOps.sln package --vulnerable --include-transitive
+        shell: powershell
+        run: ./eng/verify-dotnet-package-vulnerabilities.ps1
+
+      - name: Test .NET package vulnerability gate
+        shell: powershell
+        run: ./eng/verify-dotnet-package-vulnerabilities.tests.ps1
+
+      - name: Verify release staging security boundaries
+        shell: powershell
+        run: ./eng/verify-release-staging-security.ps1
+
+      - name: Verify Station Agent content-cache provisioning contract
+        shell: powershell
+        run: ./eng/verify-station-agent-content-cache-contract.ps1
 
       - name: Verify open-source metadata
         shell: powershell
@@ -106,15 +143,23 @@ jobs:
         shell: powershell
         run: ./eng/verify-third-party-license-metadata.ps1
 
+      - name: Test third-party license metadata determinism
+        shell: powershell
+        run: ./eng/verify-third-party-license-metadata.tests.ps1
+
       - name: Smoke test release manifest tool
-        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --no-build -- --help
+        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --configuration Release --no-build -- --help
 
       - name: Build sample plugin
-        run: dotnet build samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj -v minimal
+        run: dotnet build samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj --configuration Release --no-restore -v minimal
 
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci
+
+      - name: Check desktop package vulnerabilities
+        working-directory: apps/desktop
+        run: npm audit --audit-level=high --registry=https://registry.npmjs.org
 
       - name: Typecheck desktop
         working-directory: apps/desktop
@@ -128,30 +173,400 @@ jobs:
         working-directory: apps/desktop
         run: npm run test:editor-workspace
 
+      - name: Test resource draft transition guard
+        working-directory: apps/desktop
+        run: npm run test:draft-transition-guard
+
+      - name: Test Flow problem location
+        working-directory: apps/desktop
+        run: npm run test:process-problem-location
+
+      - name: Test Topology draft workspace
+        working-directory: apps/desktop
+        run: npm run test:topology-draft-workspace
+
+      - name: Test configuration draft workspace
+        working-directory: apps/desktop
+        run: npm run test:configuration-draft-workspace
+
+      - name: Test runtime monitoring fail-closed projection
+        working-directory: apps/desktop
+        run: npm run test:runtime-monitoring-fail-closed
+
+      - name: Test desktop API credential boundary
+        working-directory: apps/desktop
+        run: npm run test:api-credential-security
+
+      - name: Test Application extension import boundary
+        working-directory: apps/desktop
+        run: npm run test:extension-import-security
+
+      - name: Test external program directory import boundary
+        working-directory: apps/desktop
+        run: npm run test:external-program-directory-import
+
+      - name: Test verified Trace artifact save
+        working-directory: apps/desktop
+        run: npm run test:trace-artifact-save
+
+      - name: Test packaged runtime data binding
+        working-directory: apps/desktop
+        run: npm run test:runtime-data-binding
+
       - name: Test production route validation
         working-directory: apps/desktop
         run: npm run test:production-route-validation
+
+      - name: Test production route runtime projection
+        working-directory: apps/desktop
+        run: npm run test:production-route-runtime
+
+      - name: Test production route layout persistence
+        working-directory: apps/desktop
+        run: npm run test:production-route-layout
+
+      - name: Test production operator command policy
+        working-directory: apps/desktop
+        run: npm run test:production-command-policy
 
       - name: Build desktop
         working-directory: apps/desktop
         run: npm run build
 
+      - name: Smoke test desktop
+        working-directory: apps/desktop
+        run: npm run smoke:e2e
+
       - name: Restore self-contained Windows production hosts
         run: |
+          dotnet restore src/OpenLineOps.Api/OpenLineOps.Api.csproj --runtime win-x64
           dotnet restore src/OpenLineOps.Agent/OpenLineOps.Agent.csproj --runtime win-x64
           dotnet restore src/OpenLineOps.StationRuntime/OpenLineOps.StationRuntime.csproj --runtime win-x64
+          dotnet restore src/OpenLineOps.PluginHost/OpenLineOps.PluginHost.csproj --runtime win-x64
+          dotnet restore src/OpenLineOps.ScriptWorker/OpenLineOps.ScriptWorker.csproj --runtime win-x64
+          dotnet restore src/OpenLineOps.LeastPrivilegeLauncher/OpenLineOps.LeastPrivilegeLauncher.csproj --runtime win-x64
           dotnet restore src/OpenLineOps.Runner/OpenLineOps.Runner.csproj --runtime win-x64
 
       - name: Stage release artifacts
         shell: powershell
         run: ./eng/stage-release-artifacts.ps1 -Configuration Release -Version 0.0.0-ci -NoRestore -SkipDesktopBuild
 
+      - name: Smoke test packaged default user data
+        working-directory: apps/desktop
+        timeout-minutes: 5
+        env:
+          OPENLINEOPS_ALLOW_DEFAULT_USER_DATA_SMOKE: "1"
+        run: npm run smoke:e2e:packaged-default-user-data
+
+      - name: Smoke test staged packaged desktop
+        working-directory: apps/desktop
+        timeout-minutes: 15
+        run: npm run smoke:e2e:packaged-existing
+
       - name: Verify staged release manifest
-        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --no-build -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
+        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --configuration Release --no-build -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
 
       - name: Inspect release candidate
         shell: powershell
         run: ./eng/inspect-release-candidate.ps1
+
+      - name: Setup PostgreSQL for Windows production gates
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $serviceName = "postgresql-x64-17"
+          $service = Get-Service -Name $serviceName -ErrorAction Stop
+          if ($service.StartType -eq [System.ServiceProcess.ServiceStartMode]::Disabled) {
+            Set-Service -Name $serviceName -StartupType Manual
+          }
+          if ($service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+            Start-Service -Name $serviceName
+          }
+
+          $deadline = [DateTimeOffset]::UtcNow.AddMinutes(2)
+          $ready = $false
+          do {
+            $client = [System.Net.Sockets.TcpClient]::new()
+            try {
+              $connectTask = $client.ConnectAsync("127.0.0.1", 5432)
+              $ready = $connectTask.Wait([TimeSpan]::FromSeconds(2)) -and $client.Connected
+            }
+            catch {
+              $ready = $false
+            }
+            finally {
+              $client.Dispose()
+            }
+
+            if (-not $ready) {
+              Start-Sleep -Seconds 2
+            }
+          } while (-not $ready -and [DateTimeOffset]::UtcNow -lt $deadline)
+
+          if (-not $ready) {
+            $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+            throw "PostgreSQL did not become ready on 127.0.0.1:5432. Service status: $($service.Status)."
+          }
+
+          $psql = Join-Path $env:PGBIN "psql.exe"
+          if (-not (Test-Path -LiteralPath $psql -PathType Leaf)) {
+            throw "The GitHub Windows PostgreSQL client was not found under PGBIN."
+          }
+          $env:PGPASSWORD = "root"
+          $probe = & $psql `
+            --host 127.0.0.1 `
+            --port 5432 `
+            --username postgres `
+            --dbname postgres `
+            --no-password `
+            --tuples-only `
+            --no-align `
+            --command "SELECT 1;"
+          $probeText = (($probe | ForEach-Object { $_.ToString() }) -join "`n").Trim()
+          if ($LASTEXITCODE -ne 0 -or $probeText -cne "1") {
+            throw "PostgreSQL SQL readiness probe failed."
+          }
+
+          $connectionString = "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=root;Timeout=5;Command Timeout=30;Pooling=false"
+          "OPENLINEOPS_POSTGRES_CONNECTION_STRING=$connectionString" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "PostgreSQL is ready for the Windows production gates on 127.0.0.1:5432."
+
+      - name: Setup RabbitMQ for staged Agent E2E
+        shell: powershell
+        timeout-minutes: 10
+        run: |
+          $erlangVersion = "27.3.4.8"
+          $rabbitMqVersion = "4.3.1"
+
+          choco install erlang --version=$erlangVersion --yes --no-progress --limit-output --allow-downgrade
+          if ($LASTEXITCODE -ne 0) {
+            throw "Chocolatey failed to install Erlang $erlangVersion (exit code $LASTEXITCODE)."
+          }
+
+          choco install rabbitmq --version=$rabbitMqVersion --yes --no-progress --limit-output --allow-downgrade
+          if ($LASTEXITCODE -ne 0) {
+            throw "Chocolatey failed to install RabbitMQ $rabbitMqVersion (exit code $LASTEXITCODE)."
+          }
+
+          $rabbitMqService = Get-Service -Name RabbitMQ -ErrorAction Stop
+          if ($rabbitMqService.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
+            Start-Service -Name RabbitMQ
+          }
+
+          $rabbitMqServerRoot = Join-Path $env:ProgramFiles "RabbitMQ Server"
+          $rabbitMqCtlCandidates = @(
+            Get-ChildItem `
+              -LiteralPath $rabbitMqServerRoot `
+              -Filter "rabbitmqctl.bat" `
+              -File `
+              -Recurse `
+              -ErrorAction Stop
+          )
+          if ($rabbitMqCtlCandidates.Count -ne 1) {
+            throw "Expected exactly one RabbitMQ control tool under '$rabbitMqServerRoot'; found $($rabbitMqCtlCandidates.Count)."
+          }
+          $rabbitMqCtl = $rabbitMqCtlCandidates[0].FullName
+
+          $serviceCookie = @(
+            (Join-Path $env:SystemRoot "system32\config\systemprofile\.erlang.cookie"),
+            (Join-Path $env:SystemRoot ".erlang.cookie")
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($serviceCookie)) {
+            throw "RabbitMQ Windows service Erlang cookie was not found."
+          }
+          Copy-Item -LiteralPath $serviceCookie -Destination (Join-Path $env:USERPROFILE ".erlang.cookie") -Force
+
+          & $rabbitMqCtl await_startup --timeout 120
+          if ($LASTEXITCODE -ne 0) {
+            throw "rabbitmqctl await_startup failed for RabbitMQ $rabbitMqVersion (exit code $LASTEXITCODE)."
+          }
+
+          $deadline = [DateTimeOffset]::UtcNow.AddMinutes(2)
+          $ready = $false
+          do {
+            $client = [System.Net.Sockets.TcpClient]::new()
+            try {
+              $connectTask = $client.ConnectAsync("127.0.0.1", 5672)
+              $ready = $connectTask.Wait([TimeSpan]::FromSeconds(2)) -and $client.Connected
+            }
+            catch {
+              $ready = $false
+            }
+            finally {
+              $client.Dispose()
+            }
+
+            if (-not $ready) {
+              Start-Sleep -Seconds 2
+            }
+          } while (-not $ready -and [DateTimeOffset]::UtcNow -lt $deadline)
+
+          if (-not $ready) {
+            $rabbitMqService = Get-Service -Name RabbitMQ -ErrorAction SilentlyContinue
+            throw "RabbitMQ $rabbitMqVersion did not become ready on 127.0.0.1:5672. Service status: $($rabbitMqService.Status)."
+          }
+
+          $rabbitMqUri = "amqp://guest:guest@127.0.0.1:5672/%2f"
+          "OPENLINEOPS_RABBITMQ_URI=$rabbitMqUri" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "RabbitMQ $rabbitMqVersion is ready for the staged Agent gate on 127.0.0.1:5672."
+
+      - name: Prepare run-scoped Agent service cleanup contracts
+        shell: powershell
+        run: |
+          $cleanupRoot = Join-Path $env:RUNNER_TEMP "openlineops-agent-service-cleanup"
+          $rabbitScope = [System.Guid]::NewGuid().ToString("N")
+          $externalAbortScope = [System.Guid]::NewGuid().ToString("N")
+          $studioScope = [System.Guid]::NewGuid().ToString("N")
+          $runnerScope = [System.Guid]::NewGuid().ToString("N")
+          $rabbitManifest = Join-Path $cleanupRoot "rabbitmq-$rabbitScope.json"
+          $externalAbortManifest = Join-Path $cleanupRoot "rabbitmq-$externalAbortScope.json"
+          $externalAbortReady = Join-Path $cleanupRoot "external-abort-ready-$externalAbortScope.json"
+          $studioManifest = Join-Path $cleanupRoot "studio-two-agent-$studioScope.json"
+          $runnerManifest = Join-Path $cleanupRoot "runner-$runnerScope.json"
+          "OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE=$rabbitScope" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH=$rabbitManifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE=$externalAbortScope" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_EXTERNAL_ABORT_CLEANUP_MANIFEST_PATH=$externalAbortManifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_EXTERNAL_ABORT_READY_PATH=$externalAbortReady" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE=$studioScope" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH=$studioManifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE=$runnerScope" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OPENLINEOPS_CI_RUNNER_CLEANUP_MANIFEST_PATH=$runnerManifest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run staged Agent bundle E2E
+        shell: powershell
+        timeout-minutes: 25
+        env:
+          OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE: ${{ env.OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE }}
+          OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH: ${{ env.OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_RABBITMQ_URI)) {
+            throw "OPENLINEOPS_RABBITMQ_URI was not provided by the RabbitMQ readiness step."
+          }
+
+          ./eng/verify-staged-agent-bundle-e2e.ps1 -Configuration Release -NoBuild -NoRestore
+
+      - name: Cleanup staged Agent Windows service scope
+        if: ${{ always() && env.OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE != '' }}
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $agentRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\agent'
+          ./eng/invoke-run-scoped-agent-service-cleanup.ps1 -Kind rabbitmq -Scope $env:OPENLINEOPS_CI_RABBITMQ_SERVICE_SCOPE -AgentBundleRoot $agentRoot -ManifestPath $env:OPENLINEOPS_CI_RABBITMQ_CLEANUP_MANIFEST_PATH -Configuration Release -NoBuild -NoRestore
+
+      - name: Verify external-abort Agent service scavenging
+        shell: powershell
+        timeout-minutes: 10
+        env:
+          OPENLINEOPS_STAGED_AGENT_SERVICE_SCOPE: ${{ env.OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE }}
+          OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH: ${{ env.OPENLINEOPS_CI_EXTERNAL_ABORT_CLEANUP_MANIFEST_PATH }}
+          OPENLINEOPS_AGENT_SERVICE_EXTERNAL_ABORT_READY_PATH: ${{ env.OPENLINEOPS_CI_EXTERNAL_ABORT_READY_PATH }}
+        run: |
+          $agentRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\agent'
+          $samplePluginRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\sample-plugin'
+          $apiRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\api'
+          ./eng/verify-agent-service-external-abort-cleanup.ps1 -AgentBundleRoot $agentRoot -SamplePluginRoot $samplePluginRoot -ApiBundleRoot $apiRoot -Configuration Release -NoBuild -NoRestore
+
+      - name: Cleanup external-abort Agent Windows service scope
+        if: ${{ always() && env.OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE != '' }}
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $agentRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\agent'
+          ./eng/invoke-run-scoped-agent-service-cleanup.ps1 -Kind rabbitmq -Scope $env:OPENLINEOPS_CI_EXTERNAL_ABORT_SERVICE_SCOPE -AgentBundleRoot $agentRoot -ManifestPath $env:OPENLINEOPS_CI_EXTERNAL_ABORT_CLEANUP_MANIFEST_PATH -Configuration Release -NoBuild -NoRestore
+
+      - name: Run packaged Studio two-Agent production closure
+        shell: powershell
+        timeout-minutes: 35
+        env:
+          OPENLINEOPS_STUDIO_TWO_AGENT_SERVICE_SCOPE: ${{ env.OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE }}
+          OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH: ${{ env.OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_POSTGRES_CONNECTION_STRING)) {
+            throw "OPENLINEOPS_POSTGRES_CONNECTION_STRING was not provided by the PostgreSQL readiness step."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_RABBITMQ_URI)) {
+            throw "OPENLINEOPS_RABBITMQ_URI was not provided by the RabbitMQ readiness step."
+          }
+
+          ./eng/verify-studio-two-agent-production-closure.ps1 -Configuration Release -NoBuild -NoRestore
+
+      - name: Cleanup Studio two-Agent Windows service scope
+        if: ${{ always() && env.OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE != '' }}
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $agentRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\agent'
+          ./eng/invoke-run-scoped-agent-service-cleanup.ps1 -Kind studio-two-agent -Scope $env:OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE -AgentBundleRoot $agentRoot -ManifestPath $env:OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH -Configuration Release -NoBuild -NoRestore
+
+      - name: Verify sanitized production closure evidence
+        id: production_closure_evidence
+        if: ${{ always() && hashFiles('artifacts/production-closure-e2e/**') != '' }}
+        shell: powershell
+        run: ./eng/verify-production-closure-evidence.ps1 -EvidenceRoot artifacts/production-closure-e2e -RequirePassed
+
+      - name: Verify sanitized Studio two-Agent evidence
+        id: studio_two_agent_evidence
+        if: ${{ always() && hashFiles('output/studio-two-agent-production-closure/**') != '' }}
+        shell: powershell
+        run: ./eng/verify-studio-two-agent-production-evidence.ps1
+
+      - name: Run staged Runner production closure
+        shell: powershell
+        timeout-minutes: 15
+        env:
+          OPENLINEOPS_RUNNER_STAGED_AGENT_SERVICE_SCOPE: ${{ env.OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE }}
+          OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH: ${{ env.OPENLINEOPS_CI_RUNNER_CLEANUP_MANIFEST_PATH }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_POSTGRES_CONNECTION_STRING)) {
+            throw "OPENLINEOPS_POSTGRES_CONNECTION_STRING was not provided by the PostgreSQL readiness step."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:OPENLINEOPS_RABBITMQ_URI)) {
+            throw "OPENLINEOPS_RABBITMQ_URI was not provided by the RabbitMQ readiness step."
+          }
+
+          ./eng/verify-runner-staged-agent-e2e.ps1 -Configuration Release -NoBuild -NoRestore
+
+      - name: Cleanup Runner staged-Agent Windows service scope
+        if: ${{ always() && env.OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE != '' }}
+        shell: powershell
+        timeout-minutes: 5
+        run: |
+          $agentRoot = Join-Path $env:GITHUB_WORKSPACE 'artifacts\release-work\agent'
+          ./eng/invoke-run-scoped-agent-service-cleanup.ps1 -Kind runner -Scope $env:OPENLINEOPS_CI_RUNNER_SERVICE_SCOPE -AgentBundleRoot $agentRoot -ManifestPath $env:OPENLINEOPS_CI_RUNNER_CLEANUP_MANIFEST_PATH -Configuration Release -NoBuild -NoRestore
+
+      - name: Verify sanitized Runner staged-Agent evidence
+        id: runner_staged_agent_evidence
+        if: ${{ always() && hashFiles('output/runner-staged-agent-e2e/**') != '' }}
+        shell: powershell
+        run: ./eng/verify-runner-staged-agent-evidence.ps1 -RequirePassed
+
+      - name: Upload packaged production closure evidence
+        if: ${{ always() && steps.production_closure_evidence.outcome == 'success' && hashFiles('artifacts/production-closure-e2e/**') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: openlineops-production-closure-${{ github.run_number }}
+          path: artifacts/production-closure-e2e
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Studio two-Agent production evidence
+        if: ${{ always() && steps.studio_two_agent_evidence.outcome == 'success' && hashFiles('output/studio-two-agent-production-closure/**') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: openlineops-studio-two-agent-${{ github.run_number }}
+          path: output/studio-two-agent-production-closure
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Runner staged-Agent production evidence
+        if: ${{ always() && steps.runner_staged_agent_evidence.outcome == 'success' && hashFiles('output/runner-staged-agent-e2e/**') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: openlineops-runner-staged-agent-${{ github.run_number }}
+          path: output/runner-staged-agent-e2e
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Verify release candidate inspection
         shell: powershell
@@ -169,54 +584,20 @@ jobs:
         shell: powershell
         run: ./eng/verify-publication-readiness.ps1 -AllowPendingExternal
 
-      - name: Write publication evidence
+      - name: Verify CI release artifact inspection
         shell: powershell
-        run: ./eng/write-publication-evidence.ps1
+        run: ./eng/verify-ci-release-artifact-inspection.ps1
 
-      - name: Verify publication evidence
-        shell: powershell
-        run: ./eng/verify-publication-evidence.ps1
-
-      - name: Verify final publication preflight
-        shell: powershell
-        run: ./eng/verify-final-publication-preflight.ps1
-
-      - name: Inspect CI release artifact bundle
-        shell: powershell
-        run: ./eng/inspect-ci-release-artifact.ps1
-
-      - name: Run packaged production closure E2E
-        working-directory: apps/desktop
-        run: npm run e2e:production-closure:packaged
-
-      - name: Upload packaged production closure evidence
-        if: always()
+      - name: Upload release candidate inputs
         uses: actions/upload-artifact@v7
         with:
-          name: openlineops-production-closure-${{ github.run_number }}
-          path: artifacts/production-closure-e2e
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Smoke test desktop
-        working-directory: apps/desktop
-        run: npm run smoke:e2e
-
-      - name: Check desktop package vulnerabilities
-        working-directory: apps/desktop
-        run: npm audit --audit-level=high --registry=https://registry.npmjs.org
-
-      - name: Upload release artifacts
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: openlineops-release-${{ github.run_number }}
+          name: openlineops-release-input-${{ github.run_number }}
           path: |
             artifacts/release
-            output/publication-evidence
-            output/publication-evidence-verification
-            output/final-publication-preflight
-            output/ci-release-artifact-inspection
+            output/staged-agent-bundle-e2e
+            artifacts/production-closure-e2e
+            output/studio-two-agent-production-closure
+            output/runner-staged-agent-e2e
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -231,12 +612,95 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.301
+
+      - name: Run Linux station package source-boundary security gates
+        run: dotnet test tests/OpenLineOps.Projects.Tests/OpenLineOps.Projects.Tests.csproj --configuration Release --property:TreatWarningsAsErrors=true --filter FullyQualifiedName~OpenLineOps.Projects.Tests.StationPackageBuilderSecurityTests --verbosity minimal
 
       - name: Run real PostgreSQL and RabbitMQ integration gates
-        run: dotnet test tests/OpenLineOps.PostgresIntegration.Tests/OpenLineOps.PostgresIntegration.Tests.csproj --configuration Release --property:TreatWarningsAsErrors=true --verbosity minimal
+        run: dotnet test tests/OpenLineOps.PostgresIntegration.Tests/OpenLineOps.PostgresIntegration.Tests.csproj --configuration Release --property:TreatWarningsAsErrors=true --verbosity minimal --logger "trx;LogFileName=production-integration.trx" --results-directory output/production-integration-evidence
+
+      - name: Write production integration evidence
+        shell: pwsh
+        run: ./eng/write-production-integration-evidence.ps1 -TrxPath output/production-integration-evidence/production-integration.trx
+
+      - name: Verify production integration evidence writer
+        shell: pwsh
+        run: ./eng/verify-production-integration-evidence.ps1
+
+      - name: Upload production integration evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: openlineops-production-integration-${{ github.run_number }}
+          path: output/production-integration-evidence
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  publication-evidence:
+    name: Publication evidence and final artifact inspection
+    needs:
+      - verify
+      - production-integration
+    runs-on: windows-2025
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.301
+
+      - name: Download release candidate inputs
+        uses: actions/download-artifact@v8
+        with:
+          name: openlineops-release-input-${{ github.run_number }}
+          path: .
+
+      - name: Download production integration evidence
+        uses: actions/download-artifact@v8
+        with:
+          name: openlineops-production-integration-${{ github.run_number }}
+          path: output/production-integration-evidence
+
+      - name: Write publication evidence
+        shell: powershell
+        run: ./eng/write-publication-evidence.ps1 -ProductionIntegrationEvidencePath output/production-integration-evidence/integration-evidence.json
+
+      - name: Verify publication evidence
+        shell: powershell
+        run: ./eng/verify-publication-evidence.ps1
+
+      - name: Verify final publication preflight
+        shell: powershell
+        run: ./eng/verify-final-publication-preflight.ps1
+
+      - name: Inspect CI release artifact bundle
+        shell: powershell
+        run: ./eng/inspect-ci-release-artifact.ps1
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: openlineops-release-${{ github.run_number }}
+          path: |
+            artifacts/release
+            output/publication-evidence
+            output/publication-evidence-verification
+            output/final-publication-preflight
+            output/ci-release-artifact-inspection
+            output/staged-agent-bundle-e2e
+            output/studio-two-agent-production-closure
+            output/runner-staged-agent-e2e
+            output/production-integration-evidence
+            artifacts/production-closure-e2e
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

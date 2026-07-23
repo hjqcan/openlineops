@@ -6,7 +6,7 @@ using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.StationRuntime.Contracts;
-using DomainRuntimeCommandStatus = OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus;
+using CommandExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus;
 
 namespace OpenLineOps.StationRuntime;
 
@@ -54,7 +54,7 @@ internal static class StationOperationResultMapper
                     command.TargetId,
                     command.TargetCapability.Value,
                     command.CommandName,
-                    command.Status.ToString(),
+                    command.Status,
                     command.CreatedAtUtc,
                     command.DeadlineAtUtc,
                     command.AcceptedAtUtc,
@@ -135,12 +135,12 @@ internal static class StationOperationResultMapper
                 $"Runtime Session ended in non-terminal status {session.Status}.");
         }
 
-        if (session.Commands.Any(command => command.Status == DomainRuntimeCommandStatus.TimedOut))
+        if (session.Commands.Any(command => command.Status == CommandExecutionStatus.TimedOut))
         {
             return (ExecutionStatus.TimedOut, ResultJudgement.Unknown);
         }
 
-        if (session.Commands.Any(command => command.Status == DomainRuntimeCommandStatus.Rejected))
+        if (session.Commands.Any(command => command.Status == CommandExecutionStatus.Rejected))
         {
             return (ExecutionStatus.Rejected, ResultJudgement.Unknown);
         }
@@ -173,7 +173,7 @@ internal static class StationOperationResultMapper
     {
         var outputs = ProductionContextOutputReader.ReadExplicitMany(commands
             .Where(candidate =>
-                candidate.Status == DomainRuntimeCommandStatus.Completed)
+                candidate.Status == CommandExecutionStatus.Completed)
             .OrderBy(candidate => candidate.CompletedAtUtc)
             .ThenBy(candidate => candidate.Id.Value)
             .Select(candidate => candidate.ResultPayload));

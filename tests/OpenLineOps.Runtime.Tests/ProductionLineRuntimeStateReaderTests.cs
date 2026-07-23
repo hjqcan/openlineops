@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Application.Monitoring;
@@ -75,9 +76,12 @@ public sealed class ProductionLineRuntimeStateReaderTests
             [new ResourceRequirement(ResourceKind.Station, "station-b")],
             carrier.Id.Value);
 
+        var leaseClock = new FixedClock(BaseTimeUtc);
         using (var runRepository = new SqliteProductionRunRepository(database.ConnectionString))
         using (var materialRepository = new SqliteProductionMaterialRepository(database.ConnectionString))
-        using (var leaseRepository = new SqliteResourceLeaseRepository(database.ConnectionString))
+        using (var leaseRepository = new SqliteResourceLeaseRepository(
+                   database.ConnectionString,
+                   leaseClock))
         {
             Assert.True(await materialRepository.TryAddAsync(unitInSlot));
             Assert.True(await materialRepository.TryAddAsync(unitOnCarrier));
@@ -159,11 +163,34 @@ public sealed class ProductionLineRuntimeStateReaderTests
 
         using var restartedRuns = new SqliteProductionRunRepository(database.ConnectionString);
         using var restartedMaterials = new SqliteProductionMaterialRepository(database.ConnectionString);
-        using var restartedLeases = new SqliteResourceLeaseRepository(database.ConnectionString);
+        using var restartedLeases = new SqliteResourceLeaseRepository(
+            database.ConnectionString,
+            new FixedClock(BaseTimeUtc.AddMinutes(1)));
+        var presenceRepository = new InMemoryAgentPresenceRepository();
+        Assert.True(await presenceRepository.RecordAsync(new AgentPresenceReported(
+            "agent-a",
+            "station-a-host",
+            "station-a",
+            Guid.NewGuid(),
+            1,
+            AgentPresenceState.Started,
+            BaseTimeUtc.AddSeconds(55)),
+            BaseTimeUtc.AddSeconds(55)));
+        Assert.True(await presenceRepository.RecordAsync(new AgentPresenceReported(
+            "agent-b",
+            "station-b-host",
+            "station-b",
+            Guid.NewGuid(),
+            1,
+            AgentPresenceState.Started,
+            BaseTimeUtc.AddSeconds(55)),
+            BaseTimeUtc.AddSeconds(55)));
         var reader = new ProductionLineRuntimeStateReader(
             restartedRuns,
             restartedMaterials,
             restartedLeases,
+            presenceRepository,
+            new AgentPresenceMonitoringOptions(),
             new FixedClock(BaseTimeUtc.AddMinutes(1)));
 
         var state = await reader.ReadAsync("line-main");
@@ -219,7 +246,7 @@ public sealed class ProductionLineRuntimeStateReaderTests
     {
         var materials = new InMemoryProductionMaterialRepository();
         var runs = new InMemoryProductionRunRepository(materials);
-        var leases = new InMemoryResourceLeaseRepository();
+        var leases = new InMemoryResourceLeaseRepository(new FixedClock(BaseTimeUtc));
         var unit = CreateUnit("SN-WAITING-001");
         Assert.True(await materials.TryAddAsync(unit));
         var run = CreateRun(
@@ -235,19 +262,123 @@ public sealed class ProductionLineRuntimeStateReaderTests
             new ProductionRunAdmission(unitEntry.Aggregate.ToSnapshot(), unitEntry.Revision)));
         Assert.True(run.Run.Start(BaseTimeUtc).Succeeded);
         Assert.Equal(1, await runs.SaveAsync(run.Run, 0));
+        var presenceRepository = new InMemoryAgentPresenceRepository();
+        Assert.True(await presenceRepository.RecordAsync(new AgentPresenceReported(
+            "agent-waiting",
+            "station-waiting-host",
+            "station-waiting",
+            Guid.NewGuid(),
+            1,
+            AgentPresenceState.Started,
+            BaseTimeUtc),
+            BaseTimeUtc));
         var reader = new ProductionLineRuntimeStateReader(
             runs,
             materials,
             leases,
+            presenceRepository,
+            new AgentPresenceMonitoringOptions(),
             new FixedClock(BaseTimeUtc.AddSeconds(1)));
 
         var state = await reader.ReadAsync("line-main");
 
         var station = Assert.Single(state.Stations);
         Assert.Equal(ProductionLineStationRuntimeStatus.WaitingForResources, station.Status);
+        Assert.Equal(ProductionLineAgentPresenceHealth.NotApplicable, station.AgentPresenceHealth);
         var resource = Assert.Single(Assert.Single(station.ActiveOperations).Resources);
         Assert.Equal(ProductionLineResourceRuntimeStatus.Waiting, resource.Status);
         Assert.Null(resource.FencingToken);
+    }
+
+    [Fact]
+    public async Task RequiredPresenceUsesCoordinatorReceiveTtlAndReconnectRestoresOnline()
+    {
+        var materials = new InMemoryProductionMaterialRepository();
+        var runs = new InMemoryProductionRunRepository(materials);
+        var leases = new InMemoryResourceLeaseRepository(new FixedClock(BaseTimeUtc));
+        Assert.True(await materials.TryAddAsync(SlotOccupancy.Register(
+            new SlotAddress("line-main", "station-presence", "slot-main"),
+            BaseTimeUtc)));
+        Assert.True(await materials.TryAddAsync(SlotOccupancy.Register(
+            new SlotAddress("line-main", "station-missing", "slot-main"),
+            BaseTimeUtc)));
+        var presenceRepository = new InMemoryAgentPresenceRepository();
+        var sessionId = Guid.NewGuid();
+        Assert.True(await presenceRepository.RecordAsync(new AgentPresenceReported(
+            "agent-presence",
+            "station-host-presence",
+            "station-presence",
+            sessionId,
+            1,
+            AgentPresenceState.Started,
+            BaseTimeUtc.AddDays(1)),
+            BaseTimeUtc));
+        var required = new AgentPresenceMonitoringOptions
+        {
+            TimeToLive = TimeSpan.FromSeconds(15),
+            PresenceRequired = true
+        };
+
+        var expiredState = await new ProductionLineRuntimeStateReader(
+            runs,
+            materials,
+            leases,
+            presenceRepository,
+            required,
+            new FixedClock(BaseTimeUtc.AddSeconds(16))).ReadAsync("line-main");
+        var expired = expiredState.Stations.Single(station =>
+            station.StationSystemId == "station-presence");
+        Assert.Equal(ProductionLineStationRuntimeStatus.Offline, expired.Status);
+        Assert.Equal(ProductionLineAgentPresenceHealth.Expired, expired.AgentPresenceHealth);
+        Assert.Equal(TimeSpan.FromSeconds(16), expired.AgentPresenceAge);
+        Assert.Equal(BaseTimeUtc, expired.AgentPresenceLastSeenAtUtc);
+        var missing = expiredState.Stations.Single(station =>
+            station.StationSystemId == "station-missing");
+        Assert.Equal(ProductionLineStationRuntimeStatus.Offline, missing.Status);
+        Assert.Equal(ProductionLineAgentPresenceHealth.Missing, missing.AgentPresenceHealth);
+
+        Assert.True(await presenceRepository.RecordAsync(new AgentPresenceReported(
+            "agent-presence",
+            "station-host-presence",
+            "station-presence",
+            sessionId,
+            2,
+            AgentPresenceState.Heartbeat,
+            BaseTimeUtc.AddDays(-1)),
+            BaseTimeUtc.AddSeconds(17)));
+        var onlineState = await new ProductionLineRuntimeStateReader(
+            runs,
+            materials,
+            leases,
+            presenceRepository,
+            required,
+            new FixedClock(BaseTimeUtc.AddSeconds(17))).ReadAsync("line-main");
+        var online = onlineState.Stations.Single(station =>
+            station.StationSystemId == "station-presence");
+        Assert.Equal(ProductionLineStationRuntimeStatus.Idle, online.Status);
+        Assert.Equal(ProductionLineAgentPresenceHealth.Online, online.AgentPresenceHealth);
+        Assert.Equal(TimeSpan.Zero, online.AgentPresenceAge);
+
+        Assert.True(await presenceRepository.RecordAsync(new AgentPresenceReported(
+            "agent-presence",
+            "station-host-presence",
+            "station-presence",
+            sessionId,
+            3,
+            AgentPresenceState.Stopping,
+            BaseTimeUtc.AddDays(-1)),
+            BaseTimeUtc.AddSeconds(18)));
+        var stoppingState = await new ProductionLineRuntimeStateReader(
+            runs,
+            materials,
+            leases,
+            presenceRepository,
+            required,
+            new FixedClock(BaseTimeUtc.AddSeconds(18))).ReadAsync("line-main");
+        var stopping = stoppingState.Stations.Single(station =>
+            station.StationSystemId == "station-presence");
+        Assert.Equal(ProductionLineStationRuntimeStatus.Offline, stopping.Status);
+        Assert.Equal(ProductionLineAgentPresenceHealth.Stopping, stopping.AgentPresenceHealth);
     }
 
     private static ProductionUnit CreateUnit(string identityValue) => ProductionUnit.Register(
@@ -278,6 +409,7 @@ public sealed class ProductionLineRuntimeStateReaderTests
             new ConfigurationSnapshotId($"configuration.{operationId}"),
             new RecipeSnapshotId($"recipe.{operationId}"),
             process,
+            [],
             resources);
         var run = ProductionRun.Create(
             runId,
@@ -320,7 +452,6 @@ public sealed class ProductionLineRuntimeStateReaderTests
                 fixture.Run.Id,
                 operation.OperationRunId,
                 operation.ResourceRequirements,
-                BaseTimeUtc,
                 TimeSpan.FromMinutes(10)));
         Assert.True(fixture.Run.StartOperation(
             operation.OperationRunId,

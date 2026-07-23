@@ -181,7 +181,8 @@ public sealed record ProductionMaterialCommit
 
 public sealed record ProductionMaterialTimelineQuery
 {
-    public ProductionMaterialTimelineQuery(
+    private ProductionMaterialTimelineQuery(
+        ProductionMaterialTimelineQueryMode mode,
         ProductionUnitId? productionUnitId = null,
         ProductionRunId? productionRunId = null,
         CarrierId? carrierId = null,
@@ -203,11 +204,14 @@ public sealed record ProductionMaterialTimelineQuery
             }
         }
 
+        Mode = mode;
         ProductionUnitId = productionUnitId;
         ProductionRunId = productionRunId;
         CarrierId = carrierId;
         ThroughUtc = throughUtc;
     }
+
+    public ProductionMaterialTimelineQueryMode Mode { get; }
 
     public ProductionUnitId? ProductionUnitId { get; }
 
@@ -217,17 +221,58 @@ public sealed record ProductionMaterialTimelineQuery
 
     public DateTimeOffset? ThroughUtc { get; }
 
+    public static ProductionMaterialTimelineQuery StrictIntersection(
+        ProductionUnitId? productionUnitId = null,
+        ProductionRunId? productionRunId = null,
+        CarrierId? carrierId = null,
+        DateTimeOffset? throughUtc = null) =>
+        new(
+            ProductionMaterialTimelineQueryMode.StrictIntersection,
+            productionUnitId,
+            productionRunId,
+            carrierId,
+            throughUtc);
+
+    public static ProductionMaterialTimelineQuery UnionScope(
+        ProductionUnitId? productionUnitId = null,
+        ProductionRunId? productionRunId = null,
+        CarrierId? carrierId = null,
+        DateTimeOffset? throughUtc = null) =>
+        new(
+            ProductionMaterialTimelineQueryMode.UnionScope,
+            productionUnitId,
+            productionRunId,
+            carrierId,
+            throughUtc);
+
     public bool Matches(ProductionMaterialTimelineEntry entry)
     {
         ArgumentNullException.ThrowIfNull(entry);
-        return (ThroughUtc is null || entry.OccurredAtUtc <= ThroughUtc)
-            && (ProductionUnitId is not null && (
+        var hasMaterialScope = ProductionUnitId is not null || CarrierId is not null;
+        var matchesMaterial = ProductionUnitId is not null && (
                     entry.ProductionUnitId == ProductionUnitId
                     || entry.Genealogy?.ParentUnitId == ProductionUnitId
                     || entry.Genealogy?.ChildUnitId == ProductionUnitId)
-                || ProductionRunId is not null && entry.ProductionRunId == ProductionRunId
-                || CarrierId is not null && entry.CarrierId == CarrierId);
+            || CarrierId is not null && entry.CarrierId == CarrierId;
+        var matchesRun = ProductionRunId is not null
+            && entry.ProductionRunId == ProductionRunId;
+        var matchesScope = Mode switch
+        {
+            ProductionMaterialTimelineQueryMode.StrictIntersection =>
+                (!hasMaterialScope || matchesMaterial)
+                && (ProductionRunId is null || matchesRun),
+            ProductionMaterialTimelineQueryMode.UnionScope => matchesMaterial || matchesRun,
+            _ => throw new InvalidOperationException(
+                $"Unsupported Production Material timeline query mode {Mode}.")
+        };
+        return (ThroughUtc is null || entry.OccurredAtUtc <= ThroughUtc) && matchesScope;
     }
+}
+
+public enum ProductionMaterialTimelineQueryMode
+{
+    StrictIntersection,
+    UnionScope
 }
 
 public sealed class ProductionMaterialConcurrencyException : InvalidOperationException

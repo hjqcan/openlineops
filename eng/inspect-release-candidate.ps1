@@ -224,7 +224,24 @@ function Test-ZipEntrySafety {
         }
 
         $segments = @($trimmedName.Split("/", [System.StringSplitOptions]::None))
-        if ($segments | Where-Object { [string]::IsNullOrWhiteSpace($_) -or $_ -ceq "." -or $_ -ceq ".." }) {
+        $unsafeSegments = @($segments | Where-Object {
+                $segment = [string]$_
+                $baseName = if ($segment.Contains(".")) {
+                    $segment.Substring(0, $segment.IndexOf(".", [System.StringComparison]::Ordinal))
+                }
+                else {
+                    $segment
+                }
+                [string]::IsNullOrWhiteSpace($segment) `
+                    -or $segment -ceq "." `
+                    -or $segment -ceq ".." `
+                    -or $segment.EndsWith(".", [System.StringComparison]::Ordinal) `
+                    -or $segment.EndsWith(" ", [System.StringComparison]::Ordinal) `
+                    -or $segment.IndexOfAny([char[]]@('<', '>', ':', '"', '|', '?', '*')) -ge 0 `
+                    -or @($segment.ToCharArray() | Where-Object { [int]$_ -lt 32 }).Count -gt 0 `
+                    -or $baseName -imatch '^(CON|PRN|AUX|NUL|COM(?:[1-9]|\u00B9|\u00B2|\u00B3)|LPT(?:[1-9]|\u00B9|\u00B2|\u00B3)|CONIN\$|CONOUT\$)$'
+            })
+        if ($unsafeSegments.Count -gt 0) {
             Add-Failure "$ArchiveName contains an unsafe zip entry path segment: $rawName"
             continue
         }
@@ -476,12 +493,134 @@ function Test-WindowsBundle {
             if ($null -ne $configurationText) {
                 try {
                     $configuration = $configurationText | ConvertFrom-Json
+                    $openLineOpsConfiguration = $configuration.OpenLineOps
+                    $openLineOpsConfigurationProperties = @(
+                        $openLineOpsConfiguration.PSObject.Properties.Name)
+                    if (-not ($openLineOpsConfigurationProperties -ccontains "WindowsServiceName") `
+                        -or $openLineOpsConfiguration.WindowsServiceName -isnot [string] `
+                        -or $openLineOpsConfiguration.WindowsServiceName -cne "") {
+                        Add-Failure "$ArchiveName WindowsServiceName release template must be present and empty for deployment-time binding."
+                    }
+                    $agentConfiguration = $openLineOpsConfiguration.Agent
+                    $agentConfigurationProperties = @(
+                        $agentConfiguration.PSObject.Properties.Name)
+                    if (-not ($agentConfigurationProperties -ccontains "StationSystemId") `
+                        -or $agentConfiguration.StationSystemId -isnot [string] `
+                        -or $agentConfiguration.StationSystemId -cne "") {
+                        Add-Failure "$ArchiveName StationSystemId release template must be present and empty."
+                    }
+                    if (-not ($agentConfigurationProperties -ccontains "HeartbeatInterval") `
+                        -or $agentConfiguration.HeartbeatInterval -cne "00:00:05") {
+                        Add-Failure "$ArchiveName HeartbeatInterval release template must be exactly '00:00:05'."
+                    }
+                    if (-not ($agentConfigurationProperties -ccontains "PackageCacheDirectory") `
+                        -or $agentConfiguration.PackageCacheDirectory -isnot [string] `
+                        -or $agentConfiguration.PackageCacheDirectory -cne "") {
+                        Add-Failure "$ArchiveName PackageCacheDirectory release template must be present and empty for explicit administrator provisioning."
+                    }
+                    $brokerUri = $null
+                    if ($agentConfiguration.RequireBrokerTls -ne $true `
+                        -or $agentConfiguration.BrokerUri -isnot [string] `
+                        -or -not [System.Uri]::TryCreate(
+                            $agentConfiguration.BrokerUri,
+                            [System.UriKind]::Absolute,
+                            [ref]$brokerUri) `
+                        -or $brokerUri.Scheme -cne "amqps" `
+                        -or -not [string]::IsNullOrEmpty($brokerUri.UserInfo)) {
+                        Add-Failure "$ArchiveName must use an amqps broker template without embedded placeholder credentials and require broker TLS."
+                    }
+                    $coordinatorUri = $null
+                    if (-not ($agentConfigurationProperties -ccontains "CoordinatorBaseUri") `
+                        -or $agentConfiguration.CoordinatorBaseUri -isnot [string] `
+                        -or -not [System.Uri]::TryCreate(
+                            $agentConfiguration.CoordinatorBaseUri,
+                            [System.UriKind]::Absolute,
+                            [ref]$coordinatorUri) `
+                        -or $coordinatorUri.Scheme -cne "https" `
+                        -or -not [string]::IsNullOrEmpty($coordinatorUri.UserInfo) `
+                        -or -not [string]::IsNullOrEmpty($coordinatorUri.Query) `
+                        -or -not [string]::IsNullOrEmpty($coordinatorUri.Fragment) `
+                        -or $agentConfiguration.ArtifactUploadTimeout -cne "00:05:00") {
+                        Add-Failure "$ArchiveName must use a credential-free HTTPS CoordinatorBaseUri and a 00:05:00 artifact upload timeout."
+                    }
+                    if ($agentConfigurationProperties -ccontains "ArtifactUploadBearerToken") {
+                        Add-Failure "$ArchiveName must not embed ArtifactUploadBearerToken."
+                    }
                     if ($configuration.OpenLineOps.Agent.RuntimeExecutablePath -cne "OpenLineOps.StationRuntime.exe") {
                         Add-Failure "$ArchiveName RuntimeExecutablePath must be exactly 'OpenLineOps.StationRuntime.exe'."
+                    }
+                    if ($configuration.OpenLineOps.Agent.PluginHostExecutablePath -cne "OpenLineOps.PluginHost.exe") {
+                        Add-Failure "$ArchiveName PluginHostExecutablePath must be exactly 'OpenLineOps.PluginHost.exe'."
+                    }
+                    if (-not ($agentConfigurationProperties -ccontains "SafetyExecutablePath")) {
+                        Add-Failure "$ArchiveName must declare SafetyExecutablePath."
+                    }
+                    elseif ($configuration.OpenLineOps.Agent.SafetyExecutablePath -isnot [string] `
+                        -or $configuration.OpenLineOps.Agent.SafetyExecutablePath -cne "") {
+                        Add-Failure "$ArchiveName SafetyExecutablePath release template must be empty."
+                    }
+                    $pythonScript = $configuration.OpenLineOps.Agent.PythonScript
+                    if ($null -eq $pythonScript) {
+                        Add-Failure "$ArchiveName must declare the typed Station Agent PythonScript configuration."
+                    }
+                    else {
+                        if ($pythonScript.WorkerExecutablePath -cne "OpenLineOps.ScriptWorker.exe") {
+                            Add-Failure "$ArchiveName PythonScript WorkerExecutablePath must be exactly 'OpenLineOps.ScriptWorker.exe'."
+                        }
+
+                        $pythonScriptProperties = @($pythonScript.PSObject.Properties.Name)
+                        if (-not ($pythonScriptProperties -ccontains "HostPythonRuntimeDllPath") `
+                            -or $pythonScriptProperties -ccontains "PythonRuntimeDllPath") {
+                            Add-Failure "$ArchiveName must declare HostPythonRuntimeDllPath and must not contain the removed PythonRuntimeDllPath setting."
+                        }
+
+                        $pythonSandbox = $pythonScript.Sandbox
+                        if ($null -eq $pythonSandbox) {
+                            Add-Failure "$ArchiveName must declare the typed Station Agent Python sandbox configuration."
+                        }
+                        else {
+                            if ($pythonSandbox.RequireLeastPrivilegeExecution -ne $true `
+                                -or $pythonSandbox.IsolationMode -cne "LeastPrivilegeIdentity") {
+                                Add-Failure "$ArchiveName must default Python execution to required LeastPrivilegeIdentity isolation."
+                            }
+                            if ($pythonSandbox.LeastPrivilegeIdentity -cne "PerExecutionAppContainer" `
+                                -or $pythonSandbox.LeastPrivilegeLauncherExecutable -cne "OpenLineOps.LeastPrivilegeLauncher.exe" `
+                                -or -not [string]::IsNullOrWhiteSpace($pythonSandbox.LeastPrivilegeArgumentsTemplate)) {
+                                Add-Failure "$ArchiveName must use the fixed bundled PerExecutionAppContainer launcher policy."
+                            }
+
+                            $removedContainerProperties = @($pythonSandbox.PSObject.Properties.Name | Where-Object {
+                                $_ -clike "Container*" -or $_ -ceq "AdditionalContainerRunArguments"
+                            })
+                            if ($removedContainerProperties.Count -ne 0) {
+                                Add-Failure "$ArchiveName must not expose removed Station Agent Python Container settings."
+                            }
+                        }
                     }
                 }
                 catch {
                     Add-Failure "$ArchiveName appsettings.json is not valid JSON: $($_.Exception.Message)"
+                }
+            }
+        }
+
+        $deploymentEntry = @($payloadEntries | Where-Object {
+            [string]::Equals($_.FullName, "DEPLOYMENT.md", [System.StringComparison]::Ordinal)
+        })
+        if ($deploymentEntry.Count -eq 1) {
+            $deploymentText = Read-ZipEntryText `
+                -Entry $deploymentEntry[0] `
+                -Description "$ArchiveName DEPLOYMENT.md"
+            if ($null -ne $deploymentText) {
+                foreach ($requiredProvisioningContract in @(
+                        "--provision-content-cache",
+                        "--remove-content-cache-package",
+                        "OpenLineOps:WindowsServiceName",
+                        "OpenLineOps:Agent:PackageCacheDirectory",
+                        "dedicated content-cache namespace")) {
+                    if ($deploymentText -cnotmatch [regex]::Escape($requiredProvisioningContract)) {
+                        Add-Failure "$ArchiveName DEPLOYMENT.md is missing content-cache provisioning contract '$requiredProvisioningContract'."
+                    }
                 }
             }
         }
@@ -498,6 +637,94 @@ function Test-SensitiveSourceArchiveEntries {
         if (Test-IsSensitiveSourceArchivePath $entryName) {
             Add-Failure "$ArchiveName contains a sensitive source archive entry: $entryName"
         }
+    }
+}
+
+function Test-NoTestOnlyServiceTokenRelayEntries {
+    param(
+        [Parameter(Mandatory = $true)]$Archive,
+        [Parameter(Mandatory = $true)][string] $ArchiveName
+    )
+
+    $forbiddenAssemblyPrefix = "OpenLineOps.WindowsServiceToken.TestRelay"
+    foreach ($entry in @($Archive.Entries)) {
+        $entryName = $entry.FullName
+        $normalizedName = $entryName.Replace([char]92, [char]47).TrimEnd('/')
+        $segments = @($normalizedName.Split('/', [System.StringSplitOptions]::RemoveEmptyEntries))
+        if ($segments.Count -eq 0) {
+            continue
+        }
+
+        $fileName = $segments[$segments.Count - 1]
+        $hasForbiddenDirectory = @($segments | Where-Object {
+                [string]::Equals(
+                    $_,
+                    "windows-service-token-test-relay",
+                    [System.StringComparison]::OrdinalIgnoreCase)
+            }).Count -gt 0
+        $containsForbiddenBinaryIdentity = -not $entryName.EndsWith(
+                "/",
+                [System.StringComparison]::Ordinal) `
+            -and (Test-ZipEntryPortableExecutableContainsAsciiMarker `
+                -Entry $entry `
+                -Marker $forbiddenAssemblyPrefix)
+        if ($hasForbiddenDirectory `
+            -or $fileName.StartsWith(
+                $forbiddenAssemblyPrefix,
+                [System.StringComparison]::OrdinalIgnoreCase) `
+            -or $containsForbiddenBinaryIdentity) {
+            Add-Failure "$ArchiveName contains the test-only Windows service-token Test Relay in a deployable artifact: $entryName"
+        }
+    }
+}
+
+function Test-ZipEntryPortableExecutableContainsAsciiMarker {
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)][string] $Marker
+    )
+
+    $stream = $Entry.Open()
+    try {
+        if ($Entry.Length -lt 2) {
+            return $false
+        }
+
+        $buffer = [byte[]]::new(65kb + $Marker.Length)
+        $carried = 0
+        $firstChunk = $true
+        while (($read = $stream.Read($buffer, $carried, 65kb)) -gt 0) {
+            $total = $carried + $read
+            if ($firstChunk) {
+                if ($total -lt 2) {
+                    $carried = $total
+                    continue
+                }
+
+                $firstChunk = $false
+                if ($buffer[0] -ne 0x4d -or $buffer[1] -ne 0x5a) {
+                    return $false
+                }
+            }
+
+            $text = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $total)
+            if ($text.IndexOf($Marker, [System.StringComparison]::Ordinal) -ge 0) {
+                return $true
+            }
+
+            $carried = [Math]::Min($Marker.Length - 1, $total)
+            [System.Buffer]::BlockCopy(
+                $buffer,
+                $total - $carried,
+                $buffer,
+                0,
+                $carried)
+        }
+
+        return $false
+    }
+    finally {
+        $stream.Dispose()
     }
 }
 
@@ -560,6 +787,76 @@ function Get-ManifestArtifact {
     }
 
     return $matches[0]
+}
+
+function Test-ExactReleaseCandidateInventory {
+    param([Parameter(Mandatory = $true)][hashtable] $ArtifactByKind)
+
+    $allowedFiles = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    foreach ($metadataName in @(
+            "release-manifest.json",
+            "checksums.sha256",
+            "release-notes.md",
+            "release-dependency-inventory.json",
+            "release-provenance.json",
+            "release-metadata-checksums.sha256")) {
+        [void]$allowedFiles.Add($metadataName)
+    }
+    foreach ($kind in $RequiredKinds) {
+        if ($ArtifactByKind.ContainsKey($kind) `
+            -and $ArtifactByKind[$kind].relativePath -is [string]) {
+            [void]$allowedFiles.Add(
+                ([string]$ArtifactByKind[$kind].relativePath).Replace([char]92, [char]47))
+        }
+    }
+
+    $allowedDirectories = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    foreach ($relativePath in $allowedFiles) {
+        $segments = @($relativePath.Split('/'))
+        for ($index = 1; $index -lt $segments.Count; $index++) {
+            [void]$allowedDirectories.Add(($segments[0..($index - 1)] -join '/'))
+        }
+    }
+
+    $rootPrefix = $ResolvedArtifactsRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    $rootDirectory = [System.IO.DirectoryInfo]::new($ResolvedArtifactsRoot)
+    if (($rootDirectory.Attributes -band (
+                [System.IO.FileAttributes]::ReparsePoint -bor
+                [System.IO.FileAttributes]::Device)) -ne 0) {
+        Add-Failure "Release candidate inventory root must be an ordinary non-reparse directory."
+        return
+    }
+
+    $pending = [System.Collections.Generic.Stack[System.IO.DirectoryInfo]]::new()
+    $pending.Push($rootDirectory)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($entry in $directory.EnumerateFileSystemInfos(
+                     "*",
+                     [System.IO.SearchOption]::TopDirectoryOnly)) {
+            $relativePath = $entry.FullName.Substring($rootPrefix.Length).Replace([char]92, [char]47)
+            if (($entry.Attributes -band (
+                        [System.IO.FileAttributes]::ReparsePoint -bor
+                        [System.IO.FileAttributes]::Device)) -ne 0) {
+                Add-Failure "Release candidate inventory contains a reparse or device entry: $relativePath"
+                continue
+            }
+
+            if ($entry -is [System.IO.DirectoryInfo]) {
+                if (-not $allowedDirectories.Contains($relativePath)) {
+                    Add-Failure "Release candidate inventory contains an unmanifested directory: $relativePath"
+                }
+                $pending.Push($entry)
+                continue
+            }
+
+            if (-not $allowedFiles.Contains($relativePath)) {
+                Add-Failure "Release candidate inventory contains an unmanifested file: $relativePath"
+            }
+        }
+    }
 }
 
 function Invoke-ReleaseManifestVerify {
@@ -1106,18 +1403,31 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
 
     $artifactByKind = @{}
     foreach ($artifact in @($manifest.artifacts)) {
-        $artifactByKind[$artifact.kind] = $artifact
+        if ($artifact.kind -is [string]) {
+            $artifactByKind[$artifact.kind] = $artifact
+        }
     }
+    $manifestArtifacts = @($manifest.artifacts)
+    $unexpectedArtifactKinds = @($manifestArtifacts | Where-Object {
+            $_.kind -isnot [string] -or $RequiredKinds -cnotcontains $_.kind
+        })
+    if ($manifestArtifacts.Count -ne $RequiredKinds.Count `
+        -or $unexpectedArtifactKinds.Count -gt 0 `
+        -or $artifactByKind.Count -ne $RequiredKinds.Count) {
+        Add-Failure "Release manifest must contain exactly one artifact for each required kind and no additional kinds."
+    }
+    Test-ExactReleaseCandidateInventory -ArtifactByKind $artifactByKind
 
     $requiredZipEntries = @{
-        "api" = @("OpenLineOps.Api.dll")
+        "api" = @("OpenLineOps.Api.dll", "appsettings.json")
         "agent" = @(
             "OpenLineOps.Agent.exe",
             "OpenLineOps.Agent.deps.json",
             "OpenLineOps.Agent.runtimeconfig.json",
             "OpenLineOps.StationRuntime.exe",
-            "OpenLineOps.StationRuntime.deps.json",
-            "OpenLineOps.StationRuntime.runtimeconfig.json",
+            "OpenLineOps.PluginHost.exe",
+            "OpenLineOps.ScriptWorker.exe",
+            "OpenLineOps.LeastPrivilegeLauncher.exe",
             "appsettings.json",
             "coreclr.dll",
             "hostfxr.dll",
@@ -1141,11 +1451,34 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
         )
         "desktop" = @(
             "dist/index.html",
+            "dist-electron/main/api-credential-security.js",
+            "dist-electron/main/application-extension-import-security.js",
+            "dist-electron/main/backend-api-security.js",
+            "dist-electron/main/backend-process-handshake.js",
+            "dist-electron/main/local-sqlite-connection.js",
             "dist-electron/main/main.js",
-            "dist-electron/preload/preload.js",
+            "dist-electron/main/renderer-navigation-security.js",
+            "dist-electron/main/trace-artifact-save.js",
+            "dist-electron/main/trace-artifact-save-core.js",
+            "dist-electron/preload/preload.cjs",
             "package/win-unpacked/OpenLineOps.exe",
             "package/win-unpacked/OPENLINEOPS-PACKAGE-NOTES.txt",
-            "package/win-unpacked/resources/app/package.json"
+            "package/win-unpacked/resources/app/package.json",
+            "package/win-unpacked/resources/app/dist/index.html",
+            "package/win-unpacked/resources/app/dist-electron/main/api-credential-security.js",
+            "package/win-unpacked/resources/app/dist-electron/main/application-extension-import-security.js",
+            "package/win-unpacked/resources/app/dist-electron/main/backend-api-security.js",
+            "package/win-unpacked/resources/app/dist-electron/main/backend-process-handshake.js",
+            "package/win-unpacked/resources/app/dist-electron/main/local-sqlite-connection.js",
+            "package/win-unpacked/resources/app/dist-electron/main/main.js",
+            "package/win-unpacked/resources/app/dist-electron/main/renderer-navigation-security.js",
+            "package/win-unpacked/resources/app/dist-electron/main/trace-artifact-save.js",
+            "package/win-unpacked/resources/app/dist-electron/main/trace-artifact-save-core.js",
+            "package/win-unpacked/resources/app/dist-electron/preload/preload.cjs",
+            "package/win-unpacked/resources/app/runtime/api/OpenLineOps.Api.exe",
+            "package/win-unpacked/resources/app/runtime/api/appsettings.json",
+            "package/win-unpacked/resources/app/runtime/plugin-host/OpenLineOps.PluginHost.exe",
+            "package/win-unpacked/resources/app/runtime/script-worker/OpenLineOps.ScriptWorker.exe"
         )
         "plugin-host" = @("OpenLineOps.PluginHost.dll")
         "script-worker" = @("OpenLineOps.ScriptWorker.dll")
@@ -1157,10 +1490,35 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "README.md",
             "THIRD-PARTY-NOTICES.md",
             "Directory.Build.props",
+            "OpenLineOps.sln",
+            "OpenLineOps.slnx",
+            "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestBridge.cs",
+            "tests/OpenLineOps.Agent.Tests/WindowsSourceTokenRelayProcess.cs",
+            "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestRelayContractTests.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj",
+            "tests/OpenLineOps.WindowsServiceToken.TestRelay/Program.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestRelay/RelayProtocol.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestRelay/WindowsNative.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestRelay/SourceTokenRelayOperation.cs",
             "docs/development-execution-plan.md",
             "eng/stage-release-artifacts.ps1",
             "eng/verify-ci-workflow-actions.ps1",
+            "eng/verify-staged-agent-bundle-e2e.ps1",
+            "eng/verify-staged-agent-rabbitmq-e2e.ps1",
+            "eng/invoke-run-scoped-agent-service-cleanup.ps1",
+            "eng/verify-agent-service-external-abort-cleanup.ps1",
+            "eng/verify-staged-agent-evidence.ps1",
+            "eng/verify-production-closure-evidence.ps1",
+            "eng/verify-studio-two-agent-production-closure.ps1",
+            "eng/verify-studio-two-agent-production-evidence.ps1",
+            "eng/verify-studio-two-agent-production-evidence.tests.ps1",
+            "eng/verify-runner-staged-agent-e2e.ps1",
+            "eng/verify-runner-staged-agent-evidence.ps1",
+            "eng/verify-runner-staged-agent-evidence.tests.ps1",
+            "eng/verify-evidence-validation.tests.ps1",
+            "eng/evidence-validation-test-fixtures.ps1",
             "eng/verify-solution-project-coverage.ps1",
+            "eng/verify-station-agent-content-cache-contract.ps1",
             "eng/inspect-ci-release-artifact.ps1",
             "eng/inspect-release-candidate.ps1",
             "eng/prepare-final-publication.ps1",
@@ -1173,6 +1531,10 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "eng/sign-windows-package.ps1",
             "eng/verify-windows-signing-readiness.ps1",
             "docs/station-agent-deployment.md",
+            "docs/coordinator-deployment.md",
+            "docs/coordinator-api-security.md",
+            "docs/trace-projection-recovery.md",
+            "apps/desktop/scripts/production-closure-e2e.mjs",
             "docs/headless-runner.md"
         )
     }
@@ -1211,6 +1573,11 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
                     -Archive $archive `
                     -ArchiveName $artifactByKind[$kind].fileName
             }
+            else {
+                Test-NoTestOnlyServiceTokenRelayEntries `
+                    -Archive $archive `
+                    -ArchiveName $artifactByKind[$kind].fileName
+            }
 
             if ($kind -ceq "agent") {
                 Test-WindowsBundle `
@@ -1219,7 +1586,9 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
                     -ArtifactKind "agent" `
                     -ExpectedEntryPoints @(
                         [ordered]@{ role = "station-agent-service"; relativePath = "OpenLineOps.Agent.exe" },
-                        [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" }
+                        [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" },
+                        [ordered]@{ role = "plugin-host"; relativePath = "OpenLineOps.PluginHost.exe" },
+                        [ordered]@{ role = "python-script-worker"; relativePath = "OpenLineOps.ScriptWorker.exe" }
                     )
             }
 
@@ -1235,8 +1604,14 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
 
             if ($RequireSignedWindowsArtifacts) {
                 $signedEntries = switch ($kind) {
-                    "desktop" { @("package/win-unpacked/OpenLineOps.exe") }
-                    "agent" { @("OpenLineOps.Agent.exe", "OpenLineOps.StationRuntime.exe") }
+                    "desktop" {
+                        @(
+                            "package/win-unpacked/OpenLineOps.exe",
+                            "package/win-unpacked/resources/app/runtime/api/OpenLineOps.Api.exe",
+                            "package/win-unpacked/resources/app/runtime/plugin-host/OpenLineOps.PluginHost.exe",
+                            "package/win-unpacked/resources/app/runtime/script-worker/OpenLineOps.ScriptWorker.exe")
+                    }
+                    "agent" { @("OpenLineOps.Agent.exe", "OpenLineOps.StationRuntime.exe", "OpenLineOps.PluginHost.exe", "OpenLineOps.ScriptWorker.exe", "OpenLineOps.LeastPrivilegeLauncher.exe") }
                     "runner" { @("OpenLineOps.Runner.exe") }
                     default { @() }
                 }

@@ -429,10 +429,7 @@ public sealed class BaseDbContextTests
         TestAggregateId AggregateId,
         string Name)
         : OpenLineOpsDomainEvent("test.aggregate.integrated"),
-            IIntegrationEvent
-    {
-        public string Version => "v1";
-    }
+            IIntegrationEvent;
 
     private sealed class TestNetDevPackAggregate : NetDevPack.Domain.Entity,
         NetDevPack.Domain.IAggregateRoot
@@ -460,8 +457,6 @@ public sealed class BaseDbContextTests
         IIntegrationEvent
     {
         public string EventName => "test.netdevpack.changed";
-
-        public string Version => "v1";
     }
 
     private sealed class CapturingIntegrationEventPublisher : IIntegrationEventPublisher

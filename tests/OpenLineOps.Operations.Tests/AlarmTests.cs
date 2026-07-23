@@ -34,7 +34,6 @@ public sealed class AlarmTests
 
         Assert.IsAssignableFrom<IIntegrationEvent>(raisedEvent);
         Assert.Equal(AlarmRaisedIntegrationDto.EventName, descriptor.EventName);
-        Assert.Equal(AlarmRaisedIntegrationDto.Version, descriptor.Version);
         Assert.Equal(alarm.Id.Value, payload.AlarmId);
         Assert.Equal("station-alpha", payload.StationId);
     }
@@ -81,7 +80,7 @@ public sealed class AlarmTests
     private static Alarm CreateAlarm()
     {
         return Alarm.Raise(
-            new AlarmId("operations.alarm.domain.v1"),
+            new AlarmId("operations.alarm.domain"),
             "station-alpha",
             "runtime",
             "session-alpha",

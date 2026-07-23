@@ -23,7 +23,11 @@
   <ItemGroup>
     <ProjectReference Include="..\..\shared\OpenLineOps.Api.Abstractions\OpenLineOps.Api.Abstractions.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Runtime.Contracts\OpenLineOps.Runtime.Contracts.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Agent.Infrastructure\OpenLineOps.Agent.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Agent.Application\OpenLineOps.Agent.Application.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Agent.Domain\OpenLineOps.Agent.Domain.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.Api\OpenLineOps.Api.csproj" />
+    <ProjectReference Include="..\..\src\OpenLineOps.ScriptWorker\OpenLineOps.ScriptWorker.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

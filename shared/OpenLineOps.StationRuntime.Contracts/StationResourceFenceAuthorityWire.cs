@@ -6,6 +6,7 @@ namespace OpenLineOps.StationRuntime.Contracts;
 public static class StationResourceFenceAuthorityWire
 {
     private const int MaximumPayloadBytes = 1024 * 1024;
+    private const byte ResponseReceipt = 0xA5;
 
     public static async ValueTask WriteAsync<T>(
         Stream stream,
@@ -57,6 +58,30 @@ public static class StationResourceFenceAuthorityWire
             throw new InvalidDataException(
                 "Resource fence authority payload is invalid JSON.",
                 exception);
+        }
+    }
+
+    public static async ValueTask WriteResponseReceiptAsync(
+        Stream stream,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        await stream.WriteAsync(new[] { ResponseReceipt }, cancellationToken)
+            .ConfigureAwait(false);
+        await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public static async ValueTask ReadResponseReceiptAsync(
+        Stream stream,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        var receipt = new byte[1];
+        await stream.ReadExactlyAsync(receipt, cancellationToken).ConfigureAwait(false);
+        if (receipt[0] != ResponseReceipt)
+        {
+            throw new InvalidDataException(
+                "Resource fence authority response receipt is invalid.");
         }
     }
 }

@@ -15,7 +15,7 @@ public sealed class AutomationProjectTests
     {
         var project = CreateProjectWithApplication(out var applicationId);
         var topologyId = new AutomationTopologyId("topology.main");
-        var snapshotId = new PublishedProjectSnapshotId("snapshot.main.v1");
+        var snapshotId = new PublishedProjectSnapshotId("snapshot.main");
 
         Assert.True(project.LinkTopology(applicationId, topologyId).Succeeded);
 
@@ -60,7 +60,7 @@ public sealed class AutomationProjectTests
     {
         var project = CreateProjectWithApplication(out var applicationId);
         var result = project.PublishSnapshot(
-            new PublishedProjectSnapshotId("snapshot.main.v1"),
+            new PublishedProjectSnapshotId("snapshot.main"),
             applicationId,
             new AutomationTopologyId("topology.main"),
             ["layout.main"],
@@ -84,7 +84,7 @@ public sealed class AutomationProjectTests
         Assert.True(project.LinkTopology(applicationId, topologyId).Succeeded);
 
         var result = project.PublishSnapshot(
-            new PublishedProjectSnapshotId("snapshot.main.v1"),
+            new PublishedProjectSnapshotId("snapshot.main"),
             applicationId,
             topologyId,
             ["layout.main"],
@@ -108,7 +108,7 @@ public sealed class AutomationProjectTests
         Assert.True(project.LinkTopology(applicationId, topologyId).Succeeded);
 
         var result = project.PublishSnapshot(
-            new PublishedProjectSnapshotId("snapshot.main.v1"),
+            new PublishedProjectSnapshotId("snapshot.main"),
             applicationId,
             topologyId,
             [],

@@ -10,6 +10,7 @@ namespace OpenLineOps.Runtime.Api.Controllers;
 
 [ApiController]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 public sealed class ProductionOperationsController(
     IProductionRunRepository repository,
     IProductionLineRuntimeStateReader lineStateReader) : ControllerBase

@@ -23,7 +23,7 @@ public sealed class AgentStationOperationDispatcher(
                 request.Operation.Definition.StationSystemId),
             cancellationToken).ConfigureAwait(false);
         RequireExactProductionLine(route, request.Run.ProductionLineDefinitionId);
-        using var inputs = JsonDocument.Parse("{}");
+        var inputs = ProductionContextDocument.Write(request.Inputs);
         var message = new StationJobRequested(
             Guid.NewGuid(),
             StationJobIdentity.CreateJobId(request.IdempotencyKey),
@@ -58,7 +58,7 @@ public sealed class AgentStationOperationDispatcher(
                 lease.Resource.ResourceId,
                 lease.FencingToken,
                 lease.ExpiresAtUtc)).ToArray(),
-            inputs.RootElement.Clone(),
+            inputs,
             DateTimeOffset.UtcNow);
         var completion = await gateway.DispatchAsync(message, cancellationToken)
             .ConfigureAwait(false);
@@ -87,6 +87,7 @@ public sealed class AgentStationOperationDispatcher(
         return new StationOperationDispatchResult(
             completion.ExecutionStatus,
             completion.Judgement,
+            OperationExecutionEvidenceFactory.FromStationCompletion(request, completion),
             ProductionContextOutputReader.Read(completion.Outputs),
             completion.CompletedStepCount,
             completion.CommandCount,

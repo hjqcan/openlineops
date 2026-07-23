@@ -1,3 +1,4 @@
+using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Application.Persistence;
@@ -22,6 +23,8 @@ public sealed class ProductionLineRuntimeStateReader(
     IProductionRunRepository productionRuns,
     IProductionMaterialRepository materials,
     IResourceLeaseRepository resourceLeases,
+    IAgentPresenceRepository agentPresences,
+    AgentPresenceMonitoringOptions presenceOptions,
     IClock clock) : IProductionLineRuntimeStateReader
 {
     public async ValueTask<ProductionLineRuntimeState> ReadAsync(
@@ -29,6 +32,7 @@ public sealed class ProductionLineRuntimeStateReader(
         CancellationToken cancellationToken = default)
     {
         RequireCanonical(productionLineDefinitionId, nameof(productionLineDefinitionId));
+        presenceOptions.Validate();
         var generatedAtUtc = clock.UtcNow;
         var runTask = productionRuns.ListActiveAsync(
             productionLineDefinitionId: productionLineDefinitionId,
@@ -39,7 +43,8 @@ public sealed class ProductionLineRuntimeStateReader(
             lineId: productionLineDefinitionId,
             cancellationToken: cancellationToken).AsTask();
         var leaseTask = resourceLeases.ListAsync(cancellationToken).AsTask();
-        await Task.WhenAll(runTask, unitTask, carrierTask, slotTask, leaseTask)
+        var presenceTask = agentPresences.ListAsync(cancellationToken).AsTask();
+        await Task.WhenAll(runTask, unitTask, carrierTask, slotTask, leaseTask, presenceTask)
             .ConfigureAwait(false);
 
         var runs = runTask.Result
@@ -92,7 +97,10 @@ public sealed class ProductionLineRuntimeStateReader(
             carriers,
             slots,
             allUnits,
-            leases);
+            leases,
+            presenceTask.Result,
+            presenceOptions.TimeToLive,
+            presenceOptions.PresenceRequired);
 
         return new ProductionLineRuntimeState(
             productionLineDefinitionId,
@@ -112,7 +120,10 @@ public sealed class ProductionLineRuntimeStateReader(
         IReadOnlyCollection<ProductionLineCarrierState> carriers,
         IReadOnlyCollection<ProductionLineSlotState> slots,
         IReadOnlyCollection<ProductionUnit> allUnits,
-        IReadOnlyDictionary<LeaseOwnerKey, ResourceLease> leases)
+        IReadOnlyDictionary<LeaseOwnerKey, ResourceLease> leases,
+        IReadOnlyCollection<AgentPresenceSnapshot> agentPresences,
+        TimeSpan presenceTimeToLive,
+        bool presenceRequired)
     {
         var stationIds = slots.Select(static slot => slot.StationSystemId)
             .Concat(units
@@ -133,6 +144,31 @@ public sealed class ProductionLineRuntimeStateReader(
 
         return stationIds.Select(stationId =>
         {
+            var presence = agentPresences
+                .Where(candidate => string.Equals(
+                    candidate.StationSystemId,
+                    stationId,
+                    StringComparison.Ordinal))
+                .OrderByDescending(static candidate => candidate.ReceivedAtUtc)
+                .ThenBy(static candidate => candidate.AgentId, StringComparer.Ordinal)
+                .ThenBy(static candidate => candidate.StationId, StringComparer.Ordinal)
+                .FirstOrDefault();
+            var presenceAge = presence is null
+                ? (TimeSpan?)null
+                : generatedAtUtc >= presence.ReceivedAtUtc
+                    ? generatedAtUtc - presence.ReceivedAtUtc
+                    : TimeSpan.Zero;
+            var presenceHealth = !presenceRequired
+                ? ProductionLineAgentPresenceHealth.NotApplicable
+                : presence switch
+                {
+                    null => ProductionLineAgentPresenceHealth.Missing,
+                    { State: AgentPresenceState.Stopping } =>
+                        ProductionLineAgentPresenceHealth.Stopping,
+                    _ when presenceAge > presenceTimeToLive =>
+                        ProductionLineAgentPresenceHealth.Expired,
+                    _ => ProductionLineAgentPresenceHealth.Online
+                };
             var stationSlots = slots
                 .Where(slot => string.Equals(
                     slot.StationSystemId,
@@ -171,7 +207,7 @@ public sealed class ProductionLineRuntimeStateReader(
                 .ThenBy(static operation => operation.ProductionRunId)
                 .ThenBy(static operation => operation.OperationRunId, StringComparer.Ordinal)
                 .ToArray();
-            var status = operations.Any(operation =>
+            var operationalStatus = operations.Any(operation =>
                     operation.ExecutionStatus == ExecutionStatus.Running)
                 ? ProductionLineStationRuntimeStatus.Running
                 : operations.Length > 0
@@ -186,9 +222,21 @@ public sealed class ProductionLineRuntimeStateReader(
                                         SlotOccupancyStatus.Blocked or SlotOccupancyStatus.Offline)
                                         ? ProductionLineStationRuntimeStatus.Blocked
                                         : ProductionLineStationRuntimeStatus.Idle;
+            var status = presenceHealth is ProductionLineAgentPresenceHealth.Online
+                or ProductionLineAgentPresenceHealth.NotApplicable
+                ? operationalStatus
+                : ProductionLineStationRuntimeStatus.Offline;
             return new ProductionLineStationState(
                 stationId,
                 status,
+                presence?.AgentId,
+                presence?.StationId,
+                presence?.SessionId,
+                presence?.Sequence,
+                presence?.State,
+                presenceHealth,
+                presence?.ReceivedAtUtc,
+                presenceAge,
                 queue,
                 operations);
         }).ToArray();
@@ -456,8 +504,25 @@ public enum ProductionLineStationRuntimeStatus
 public sealed record ProductionLineStationState(
     string StationSystemId,
     ProductionLineStationRuntimeStatus Status,
+    string? AgentId,
+    string? StationId,
+    Guid? AgentPresenceSessionId,
+    long? AgentPresenceSequence,
+    AgentPresenceState? AgentPresenceState,
+    ProductionLineAgentPresenceHealth AgentPresenceHealth,
+    DateTimeOffset? AgentPresenceLastSeenAtUtc,
+    TimeSpan? AgentPresenceAge,
     IReadOnlyList<ProductionLineQueuedMaterial> Queue,
     IReadOnlyList<ProductionLineStationOperationState> ActiveOperations);
+
+public enum ProductionLineAgentPresenceHealth
+{
+    NotApplicable,
+    Missing,
+    Online,
+    Expired,
+    Stopping
+}
 
 public sealed record ProductionLineQueuedMaterial(
     MaterialKind MaterialKind,

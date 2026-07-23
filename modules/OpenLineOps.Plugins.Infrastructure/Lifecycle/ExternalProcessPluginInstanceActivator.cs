@@ -1,3 +1,4 @@
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Plugin.Abstractions;
 using OpenLineOps.Plugins.Application.Discovery;
 using OpenLineOps.Plugins.Application.Lifecycle;
@@ -28,11 +29,23 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
     }
 
     public ValueTask<PluginActivationResult> ActivateAsync(
+        ProjectApplicationWorkspaceScope scope,
         PluginPackageDescriptor package,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(package);
         cancellationToken.ThrowIfCancellationRequested();
+        if (!package.RuntimeIdentity.IsComplete)
+        {
+            return ValueTask.FromResult(PluginActivationResult.Failure(
+                $"Plugin package '{package.Manifest.Id}' does not have a complete immutable runtime identity."));
+        }
+
+        var executionIdentity = new PluginPackageExecutionIdentity(
+            scope.ProjectId,
+            scope.ApplicationId,
+            package.RuntimeIdentity);
 
         var entryAssemblyPath = ResolveEntryAssemblyPath(package);
         if (entryAssemblyPath is null)
@@ -53,7 +66,7 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
         {
             Record(
                 ExternalPluginProcessEventKind.TrustRejected,
-                package.Manifest.Id,
+                executionIdentity,
                 trustResult.FailureReason ?? "Plugin package trust policy rejected activation.");
 
             return ValueTask.FromResult(PluginActivationResult.Failure(
@@ -65,13 +78,14 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
         {
             Record(
                 ExternalPluginProcessEventKind.SandboxRejected,
-                package.Manifest.Id,
+                executionIdentity,
                 sandboxPolicyFailure);
 
             return ValueTask.FromResult(PluginActivationResult.Failure(sandboxPolicyFailure));
         }
 
         var request = new ExternalPluginProcessStartRequest(
+            executionIdentity,
             package.Manifest,
             Path.GetFullPath(package.PackagePath),
             Path.GetFullPath(package.ManifestPath),
@@ -82,7 +96,7 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
         return ValueTask.FromResult(PluginActivationResult.Success(
             new ExternalProcessOpenLineOpsPlugin(
                 package.Manifest,
-                package.RuntimeIdentity,
+                executionIdentity,
                 request,
                 _processRunner,
                 _processRegistry,
@@ -163,13 +177,16 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
 
     private void Record(
         ExternalPluginProcessEventKind kind,
-        string pluginId,
+        PluginPackageExecutionIdentity executionIdentity,
         string message,
         string? detail = null)
     {
         _eventSink.Record(new ExternalPluginProcessEvent(
             kind,
-            pluginId,
+            executionIdentity.ProjectId,
+            executionIdentity.ApplicationId,
+            executionIdentity.PluginId,
+            executionIdentity.PackageIdentity.PackageContentSha256,
             message,
             DateTimeOffset.UtcNow,
             detail));
@@ -203,7 +220,7 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
 
     private sealed class ExternalProcessOpenLineOpsPlugin(
         PluginManifest manifest,
-        PluginPackageRuntimeIdentity packageIdentity,
+        PluginPackageExecutionIdentity executionIdentity,
         ExternalPluginProcessStartRequest processStartRequest,
         IExternalPluginProcessRunner processRunner,
         IExternalPluginProcessRegistry processRegistry,
@@ -229,7 +246,10 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
 
             eventSink.Record(new ExternalPluginProcessEvent(
                 ExternalPluginProcessEventKind.Starting,
+                executionIdentity.ProjectId,
+                executionIdentity.ApplicationId,
                 Manifest.Id,
+                executionIdentity.PackageIdentity.PackageContentSha256,
                 $"Starting external plugin process '{Manifest.Id}'.",
                 DateTimeOffset.UtcNow));
 
@@ -239,18 +259,14 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
 
             if (!_process.HasExited)
             {
-                if (packageIdentity.IsComplete)
-                {
-                    processRegistry.Register(packageIdentity, _process);
-                }
-                else
-                {
-                    processRegistry.Register(Manifest.Id, _process);
-                }
+                processRegistry.Register(executionIdentity, _process);
 
                 eventSink.Record(new ExternalPluginProcessEvent(
                     ExternalPluginProcessEventKind.Started,
+                    executionIdentity.ProjectId,
+                    executionIdentity.ApplicationId,
                     Manifest.Id,
+                    executionIdentity.PackageIdentity.PackageContentSha256,
                     $"External plugin process '{Manifest.Id}' started.",
                     DateTimeOffset.UtcNow));
             }
@@ -258,7 +274,10 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
             {
                 eventSink.Record(new ExternalPluginProcessEvent(
                     ExternalPluginProcessEventKind.StartupExited,
+                    executionIdentity.ProjectId,
+                    executionIdentity.ApplicationId,
                     Manifest.Id,
+                    executionIdentity.PackageIdentity.PackageContentSha256,
                     $"External plugin process '{Manifest.Id}' exited during startup.",
                     DateTimeOffset.UtcNow));
             }
@@ -281,14 +300,7 @@ public sealed class ExternalProcessPluginInstanceActivator : IPluginInstanceActi
             }
             finally
             {
-                if (packageIdentity.IsComplete)
-                {
-                    processRegistry.Unregister(packageIdentity, _process);
-                }
-                else
-                {
-                    processRegistry.Unregister(Manifest.Id, _process);
-                }
+                processRegistry.Unregister(executionIdentity, _process);
                 _process = null;
             }
         }

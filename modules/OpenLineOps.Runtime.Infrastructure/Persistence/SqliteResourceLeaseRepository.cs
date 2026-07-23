@@ -1,5 +1,6 @@
 using System.Globalization;
 using Microsoft.Data.Sqlite;
+using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Resources;
@@ -9,15 +10,19 @@ namespace OpenLineOps.Runtime.Infrastructure.Persistence;
 public sealed class SqliteResourceLeaseRepository : IResourceLeaseRepository, IDisposable
 {
     private readonly string _connectionString;
+    private readonly IClock _clock;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private int _schemaCreated;
 
-    public SqliteResourceLeaseRepository(string connectionString)
+    public SqliteResourceLeaseRepository(string connectionString, IClock clock)
     {
         _connectionString = string.IsNullOrWhiteSpace(connectionString)
             ? throw new ArgumentException("SQLite connection string is required.", nameof(connectionString))
-            : connectionString;
+            : connectionString.Trim();
+        _clock = clock ?? throw new ArgumentNullException(nameof(clock));
     }
+
+    internal string ConnectionString => _connectionString;
 
     public async ValueTask<IReadOnlyCollection<ResourceLease>> ListAsync(
         CancellationToken cancellationToken = default)
@@ -55,7 +60,6 @@ public sealed class SqliteResourceLeaseRepository : IResourceLeaseRepository, ID
         ProductionRunId runId,
         string operationRunId,
         IReadOnlyCollection<ResourceRequirement> resources,
-        DateTimeOffset acquiredAtUtc,
         TimeSpan duration,
         CancellationToken cancellationToken = default)
     {
@@ -75,13 +79,14 @@ public sealed class SqliteResourceLeaseRepository : IResourceLeaseRepository, ID
             await using var connection = new SqliteConnection(_connectionString);
             await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
             await using var transaction = connection.BeginTransaction(deferred: false);
+            var acquiredAtUtc = ReadStoreUtcNow();
 
             foreach (var resource in requested)
             {
                 await using var conflict = connection.CreateCommand();
                 conflict.Transaction = transaction;
                 conflict.CommandText = """
-                    SELECT run_id, operation_run_id, expires_at_utc
+                    SELECT expires_at_utc
                     FROM runtime_resource_leases
                     WHERE resource_kind = $resource_kind
                       AND resource_id = $resource_id
@@ -95,44 +100,16 @@ public sealed class SqliteResourceLeaseRepository : IResourceLeaseRepository, ID
                     continue;
                 }
 
-                var ownerRunId = reader.GetString(0);
-                var ownerOperationRunId = reader.GetString(1);
                 var expiresAtUtc = DateTimeOffset.ParseExact(
-                    reader.GetString(2),
+                    reader.GetString(0),
                     "O",
                     CultureInfo.InvariantCulture,
                     DateTimeStyles.None);
-                if (expiresAtUtc > acquiredAtUtc
-                    && (!string.Equals(
-                            ownerRunId,
-                            runId.Value.ToString("D"),
-                            StringComparison.Ordinal)
-                        || !string.Equals(
-                            ownerOperationRunId,
-                            operationRunId,
-                            StringComparison.Ordinal)))
+                if (expiresAtUtc > acquiredAtUtc)
                 {
                     await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
                     return null;
                 }
-            }
-
-            var activeOwned = await ListActiveOwnerLeasesAsync(
-                    connection,
-                    transaction,
-                    runId,
-                    operationRunId,
-                    acquiredAtUtc,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (activeOwned.Count > 0)
-            {
-                var exactResources = activeOwned
-                    .Select(static lease => lease.Resource)
-                    .ToHashSet()
-                    .SetEquals(requested);
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return exactResources ? activeOwned : null;
             }
 
             var acquired = new List<ResourceLease>(requested.Length);
@@ -164,64 +141,15 @@ public sealed class SqliteResourceLeaseRepository : IResourceLeaseRepository, ID
         }
     }
 
-    private static async ValueTask<IReadOnlyCollection<ResourceLease>> ListActiveOwnerLeasesAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        ProductionRunId runId,
-        string operationRunId,
-        DateTimeOffset acquiredAtUtc,
-        CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT resource_kind, resource_id, fencing_token, acquired_at_utc, expires_at_utc
-            FROM runtime_resource_leases
-            WHERE run_id = $run_id
-              AND operation_run_id = $operation_run_id
-              AND expires_at_utc > $acquired_at_utc
-            ORDER BY resource_kind, resource_id;
-            """;
-        command.Parameters.AddWithValue("$run_id", runId.Value.ToString("D"));
-        command.Parameters.AddWithValue("$operation_run_id", operationRunId);
-        command.Parameters.AddWithValue(
-            "$acquired_at_utc",
-            acquiredAtUtc.ToString("O", CultureInfo.InvariantCulture));
-        var leases = new List<ResourceLease>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            leases.Add(new ResourceLease(
-                new ResourceRequirement(
-                    ParseResourceKind(reader.GetString(0)),
-                    reader.GetString(1)),
-                runId,
-                operationRunId,
-                reader.GetInt64(2),
-                ParseTimestamp(reader.GetString(3)),
-                ParseTimestamp(reader.GetString(4))));
-        }
-
-        return leases;
-    }
-
     public async ValueTask<ResourceLeaseFenceValidationResult> ValidateCurrentAsync(
         ProductionRunId runId,
         string operationRunId,
         IReadOnlyCollection<ResourceLeaseFenceEvidence> evidence,
-        DateTimeOffset validatedAtUtc,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(operationRunId);
         ArgumentNullException.ThrowIfNull(evidence);
-        if (validatedAtUtc.Offset != TimeSpan.Zero)
-        {
-            throw new ArgumentException("Resource lease validation time must be UTC.", nameof(validatedAtUtc));
-        }
-
-        var supplied = evidence
-            .OrderBy(static item => item.Resource.CanonicalKey, StringComparer.Ordinal)
-            .ToArray();
+        var supplied = evidence.ToArray();
         if (supplied.Length == 0
             || supplied.Any(static item => item is null)
             || supplied.Select(static item => item.Resource).Distinct().Count() != supplied.Length)
@@ -230,6 +158,12 @@ public sealed class SqliteResourceLeaseRepository : IResourceLeaseRepository, ID
                 "Resource lease validation requires non-empty unique evidence.",
                 nameof(evidence));
         }
+
+        Array.Sort(
+            supplied,
+            static (left, right) => StringComparer.Ordinal.Compare(
+                left.Resource.CanonicalKey,
+                right.Resource.CanonicalKey));
 
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -240,6 +174,7 @@ public sealed class SqliteResourceLeaseRepository : IResourceLeaseRepository, ID
             await using var transaction = (SqliteTransaction)await connection
                 .BeginTransactionAsync(cancellationToken)
                 .ConfigureAwait(false);
+            var validatedAtUtc = ReadStoreUtcNow();
             foreach (var item in supplied)
             {
                 await using var command = connection.CreateCommand();
@@ -292,46 +227,300 @@ public sealed class SqliteResourceLeaseRepository : IResourceLeaseRepository, ID
     public async ValueTask ReleaseAsync(
         ProductionRunId runId,
         string operationRunId,
+        IReadOnlyCollection<ResourceLeaseReleaseClaim> claims,
         CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operationRunId);
+        ArgumentNullException.ThrowIfNull(claims);
+        var supplied = claims.ToArray();
+        if (supplied.Any(static claim => claim is null)
+            || supplied.Select(static claim => claim.Resource).Distinct().Count() != supplied.Length)
+        {
+            throw new ArgumentException(
+                "Resource lease release claims must be unique.",
+                nameof(claims));
+        }
+
+        if (supplied.Length == 0)
+        {
+            return;
+        }
+
+        Array.Sort(
+            supplied,
+            static (left, right) => StringComparer.Ordinal.Compare(
+                left.Resource.CanonicalKey,
+                right.Resource.CanonicalKey));
+
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            DELETE FROM runtime_resource_leases
-            WHERE run_id = $run_id
-              AND operation_run_id = $operation_run_id;
-            """;
-        command.Parameters.AddWithValue("$run_id", runId.Value.ToString("D"));
-        command.Parameters.AddWithValue("$operation_run_id", operationRunId);
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(deferred: false);
+        foreach (var claim in supplied)
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                DELETE FROM runtime_resource_leases
+                WHERE resource_kind = $resource_kind
+                  AND resource_id = $resource_id
+                  AND run_id = $run_id
+                  AND operation_run_id = $operation_run_id
+                  AND fencing_token = $fencing_token
+                  AND expires_at_utc <> $recovery_hold_expiry;
+                """;
+            AddResourceParameters(command, claim.Resource);
+            command.Parameters.AddWithValue("$run_id", runId.Value.ToString("D"));
+            command.Parameters.AddWithValue("$operation_run_id", operationRunId);
+            command.Parameters.AddWithValue("$fencing_token", claim.FencingToken);
+            command.Parameters.AddWithValue(
+                "$recovery_hold_expiry",
+                DateTimeOffset.MaxValue.ToString("O", CultureInfo.InvariantCulture));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask HoldForRecoveryAsync(
         ProductionRunId runId,
-        string operationRunId,
+        IReadOnlyCollection<ProductionRunLeaseHold> leaseHolds,
         CancellationToken cancellationToken = default)
     {
+        var expected = ProductionRunLeaseHoldSet.Create(leaseHolds);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            UPDATE runtime_resource_leases
-            SET expires_at_utc = $expires_at_utc
-            WHERE run_id = $run_id
-              AND operation_run_id = $operation_run_id;
-            """;
-        command.Parameters.AddWithValue("$run_id", runId.Value.ToString("D"));
-        command.Parameters.AddWithValue("$operation_run_id", operationRunId);
-        command.Parameters.AddWithValue(
-            "$expires_at_utc",
-            DateTimeOffset.MaxValue.ToString("O", CultureInfo.InvariantCulture));
-        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = connection.BeginTransaction(deferred: false);
+            await HoldForRecoveryInTransactionAsync(
+                    connection,
+                    transaction,
+                    runId,
+                    expected,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
-    private async ValueTask EnsureSchemaAsync(CancellationToken cancellationToken)
+    internal static async ValueTask HoldForRecoveryInTransactionAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ProductionRunId runId,
+        ProductionRunLeaseHoldSet expected,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(transaction);
+        ArgumentNullException.ThrowIfNull(expected);
+        var current = new List<(ProductionRunLeaseHoldClaim Claim, long? CurrentFence)>();
+        await using (var readCommand = connection.CreateCommand())
+        {
+            readCommand.Transaction = transaction;
+            readCommand.CommandText = """
+                SELECT l.operation_run_id,
+                       l.resource_kind,
+                       l.resource_id,
+                       l.fencing_token,
+                       f.fencing_token
+                FROM runtime_resource_leases AS l
+                LEFT JOIN runtime_resource_fencing_tokens AS f
+                  ON f.resource_kind = l.resource_kind
+                 AND f.resource_id = l.resource_id
+                WHERE l.run_id = $run_id;
+                """;
+            readCommand.Parameters.AddWithValue("$run_id", runId.Value.ToString("D"));
+            await using var reader = await readCommand.ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                current.Add((
+                    new ProductionRunLeaseHoldClaim(
+                        reader.GetString(0),
+                        new ResourceRequirement(
+                            ParseResourceKind(reader.GetString(1)),
+                            reader.GetString(2)),
+                        reader.GetInt64(3)),
+                    reader.IsDBNull(4) ? null : reader.GetInt64(4)));
+            }
+        }
+
+        var suppliedCurrent = current
+            .Where(item => expected.ContainsOperation(item.Claim.OperationRunId))
+            .ToArray();
+        if (!expected.MatchesExactly(suppliedCurrent.Select(static item => item.Claim)))
+        {
+            throw expected.OwnershipException(
+                runId,
+                suppliedCurrent.Length == 0
+                    ? "no current lease rows are owned by the Production Run"
+                    : "a supplied durable Operation Run lease set differs from its fencing claims");
+        }
+
+        var stale = suppliedCurrent.FirstOrDefault(static item =>
+            item.CurrentFence != item.Claim.FencingToken);
+        if (stale.Claim.Resource is not null)
+        {
+            throw expected.OwnershipException(
+                runId,
+                $"the permanent fence for {stale.Claim.Resource.CanonicalKey} is stale");
+        }
+
+        var held = 0;
+        foreach (var claim in expected.Claims)
+        {
+            await using var updateCommand = connection.CreateCommand();
+            updateCommand.Transaction = transaction;
+            updateCommand.CommandText = """
+                UPDATE runtime_resource_leases
+                SET expires_at_utc = $expires_at_utc
+                WHERE resource_kind = $resource_kind
+                  AND resource_id = $resource_id
+                  AND run_id = $run_id
+                  AND operation_run_id = $operation_run_id
+                  AND fencing_token = $fencing_token;
+                """;
+            AddResourceParameters(updateCommand, claim.Resource);
+            updateCommand.Parameters.AddWithValue("$run_id", runId.Value.ToString("D"));
+            updateCommand.Parameters.AddWithValue("$operation_run_id", claim.OperationRunId);
+            updateCommand.Parameters.AddWithValue("$fencing_token", claim.FencingToken);
+            updateCommand.Parameters.AddWithValue(
+                "$expires_at_utc",
+                DateTimeOffset.MaxValue.ToString("O", CultureInfo.InvariantCulture));
+            held += await updateCommand.ExecuteNonQueryAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        if (held != expected.Claims.Count)
+        {
+            throw expected.OwnershipException(
+                runId,
+                $"the exact hold affected {held} rows instead of {expected.Claims.Count}");
+        }
+    }
+
+    public async ValueTask ReleaseRecoveryHoldAsync(
+        ProductionRunId runId,
+        IReadOnlyCollection<ProductionRunLeaseHold> leaseHolds,
+        CancellationToken cancellationToken = default)
+    {
+        var expected = ProductionRunLeaseHoldSet.Create(leaseHolds);
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var connection = new SqliteConnection(_connectionString);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = connection.BeginTransaction(deferred: false);
+            var current = new List<(
+                ProductionRunLeaseHoldClaim Claim,
+                long? CurrentFence,
+                DateTimeOffset ExpiresAtUtc)>();
+            await using (var readCommand = connection.CreateCommand())
+            {
+                readCommand.Transaction = transaction;
+                readCommand.CommandText = """
+                    SELECT l.operation_run_id,
+                           l.resource_kind,
+                           l.resource_id,
+                           l.fencing_token,
+                           f.fencing_token,
+                           l.expires_at_utc
+                    FROM runtime_resource_leases AS l
+                    LEFT JOIN runtime_resource_fencing_tokens AS f
+                      ON f.resource_kind = l.resource_kind
+                     AND f.resource_id = l.resource_id
+                    WHERE l.run_id = $run_id;
+                    """;
+                readCommand.Parameters.AddWithValue("$run_id", runId.Value.ToString("D"));
+                await using var reader = await readCommand.ExecuteReaderAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    current.Add((
+                        new ProductionRunLeaseHoldClaim(
+                            reader.GetString(0),
+                            new ResourceRequirement(
+                                ParseResourceKind(reader.GetString(1)),
+                                reader.GetString(2)),
+                            reader.GetInt64(3)),
+                        reader.IsDBNull(4) ? null : reader.GetInt64(4),
+                        ParseTimestamp(reader.GetString(5))));
+                }
+            }
+
+            var suppliedCurrent = current
+                .Where(item => expected.ContainsOperation(item.Claim.OperationRunId))
+                .ToArray();
+            if (!expected.MatchesExactly(suppliedCurrent.Select(static item => item.Claim)))
+            {
+                await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                throw expected.OwnershipException(
+                    runId,
+                    suppliedCurrent.Length == 0
+                        ? "no current recovery-held lease rows are owned by the Production Run"
+                        : "a supplied Operation Run recovery-held set differs from its fencing claims");
+            }
+
+            var invalid = suppliedCurrent.FirstOrDefault(static item =>
+                item.ExpiresAtUtc != DateTimeOffset.MaxValue
+                || item.CurrentFence != item.Claim.FencingToken);
+            if (invalid.Claim.Resource is not null)
+            {
+                await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                throw expected.OwnershipException(
+                    runId,
+                    $"{invalid.Claim.Resource.CanonicalKey} is not an exact current recovery hold");
+            }
+
+            var released = 0;
+            foreach (var claim in expected.Claims)
+            {
+                await using var deleteCommand = connection.CreateCommand();
+                deleteCommand.Transaction = transaction;
+                deleteCommand.CommandText = """
+                    DELETE FROM runtime_resource_leases
+                    WHERE resource_kind = $resource_kind
+                      AND resource_id = $resource_id
+                      AND run_id = $run_id
+                      AND operation_run_id = $operation_run_id
+                      AND fencing_token = $fencing_token
+                      AND expires_at_utc = $recovery_hold_expiry;
+                    """;
+                AddResourceParameters(deleteCommand, claim.Resource);
+                deleteCommand.Parameters.AddWithValue("$run_id", runId.Value.ToString("D"));
+                deleteCommand.Parameters.AddWithValue("$operation_run_id", claim.OperationRunId);
+                deleteCommand.Parameters.AddWithValue("$fencing_token", claim.FencingToken);
+                deleteCommand.Parameters.AddWithValue(
+                    "$recovery_hold_expiry",
+                    DateTimeOffset.MaxValue.ToString("O", CultureInfo.InvariantCulture));
+                released += await deleteCommand.ExecuteNonQueryAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (released != expected.Claims.Count)
+            {
+                await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+                throw expected.OwnershipException(
+                    runId,
+                    $"the exact recovery release affected {released} rows instead of {expected.Claims.Count}");
+            }
+
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    internal async ValueTask EnsureSchemaAsync(CancellationToken cancellationToken)
     {
         if (Volatile.Read(ref _schemaCreated) == 1)
         {
@@ -479,6 +668,15 @@ public sealed class SqliteResourceLeaseRepository : IResourceLeaseRepository, ID
 
         throw new InvalidDataException(
             $"Persisted Production Run id '{value}' is not canonical.");
+    }
+
+    private DateTimeOffset ReadStoreUtcNow()
+    {
+        var utcNow = _clock.UtcNow;
+        return utcNow == default || utcNow.Offset != TimeSpan.Zero
+            ? throw new InvalidOperationException(
+                "Resource lease store clock must return non-default UTC.")
+            : utcNow;
     }
 
     public void Dispose()

@@ -50,21 +50,21 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
         var ownerA = new ProjectReleaseCapabilityBinding(
             capabilityId,
             "binding.axis-a",
-            "DeviceInstance",
+            "Simulator",
             "axis-a",
             "system.axis-a",
             "station.eol");
         var ownerB = new ProjectReleaseCapabilityBinding(
             capabilityId,
             "binding.axis-b",
-            "DeviceInstance",
+            "Simulator",
             "axis-b",
             "system.axis-b",
             "station.eol");
         var otherStation = new ProjectReleaseCapabilityBinding(
             capabilityId,
             "binding.axis-other",
-            "DeviceInstance",
+            "Simulator",
             "axis-other",
             "system.axis-other",
             "station.other");
@@ -169,6 +169,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                                 "station.eol",
                                 "Fixed",
                                 [])],
+                            [],
                             [new ProjectReleaseAuthorizedAction(
                                 "action-scan",
                                 "node-scan",
@@ -180,7 +181,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                                 30_000,
                                 null)])
                     ],
-                    Transitions: [],
+                    Transitions: [TerminalTransition("operation.eol")],
                     LineControllerAuthorizations: []),
                 ExternalProgramResources: [],
                 [new ProjectReleaseCapabilityBinding(
@@ -373,14 +374,14 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             new ProjectReleaseCapabilityBinding(
                 controllerCapabilityId,
                 "binding.scanner-secondary",
-                "DeviceInstance",
+                "Simulator",
                 "scanner-secondary",
                 "system.scanner-secondary",
                 "station.eol"),
             new ProjectReleaseCapabilityBinding(
                 "remote.inspect",
                 "binding.remote-inspector",
-                "DeviceInstance",
+                "Simulator",
                 "remote-inspector",
                 "system.remote-inspector",
                 "station.remote")
@@ -445,6 +446,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                                 "Fixed",
                                 [])
                         ],
+                        [],
                         [new ProjectReleaseAuthorizedAction(
                             "action-remote-inspect",
                             "node-controller",
@@ -455,7 +457,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                             "binding.remote-inspector",
                             30_000,
                             authorization.AuthorizationId)])],
-                    [],
+                    [TerminalTransition("operation.controller")],
                     [authorization]),
                 [],
                 releaseBindings,
@@ -613,7 +615,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
 
         var executableBytes = Encoding.UTF8.GetBytes("frozen-external-program");
         await using var executableContent = new MemoryStream(executableBytes, writable: false);
-        var externalResource = await new FileSystemExternalProgramResourceRepository().SaveAsync(
+        var externalResource = await new FileSystemExternalProgramResourceRepository().ImportDirectoryAsync(
             scope,
             new SaveExternalProgramResourceRequest(
                 resourceId,
@@ -741,6 +743,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                                 "station.eol",
                                 "Fixed",
                                 [])],
+                            [],
                             [new ProjectReleaseAuthorizedAction(
                                 "action-external",
                                 "node-external",
@@ -752,7 +755,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
                                 30_000,
                                 null)])
                     ],
-                    Transitions: [],
+                    Transitions: [TerminalTransition("operation.external")],
                     LineControllerAuthorizations: []),
                 [frozenResource],
                 [new ProjectReleaseCapabilityBinding(
@@ -870,6 +873,19 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
         await File.WriteAllTextAsync(frozenExecutable, "tampered-external-program");
         Assert.Null(await resolver.ResolveAsync(request));
     }
+
+    private static ProjectReleaseRouteTransition TerminalTransition(string operationId) => new(
+        $"{operationId}.completed",
+        operationId,
+        null,
+        "Completed",
+        "Sequence",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null);
 
     private static void WriteReleaseTopologyResources(
         ProjectApplicationWorkspaceScope scope,
@@ -1070,6 +1086,7 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
         "{}",
         [],
         resources,
+        [],
         []);
 
     private static DeviceCommandRouteRequest SelectionRequest(

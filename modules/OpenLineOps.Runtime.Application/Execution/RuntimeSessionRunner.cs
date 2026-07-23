@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using OpenLineOps.Application.Abstractions.Results;
@@ -75,18 +76,32 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
         return request.Process.UsesGraph
-            ? await RunGraphAsync(session, request.Process, cancellationToken).ConfigureAwait(false)
-            : await RunLinearAsync(session, request.Process.Nodes, cancellationToken).ConfigureAwait(false);
+            ? await RunGraphAsync(
+                session,
+                request.Process,
+                request.ProductionInputs,
+                cancellationToken).ConfigureAwait(false)
+            : await RunLinearAsync(
+                session,
+                request.Process.Nodes,
+                request.ProductionInputs,
+                cancellationToken).ConfigureAwait(false);
     }
 
     private async ValueTask<Result<RuntimeSessionRunResult>> RunLinearAsync(
         RuntimeSession session,
         IReadOnlyList<ExecutableRuntimeNode> nodes,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
         CancellationToken cancellationToken)
     {
         foreach (var node in nodes)
         {
-            var nodeResult = await ExecuteNodeAsync(session, node, cancellationToken).ConfigureAwait(false);
+            var nodeResult = await ExecuteNodeAsync(
+                    session,
+                    node,
+                    productionInputs,
+                    cancellationToken)
+                .ConfigureAwait(false);
             if (nodeResult.IsFailure)
             {
                 return Result.Failure<RuntimeSessionRunResult>(nodeResult.Error);
@@ -104,6 +119,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
     private async ValueTask<Result<RuntimeSessionRunResult>> RunGraphAsync(
         RuntimeSession session,
         ExecutableRuntimeProcess process,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
         CancellationToken cancellationToken)
     {
         var executableNodes = process.Nodes.ToDictionary(node => node.NodeId);
@@ -113,20 +129,22 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             .ToDictionary(group => group.Key, group => group.ToArray());
         var transitionTraversals = new Dictionary<ExecutableRuntimeTransition, int>();
         var currentNodeId = process.StartNodeId!;
-        var graphSize = process.Nodes.Count + process.RoutingNodes.Count + process.Transitions.Count;
-        var loopTraversalBudget = process.Transitions.Sum(transition => transition.MaxTraversals.GetValueOrDefault());
-        var hopLimit = Math.Max(
-            1,
-            (graphSize * (loopTraversalBudget + 1)) + 1);
+        var maximumNodeVisits = ExecutableRuntimeProcessExecutionBounds
+            .Calculate(process)
+            .MaximumNodeVisits;
         string? lastCommandPayload = null;
 
-        for (var hop = 0; hop < hopLimit; hop++)
+        for (var hop = 0; hop < maximumNodeVisits; hop++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
             if (executableNodes.TryGetValue(currentNodeId, out var executableNode))
             {
-                var nodeResult = await ExecuteNodeAsync(session, executableNode, cancellationToken)
+                var nodeResult = await ExecuteNodeAsync(
+                        session,
+                        executableNode,
+                        productionInputs,
+                        cancellationToken)
                     .ConfigureAwait(false);
                 if (nodeResult.IsFailure)
                 {
@@ -224,7 +242,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         return await FailSessionAsync(
             session,
             "Runtime.ProcessGraphHopLimitExceeded",
-            $"Runtime process graph exceeded the hop limit of {hopLimit}.",
+            $"Runtime process graph exceeded its proven node-visit bound of {maximumNodeVisits}.",
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -246,6 +264,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
     private async ValueTask<Result<RuntimeNodeExecutionResult>> ExecuteNodeAsync(
         RuntimeSession session,
         ExecutableRuntimeNode node,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -281,6 +300,20 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 
         await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
+        var payloadResolution = ResolveProductionInputPayload(
+            node.InputPayload,
+            productionInputs);
+        if (payloadResolution.FailureReason is not null)
+        {
+            return await RejectNodeAsync(
+                    session,
+                    step.Id,
+                    command.Id,
+                    payloadResolution.FailureReason,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var executionContext = new RuntimeCommandExecutionContext(
             session.Id,
             session.TraceMetadata.ProductionRunId,
@@ -301,7 +334,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             node.NodeId,
             node.TargetCapability,
             node.CommandName,
-            node.InputPayload,
+            payloadResolution.Payload,
             node.Timeout,
             step.ActionId,
             step.TargetKind,
@@ -309,6 +342,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             session.TraceMetadata.ProjectId,
             session.TraceMetadata.ApplicationId,
             session.TraceMetadata.ProjectSnapshotId,
+            productionInputs,
             session.TraceMetadata.ResourceLeaseFences);
 
         var executionResult = await ExecuteCommandSafelyAsync(
@@ -383,6 +417,130 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 $"Command executor threw {exception.GetType().FullName ?? exception.GetType().Name}.");
         }
     }
+
+    private static ProductionInputPayloadResolution ResolveProductionInputPayload(
+        string? inputPayload,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs)
+    {
+        if (string.IsNullOrWhiteSpace(inputPayload))
+        {
+            return new ProductionInputPayloadResolution(inputPayload, null);
+        }
+
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(inputPayload);
+        }
+        catch (JsonException)
+        {
+            return new ProductionInputPayloadResolution(inputPayload, null);
+        }
+
+        using (document)
+        {
+            try
+            {
+                var changed = false;
+                var resolved = ResolveProductionInputElement(
+                    document.RootElement,
+                    productionInputs,
+                    ref changed);
+                return new ProductionInputPayloadResolution(
+                    changed ? resolved?.ToJsonString() ?? "null" : inputPayload,
+                    null);
+            }
+            catch (InvalidDataException exception)
+            {
+                return new ProductionInputPayloadResolution(null, exception.Message);
+            }
+        }
+    }
+
+    private static JsonNode? ResolveProductionInputElement(
+        JsonElement element,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
+        ref bool changed)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var properties = element.EnumerateObject().ToArray();
+            var propertyNames = new HashSet<string>(StringComparer.Ordinal);
+            if (properties.Any(property => !propertyNames.Add(property.Name)))
+            {
+                throw new InvalidDataException(
+                    "Runtime action input JSON cannot contain duplicate properties.");
+            }
+
+            var markerIndex = Array.FindIndex(properties, property => string.Equals(
+                property.Name,
+                "$productionInput",
+                StringComparison.Ordinal));
+            if (markerIndex >= 0)
+            {
+                var marker = properties[markerIndex];
+                if (properties.Length != 1
+                    || marker.Value.ValueKind != JsonValueKind.String
+                    || string.IsNullOrWhiteSpace(marker.Value.GetString()))
+                {
+                    throw new InvalidDataException(
+                        "A $productionInput marker must be the only object property and contain one canonical input key.");
+                }
+
+                var inputKey = marker.Value.GetString()!;
+                if (!productionInputs.TryGetValue(inputKey, out var input))
+                {
+                    throw new InvalidDataException(
+                        $"Runtime action references undeclared Production Context input '{inputKey}'.");
+                }
+
+                changed = true;
+                return ProductionContextJsonValue(input);
+            }
+
+            var result = new JsonObject();
+            foreach (var property in properties)
+            {
+                result[property.Name] = ResolveProductionInputElement(
+                    property.Value,
+                    productionInputs,
+                    ref changed);
+            }
+
+            return result;
+        }
+
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            var result = new JsonArray();
+            foreach (var item in element.EnumerateArray())
+            {
+                result.Add(ResolveProductionInputElement(item, productionInputs, ref changed));
+            }
+
+            return result;
+        }
+
+        return JsonNode.Parse(element.GetRawText());
+    }
+
+    private static JsonValue ProductionContextJsonValue(ProductionContextValue value) => value.Kind switch
+    {
+        ProductionContextValueKind.Text or ProductionContextValueKind.DateTimeUtc =>
+            JsonValue.Create(value.CanonicalValue)!,
+        ProductionContextValueKind.Boolean =>
+            JsonValue.Create(string.Equals(value.CanonicalValue, "true", StringComparison.Ordinal))!,
+        ProductionContextValueKind.WholeNumber => JsonValue.Create(long.Parse(
+            value.CanonicalValue,
+            NumberStyles.AllowLeadingSign,
+            CultureInfo.InvariantCulture))!,
+        ProductionContextValueKind.FixedPoint => JsonValue.Create(decimal.Parse(
+            value.CanonicalValue,
+            NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+            CultureInfo.InvariantCulture))!,
+        _ => throw new InvalidDataException(
+            $"Unsupported Production Context value kind {value.Kind}.")
+    };
 
     private async ValueTask<Result<RuntimeNodeExecutionResult>> CompleteNodeAsync(
         RuntimeSession session,
@@ -569,7 +727,9 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
     {
         var domainEvents = session.DomainEvents.ToArray();
 
-        await _sessionRepository.SaveAsync(session, cancellationToken).ConfigureAwait(false);
+        await _sessionRepository
+            .SaveAsync(session, domainEvents, cancellationToken)
+            .ConfigureAwait(false);
 
         if (domainEvents.Length > 0)
         {
@@ -597,10 +757,24 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 
         if (request.Process.UsesGraph)
         {
-            return ValidateGraph(request.Process);
+            var graphValidation = ValidateGraph(request.Process);
+            if (graphValidation is not null)
+            {
+                return graphValidation;
+            }
         }
 
-        return null;
+        try
+        {
+            _ = ExecutableRuntimeProcessExecutionBounds.Calculate(request.Process);
+            return null;
+        }
+        catch (InvalidDataException exception)
+        {
+            return ApplicationError.Validation(
+                "Runtime.ProcessExecutionBoundsInvalid",
+                exception.Message);
+        }
     }
 
     private static ApplicationError? ValidateGraph(ExecutableRuntimeProcess process)
@@ -852,5 +1026,9 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
     private sealed record RuntimeNodeExecutionResult(
         RuntimeSessionRunResult RunResult,
         string? ResultPayload);
+
+    private sealed record ProductionInputPayloadResolution(
+        string? Payload,
+        string? FailureReason);
 
 }

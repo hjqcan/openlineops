@@ -18,6 +18,7 @@ import {
   Waypoints
 } from 'lucide-react';
 import type {
+  AddCapabilityContractRequest,
   AddSiteLayoutElementRequest,
   AutomationProjectWorkspaceResponse,
   AutomationSystemResponse,
@@ -31,6 +32,7 @@ import type {
 } from './contracts';
 import {
   addAutomationSystem,
+  addCapabilityContract,
   addDriverBinding,
   addSiteLayoutElement,
   addSlotDefinition,
@@ -52,8 +54,13 @@ import {
   updateSlotGroup
 } from './api';
 import { buildProductionLineRuntimeView } from './production-line-runtime-view';
+import {
+  buildProductionRouteRuntimeProjection,
+  type ProductionRouteRuntimeMovement,
+  type ProductionRouteRuntimeProjection
+} from './production-route-runtime-projection';
 import { useEditorDocument } from './editor-workspace';
-import type { EditorProblem } from './editor-workspace-model';
+import type { EditorDocumentConflict, EditorProblem } from './editor-workspace-model';
 import {
   buildTopologyRuntimeView,
   describeRuntimeMonitorState,
@@ -67,6 +74,16 @@ import type {
   TopologyRuntimeStatus,
   TopologyRuntimeView
 } from './topology-runtime-view';
+import {
+  readTopologyDraftConflict,
+  requireTopologyDraftReload,
+  resolvePersistedCapabilityDraft,
+  topologyDraftSaveOrder
+} from './topology-draft-workspace-model';
+import type {
+  TopologyDocumentKind,
+  TopologyDraftKind
+} from './topology-draft-workspace-model';
 
 type WorkspaceMode = 'edit' | 'run';
 type CanvasMode = 'edit' | 'monitor';
@@ -110,11 +127,23 @@ interface ElementDragState {
 interface SemanticPropertiesDraft {
   displayName: string;
   systemType: string;
+  requiredCapabilityIds: string[];
+  providedCapabilityIds: string[];
   groupKind: string;
   groupCapacity: number;
   slotAddress: string;
   slotMaterialKind: string;
   slotEnabled: boolean;
+}
+
+interface CapabilityContractDraft {
+  capabilityId: string;
+  commandName: string;
+  version: string;
+  inputSchema: string;
+  outputSchema: string;
+  timeoutSeconds: number;
+  safetyClass: string;
 }
 
 interface DriverBindingDraft {
@@ -153,6 +182,19 @@ interface Topology3DPoint {
   y: number;
 }
 
+interface TopologyRuntimeRouteMovement {
+  productionRunId: string;
+  productionUnitId: string;
+  productionUnitLabel: string;
+  movement: ProductionRouteRuntimeMovement;
+}
+
+interface TopologyRouteAnchor extends Topology3DPoint {
+  stationSystemId: string;
+}
+
+const topologyRouteTones = ['active', 'passed', 'failed', 'rework', 'terminal', 'neutral'] as const;
+
 const slotGroupKinds = [
   'FixtureNest',
   'TesterBank',
@@ -172,10 +214,16 @@ const slotMaterialKinds = [
 
 const driverProviderKinds = [
   'Simulator',
-  'DeviceInstance',
   'PluginCommand',
   'ExternalSystem',
   'ProcessCommandProvider'
+];
+
+const safetyClasses = [
+  'Informational',
+  'Normal',
+  'Motion',
+  'SafetyCritical'
 ];
 
 const paletteItems: Array<{
@@ -228,10 +276,34 @@ export function TopologyDesigner({
   const [dimension, setDimension] = useState<TopologyDimension>('2d');
   const [camera, setCamera] = useState<TopologyCamera>(defaultTopologyCamera);
   const [deleteConfirmElementId, setDeleteConfirmElementId] = useState<string | null>(null);
-  const [documentDirty, setDocumentDirty] = useState(false);
+  const [dirtyDrafts, setDirtyDrafts] = useState<ReadonlySet<TopologyDraftKind>>(
+    () => new Set<TopologyDraftKind>());
+  const [draftEditRevision, setDraftEditRevision] = useState(0);
+  const [conflict, setConflict] = useState<EditorDocumentConflict | null>(null);
   const rootRef = useRef<HTMLElement>(null);
   const saveStateRef = useRef(saveState);
   saveStateRef.current = saveState;
+  const dirtyDraftsRef = useRef(dirtyDrafts);
+  dirtyDraftsRef.current = dirtyDrafts;
+  const documentDirty = dirtyDrafts.size > 0;
+  const setDraftDirty = useCallback((kind: TopologyDraftKind, dirty: boolean) => {
+    if (dirty) {
+      setDraftEditRevision(current => current + 1);
+    }
+    const next = new Set(dirtyDraftsRef.current);
+    if (dirty) {
+      next.add(kind);
+    } else {
+      next.delete(kind);
+    }
+    dirtyDraftsRef.current = next;
+    setDirtyDrafts(next);
+  }, []);
+  const clearDirtyDrafts = useCallback(() => {
+    const next = new Set<TopologyDraftKind>();
+    dirtyDraftsRef.current = next;
+    setDirtyDrafts(next);
+  }, []);
 
   const activeApplication = activeWorkspace?.project.applications.find(
     application => application.applicationId === activeApplicationId)
@@ -255,6 +327,14 @@ export function TopologyDesigner({
       ? buildTopologyRuntimeView(topology, runtimeProjection)
       : emptyTopologyRuntimeView(),
     [effectiveMode, runtimeProjection, topology]);
+  const routeRuntimeProjections = useMemo(
+    () => effectiveMode === 'monitor'
+      ? (runtimeProjection?.activeRuns ?? []).map(buildProductionRouteRuntimeProjection)
+      : [],
+    [effectiveMode, runtimeProjection]);
+  const routeRuntimeMovements = useMemo(
+    () => selectTopologyRuntimeRouteMovements(routeRuntimeProjections),
+    [routeRuntimeProjections]);
   const stationStatuses = runtimeView.stationStatuses;
   const targetStatusByKey = runtimeView.targetStatusByKey;
   const runtimeMonitorLabel = useMemo(() => {
@@ -364,6 +444,54 @@ export function TopologyDesigner({
     setDeleteConfirmElementId(null);
   }, [effectiveMode, selectedElementId]);
 
+  const reloadPersistedDrafts = useCallback(async () => {
+    if (!activeApplication || !apiScope || !activeApplication.topologyId) {
+      throw new Error('Reload persisted topology failed: the active Application source is unavailable.');
+    }
+    if (!isBackendHealthy) {
+      throw new Error('Reload persisted topology failed: the backend is unavailable.');
+    }
+
+    const [topologyResponse, layoutResponse] = await Promise.all([
+      getAutomationTopology(activeApplication.topologyId, apiScope),
+      getSiteLayout(createLayoutId(activeApplication.applicationId), apiScope)
+    ]);
+    const persisted = requireTopologyDraftReload(topologyResponse, layoutResponse);
+    setTopology(persisted.topology);
+    setLayout(persisted.layout);
+  }, [activeApplication, apiScope, isBackendHealthy]);
+
+  const registerDraftConflict = useCallback((
+    response: { status: number; text: string },
+    documentKind: TopologyDocumentKind,
+    loadedRevision: string,
+    overwriteDraft: () => Promise<boolean>
+  ): boolean => {
+    const stale = readTopologyDraftConflict(response, documentKind, loadedRevision);
+    if (!stale) {
+      return false;
+    }
+
+    setConflict({
+      loadedRevision: stale.loadedRevision,
+      currentRevision: stale.currentRevision,
+      reload: async () => {
+        await reloadPersistedDrafts();
+        clearDirtyDrafts();
+        setSaveState('saved');
+        setConflict(null);
+        onMessage(`${stale.documentKind} reloaded from the externally changed Application source.`);
+      },
+      overwrite: async () => {
+        if (!await overwriteDraft()) {
+          throw new Error(`${stale.documentKind} overwrite failed. The editor draft was preserved.`);
+        }
+        setConflict(null);
+      }
+    });
+    return true;
+  }, [clearDirtyDrafts, onMessage, reloadPersistedDrafts]);
+
   const newLayout = useCallback(async () => {
     if (!activeWorkspace || !activeApplication || !apiScope) {
       onMessage('Open a project application before creating a layout.');
@@ -428,6 +556,10 @@ export function TopologyDesigner({
     kind: PaletteItemKind,
     rootPlacement?: { x: number; y: number }
   ) => {
+    if (dirtyDraftsRef.current.size > 0) {
+      onMessage('Save or revert topology drafts before adding another target.');
+      return;
+    }
     if (!editable || !topology || !layout || !apiScope || !activeApplication) {
       onMessage('Create a 2D layout and enter Edit mode before adding elements.');
       return;
@@ -638,19 +770,21 @@ export function TopologyDesigner({
 
   const previewGeometry = useCallback((
     elementId: string,
-    geometry: UpdateSiteLayoutElementGeometryRequest
+    geometry: UpdateSiteLayoutElementGeometryRequest,
+    dirty = true
   ) => {
-    setDocumentDirty(true);
+    setDraftDirty('geometry', dirty);
     setLayout(current => updateLayoutGeometry(current, elementId, geometry));
-  }, []);
+  }, [setDraftDirty]);
 
   const commitGeometry = useCallback(async (
     elementId: string,
     geometry: UpdateSiteLayoutElementGeometryRequest,
-    previousGeometry: UpdateSiteLayoutElementGeometryRequest
-  ) => {
+    previousGeometry: UpdateSiteLayoutElementGeometryRequest,
+    force = false
+  ): Promise<boolean> => {
     if (!layout || !apiScope || effectiveMode !== 'edit' || !isBackendHealthy) {
-      return;
+      return false;
     }
 
     setSaveState('saving');
@@ -661,87 +795,172 @@ export function TopologyDesigner({
         elementId,
         normalizeGeometry(geometry),
         apiScope,
-        { revision: layout.revision });
+        { revision: layout.revision, force });
       if (!response.ok || !response.body) {
-        setLayout(current => updateLayoutGeometry(current, elementId, previousGeometry));
+        const conflictRegistered = registerDraftConflict(
+          response,
+          'Layout',
+          layout.revision,
+          () => commitGeometry(elementId, geometry, previousGeometry, true));
+        if (!conflictRegistered) {
+          setLayout(current => updateLayoutGeometry(current, elementId, previousGeometry));
+        }
         setSaveState('error');
         onMessage(`Layout save failed: ${response.status} ${response.text}`);
-        return;
+        return false;
       }
 
       setLayout(response.body);
       setSelectedElementId(elementId);
       setSaveState('saved');
+      setDraftDirty('geometry', false);
+      setConflict(null);
       onMessage(`Layout saved ${elementId}`);
+      return true;
     } catch (error) {
-      setLayout(current => updateLayoutGeometry(current, elementId, previousGeometry));
       setSaveState('error');
       onMessage(`Layout save failed: ${String(error)}`);
+      return false;
     }
-  }, [apiScope, effectiveMode, isBackendHealthy, layout, onMessage]);
+  }, [apiScope, effectiveMode, isBackendHealthy, layout, onMessage, registerDraftConflict, setDraftDirty]);
 
   const saveSemanticTarget = useCallback(async (
     element: SiteLayoutElementResponse,
-    draft: SemanticPropertiesDraft
-  ) => {
+    draft: SemanticPropertiesDraft,
+    force = false
+  ): Promise<boolean> => {
     if (!editable || !topology || !apiScope) {
       onMessage('Target properties can only be changed in Edit mode.');
-      return;
+      return false;
     }
 
     setBusy(true);
     setSaveState('saving');
     try {
-      let nextTopology: AutomationTopologyResponse;
+      let response: {
+        ok: boolean;
+        status: number;
+        text: string;
+        body: AutomationTopologyResponse | null;
+      };
       if (element.target.kind === 'System') {
-        nextTopology = await requireBody(
-          updateAutomationSystem(topology.topologyId, element.target.targetId, {
+        response = await updateAutomationSystem(topology.topologyId, element.target.targetId, {
             displayName: requireText(draft.displayName, 'Display Name'),
             systemType: requireText(draft.systemType, 'System Type'),
+            requiredCapabilityIds: draft.requiredCapabilityIds,
+            providedCapabilityIds: draft.providedCapabilityIds,
             metadata: topology.systems.find(
               system => system.systemId === element.target.targetId)?.metadata ?? {}
-          }, apiScope, { revision: topology.revision }),
-          `Save System ${element.target.targetId}`);
+          }, apiScope, { revision: topology.revision, force });
       } else if (element.target.kind === 'SlotGroup') {
         if (!Number.isInteger(draft.groupCapacity) || draft.groupCapacity <= 0) {
           throw new Error('Slot Group capacity must be a positive whole number.');
         }
-        nextTopology = await requireBody(
-          updateSlotGroup(topology.topologyId, element.target.targetId, {
+        response = await updateSlotGroup(topology.topologyId, element.target.targetId, {
             displayName: requireText(draft.displayName, 'Display Name'),
             kind: draft.groupKind,
             capacity: draft.groupCapacity
-          }, apiScope, { revision: topology.revision }),
-          `Save Slot Group ${element.target.targetId}`);
+          }, apiScope, { revision: topology.revision, force });
       } else {
-        nextTopology = await requireBody(
-          updateSlotDefinition(topology.topologyId, element.target.targetId, {
+        response = await updateSlotDefinition(topology.topologyId, element.target.targetId, {
             displayName: requireText(draft.displayName, 'Display Name'),
             address: requireText(draft.slotAddress, 'Slot Address'),
             materialKind: draft.slotMaterialKind,
             isEnabled: draft.slotEnabled
-          }, apiScope, { revision: topology.revision }),
-          `Save Slot ${element.target.targetId}`);
+          }, apiScope, { revision: topology.revision, force });
       }
 
-      setTopology(nextTopology);
+      if (!response.ok || !response.body) {
+        registerDraftConflict(
+          response,
+          'Topology',
+          topology.revision,
+          () => saveSemanticTarget(element, draft, true));
+        setSaveState('error');
+        onMessage(`Topology properties save failed: ${response.status} ${response.text}`);
+        return false;
+      }
+
+      setTopology(response.body);
       setSaveState('saved');
+      setDraftDirty('semantic', false);
+      setConflict(null);
       onMessage(`Properties saved ${element.target.targetId}`);
+      return true;
     } catch (error) {
       setSaveState('error');
       onMessage(String(error));
+      return false;
     } finally {
       setBusy(false);
     }
-  }, [apiScope, editable, onMessage, topology]);
+  }, [apiScope, editable, onMessage, registerDraftConflict, setDraftDirty, topology]);
+
+  const createCapability = useCallback(async (
+    draft: CapabilityContractDraft,
+    force = false
+  ): Promise<boolean> => {
+    if (!editable || !topology || !apiScope) {
+      onMessage('Capability contracts can only be created in Edit mode.');
+      return false;
+    }
+
+    if (!Number.isInteger(draft.timeoutSeconds) || draft.timeoutSeconds <= 0) {
+      setSaveState('error');
+      onMessage('Capability timeout must be a positive whole number of seconds.');
+      return false;
+    }
+
+    setBusy(true);
+    setSaveState('saving');
+    try {
+      const request: AddCapabilityContractRequest = {
+        capabilityId: requireText(draft.capabilityId, 'Capability ID'),
+        commandName: requireText(draft.commandName, 'Command Name'),
+        version: requireText(draft.version, 'Version'),
+        inputSchema: optionalText(draft.inputSchema),
+        outputSchema: optionalText(draft.outputSchema),
+        timeoutSeconds: draft.timeoutSeconds,
+        safetyClass: draft.safetyClass
+      };
+      const response = await addCapabilityContract(
+        topology.topologyId,
+        request,
+        apiScope,
+        { revision: topology.revision, force });
+      if (!response.ok || !response.body) {
+        registerDraftConflict(
+          response,
+          'Topology',
+          topology.revision,
+          () => createCapability(draft, true));
+        setSaveState('error');
+        onMessage(`Capability save failed: ${response.status} ${response.text}`);
+        return false;
+      }
+      setTopology(response.body);
+      setSaveState('saved');
+      setDraftDirty('capability', false);
+      setConflict(null);
+      onMessage(`Created Capability ${request.capabilityId}. Assign it to the selected System and save properties.`);
+      return true;
+    } catch (error) {
+      setSaveState('error');
+      onMessage(String(error));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }, [apiScope, editable, onMessage, registerDraftConflict, setDraftDirty, topology]);
 
   const saveDriverBinding = useCallback(async (
     originalBindingId: string | null,
-    draft: DriverBindingDraft
-  ) => {
+    draft: DriverBindingDraft,
+    force = false
+  ): Promise<boolean> => {
     if (!editable || !topology || !apiScope) {
       onMessage('Driver bindings can only be changed in Edit mode.');
-      return;
+      return false;
     }
 
     setBusy(true);
@@ -757,25 +976,48 @@ export function TopologyDesigner({
         providerKind: requireText(draft.providerKind, 'Provider Kind'),
         providerKey: requireText(draft.providerKey, 'Provider Key')
       };
-      const nextTopology = originalBindingId === null
-        ? await requireBody(
-          addDriverBinding(topology.topologyId, { bindingId, ...request }, apiScope, { revision: topology.revision }),
-          `Create Driver binding ${bindingId}`)
-        : await requireBody(
-          updateDriverBinding(topology.topologyId, originalBindingId, request, apiScope, { revision: topology.revision }),
-          `Update Driver binding ${originalBindingId}`);
-      setTopology(nextTopology);
+      const response = originalBindingId === null
+        ? await addDriverBinding(
+          topology.topologyId,
+          { bindingId, ...request },
+          apiScope,
+          { revision: topology.revision, force })
+        : await updateDriverBinding(
+          topology.topologyId,
+          originalBindingId,
+          request,
+          apiScope,
+          { revision: topology.revision, force });
+      if (!response.ok || !response.body) {
+        registerDraftConflict(
+          response,
+          'Topology',
+          topology.revision,
+          () => saveDriverBinding(originalBindingId, draft, true));
+        setSaveState('error');
+        onMessage(`Driver binding save failed: ${response.status} ${response.text}`);
+        return false;
+      }
+      setTopology(response.body);
       setSaveState('saved');
+      setDraftDirty('driver', false);
+      setConflict(null);
       onMessage(`${originalBindingId === null ? 'Created' : 'Updated'} Driver binding ${bindingId}`);
+      return true;
     } catch (error) {
       setSaveState('error');
       onMessage(String(error));
+      return false;
     } finally {
       setBusy(false);
     }
-  }, [apiScope, editable, onMessage, topology]);
+  }, [apiScope, editable, onMessage, registerDraftConflict, setDraftDirty, topology]);
 
   const removeDriverBinding = useCallback(async (bindingId: string) => {
+    if (dirtyDraftsRef.current.size > 0) {
+      onMessage('Save or revert topology drafts before deleting a Driver binding.');
+      return;
+    }
     if (!editable || !topology || !apiScope) {
       onMessage('Driver bindings can only be deleted in Edit mode.');
       return;
@@ -799,6 +1041,10 @@ export function TopologyDesigner({
   }, [apiScope, editable, onMessage, topology]);
 
   const deleteSemanticTarget = useCallback(async (element: SiteLayoutElementResponse) => {
+    if (dirtyDraftsRef.current.size > 0) {
+      onMessage('Save or revert topology drafts before deleting a topology target.');
+      return;
+    }
     if (!editable || !topology || !layout || !apiScope) {
       onMessage('Targets can only be deleted in Edit mode.');
       return;
@@ -863,25 +1109,53 @@ export function TopologyDesigner({
     void addPaletteItem(kind, { x, y });
   }, [addPaletteItem, editable, layout]);
 
-  useEffect(() => {
-    if (saveState === 'saved') {
-      setDocumentDirty(false);
-    }
-  }, [saveState]);
-
-  const savePendingEdits = useCallback(async () => {
-    if (!documentDirty) {
+  const selectElement = useCallback((elementId: string | null) => {
+    if (elementId === selectedElementId) {
       return;
     }
-    const candidates = Array.from(rootRef.current?.querySelectorAll<HTMLButtonElement>(
-      '[data-testid="save-topology-target"], [data-testid="save-driver-binding"], [data-testid="save-layout-geometry"]') ?? []);
-    const saveButton = candidates.find(button => !button.disabled && button.offsetParent !== null);
-    if (!saveButton) {
-      throw new Error('Select the edited topology target before saving it.');
+    if (dirtyDraftsRef.current.size > 0) {
+      onMessage('Save or revert the current topology drafts before changing selection.');
+      return;
     }
-    saveButton.click();
-    await waitForTopologySave(saveStateRef);
-  }, [documentDirty]);
+    setSelectedElementId(elementId);
+  }, [onMessage, selectedElementId]);
+
+  const savePendingEdits = useCallback(async () => {
+    // Driver migrations must precede System capability removal so the aggregate's
+    // in-use guard never observes a transient invalid binding. A newly assigned
+    // capability cannot be selected by this editor until its System save exists.
+    const pendingKinds = topologyDraftSaveOrder.filter(kind => dirtyDraftsRef.current.has(kind));
+    if (pendingKinds.length === 0) {
+      return;
+    }
+
+    const selectorByKind: Record<TopologyDraftKind, string> = {
+      capability: '[data-testid="create-capability-contract"]',
+      semantic: '[data-testid="save-topology-target"]',
+      driver: '[data-testid="save-driver-binding"]',
+      geometry: '[data-testid="save-layout-geometry"]'
+    };
+    for (const kind of pendingKinds) {
+      const saveButton = Array.from(rootRef.current?.querySelectorAll<HTMLButtonElement>(
+        selectorByKind[kind]) ?? [])
+        .find(button => !button.disabled);
+      if (!saveButton) {
+        throw new Error(`The ${kind} draft has no enabled save action.`);
+      }
+      saveButton.click();
+      await waitForTopologySave(saveStateRef);
+      if (dirtyDraftsRef.current.has(kind)) {
+        throw new Error(`The ${kind} draft failed validation and was not saved.`);
+      }
+    }
+  }, []);
+  const revertPendingEdits = useCallback(async () => {
+    await reloadPersistedDrafts();
+    clearDirtyDrafts();
+    setSaveState('saved');
+    setConflict(null);
+    onMessage('Topology drafts discarded; the persisted Application source was reloaded.');
+  }, [clearDirtyDrafts, onMessage, reloadPersistedDrafts]);
   const topologyProblems = useMemo<EditorProblem[]>(() => saveState === 'error'
     ? [{
       id: 'topology-save-error',
@@ -892,19 +1166,18 @@ export function TopologyDesigner({
     : [], [saveState, selectedElementId]);
   useEditorDocument({
     dirty: documentDirty,
+    editRevision: draftEditRevision,
     canSave: editable,
     save: savePendingEdits,
-    revert: async () => {
-      await refresh();
-      setDocumentDirty(false);
-    },
+    revert: revertPendingEdits,
     focus: targetId => {
       if (!targetId || !layout) return;
       const element = layout.elements.find(candidate => (
         candidate.elementId === targetId || candidate.target.targetId === targetId));
       if (element) setSelectedElementId(element.elementId);
     },
-    problems: topologyProblems
+    problems: topologyProblems,
+    conflict
   });
 
   return (
@@ -912,7 +1185,6 @@ export function TopologyDesigner({
       ref={rootRef}
       className="topology-ide"
       data-testid="topology-workbench"
-      onInputCapture={() => setDocumentDirty(true)}
     >
       <header className="topology-command-bar">
         <div className="topology-document-identity">
@@ -927,7 +1199,13 @@ export function TopologyDesigner({
           <button
             type="button"
             className={effectiveMode === 'edit' ? 'active' : ''}
-            onClick={() => setCanvasMode('edit')}
+            onClick={() => {
+              if (documentDirty) {
+                onMessage('Save or revert topology drafts before changing editor mode.');
+              } else {
+                setCanvasMode('edit');
+              }
+            }}
             disabled={workspaceMode === 'run'}
             data-testid="topology-mode-edit"
           >
@@ -936,7 +1214,13 @@ export function TopologyDesigner({
           <button
             type="button"
             className={effectiveMode === 'monitor' ? 'active' : ''}
-            onClick={() => setCanvasMode('monitor')}
+            onClick={() => {
+              if (documentDirty) {
+                onMessage('Save or revert topology drafts before opening Monitor mode.');
+              } else {
+                setCanvasMode('monitor');
+              }
+            }}
             data-testid="topology-mode-monitor"
           >
             <CircleDot size={13} /> Monitor
@@ -965,11 +1249,28 @@ export function TopologyDesigner({
         </div>
 
         <div className="topology-command-actions">
-          <span className={`topology-save-state ${saveState}`}>
+          <span className={`topology-save-state ${saveState}${documentDirty ? ' dirty' : ''}`}>
             {saveState === 'saving' ? <RefreshCw size={12} /> : <Save size={12} />}
-            {saveState === 'saving' ? 'Saving' : saveState === 'error' ? 'Save failed' : 'Saved'}
+            {saveState === 'saving'
+              ? 'Saving'
+              : saveState === 'error'
+                ? 'Save failed'
+                : documentDirty
+                  ? `Unsaved (${dirtyDrafts.size})`
+                  : 'Saved'}
           </span>
-          <button type="button" className="button ghost" onClick={() => void refresh(true)} disabled={!isBackendHealthy || busy} data-testid="refresh-topology-layout">
+          {documentDirty ? (
+            <button
+              type="button"
+              className="button ghost"
+              onClick={() => void revertPendingEdits()}
+              disabled={!isBackendHealthy || busy}
+              data-testid="discard-topology-drafts"
+            >
+              <Trash2 size={13} /> Discard Drafts
+            </button>
+          ) : null}
+          <button type="button" className="button ghost" onClick={() => void refresh(true)} disabled={!isBackendHealthy || busy || documentDirty} data-testid="refresh-topology-layout">
             <RefreshCw size={14} /> Refresh
           </button>
           <button
@@ -988,7 +1289,7 @@ export function TopologyDesigner({
         <PalettePanel
           selectedElement={selectedElement}
           topology={topology}
-          editable={editable && Boolean(layout)}
+          editable={editable && Boolean(layout) && !documentDirty}
           onAdd={kind => void addPaletteItem(kind)}
         />
 
@@ -1019,7 +1320,7 @@ export function TopologyDesigner({
                     }
                   }}
                   onDrop={handleCanvasDrop}
-                  onClick={() => setSelectedElementId(null)}
+                  onClick={() => selectElement(null)}
                   data-testid="topology-canvas"
                 >
                   <TopologyElementTree
@@ -1029,11 +1330,19 @@ export function TopologyDesigner({
                     targetStatusByKey={targetStatusByKey}
                     runtimeConnected={projectionConnected}
                     selectedElementId={selectedElementId}
-                    editable={editable}
-                    onSelect={setSelectedElementId}
+                    editable={editable && !documentDirty}
+                    onSelect={selectElement}
                     onPreviewGeometry={previewGeometry}
                     onCommitGeometry={commitGeometry}
                   />
+                  {effectiveMode === 'monitor' ? (
+                    <Topology2DRouteFlowLayer
+                      layout={layout}
+                      topology={topology}
+                      routeMovements={routeRuntimeMovements}
+                      connected={projectionConnected}
+                    />
+                  ) : null}
                   {layout.elements.length === 0 ? (
                     <div className="topology-canvas-empty">
                       <BoxSelect size={28} />
@@ -1050,11 +1359,12 @@ export function TopologyDesigner({
                   stationStatuses={stationStatuses}
                   targetStatusByKey={targetStatusByKey}
                   runtimeConnected={projectionConnected}
+                  routeMovements={routeRuntimeMovements}
                   selectedElementId={selectedElementId}
-                  editable={editable}
+                  editable={editable && !documentDirty}
                   camera={camera}
                   onCameraChange={setCamera}
-                  onSelect={setSelectedElementId}
+                  onSelect={selectElement}
                   onPreviewGeometry={previewGeometry}
                   onCommitGeometry={commitGeometry}
                   onAddAt={(kind, placement) => void addPaletteItem(kind, placement)}
@@ -1081,6 +1391,7 @@ export function TopologyDesigner({
                 topology={topology}
                 lineState={runtimeProjection}
                 runtimeView={runtimeView}
+                routeProjections={routeRuntimeProjections}
                 connected={projectionConnected}
               />
             ) : null}
@@ -1101,9 +1412,15 @@ export function TopologyDesigner({
           runtimeConnected={projectionConnected}
           editable={editable}
           deleteConfirming={deleteConfirmElementId === selectedElement?.elementId}
-          onSelect={setSelectedElementId}
+          semanticDirty={dirtyDrafts.has('semantic')}
+          geometryDirty={dirtyDrafts.has('geometry')}
+          capabilityDirty={dirtyDrafts.has('capability')}
+          driverDirty={dirtyDrafts.has('driver')}
+          onDraftDirty={setDraftDirty}
+          onSelect={selectElement}
           onCommit={commitGeometry}
           onSaveSemantic={saveSemanticTarget}
+          onCreateCapability={createCapability}
           onSaveDriverBinding={saveDriverBinding}
           onDeleteDriverBinding={removeDriverBinding}
           onDelete={deleteSemanticTarget}
@@ -1177,12 +1494,132 @@ function PalettePanel({
   );
 }
 
+function Topology2DRouteFlowLayer({
+  layout,
+  topology,
+  routeMovements,
+  connected
+}: {
+  layout: SiteLayoutResponse;
+  topology: AutomationTopologyResponse;
+  routeMovements: TopologyRuntimeRouteMovement[];
+  connected: boolean;
+}): React.ReactElement {
+  return (
+    <svg
+      className={`topology-route-flow-layer ${connected ? 'connected' : 'stale'}`}
+      viewBox={`0 0 ${layout.canvasWidth} ${layout.canvasHeight}`}
+      preserveAspectRatio="none"
+      aria-label="Current production route movement"
+      data-testid="topology-2d-route-flow"
+    >
+      <TopologyRouteArrowMarkers prefix="topology-route-2d" />
+      {routeMovements.map((route, index) => {
+        const source = route.movement.source
+          ? topologyRouteAnchor(route.movement.source.stationSystemId, layout, topology)
+          : null;
+        const target = route.movement.target
+          ? topologyRouteAnchor(route.movement.target.stationSystemId, layout, topology)
+          : null;
+        return (
+          <TopologyRouteMovementGraphic
+            key={`${route.productionRunId}:${route.movement.movementId}`}
+            route={route}
+            source={source}
+            target={target}
+            markerPrefix="topology-route-2d"
+            pathIndex={index}
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
+function TopologyRouteArrowMarkers({ prefix }: { prefix: string }): React.ReactElement {
+  return (
+    <defs>
+      {topologyRouteTones.map(tone => (
+        <marker
+          id={`${prefix}-${tone}`}
+          className={`topology-route-arrow tone-${tone}`}
+          key={tone}
+          viewBox="0 0 10 10"
+          refX="8"
+          refY="5"
+          markerWidth="7"
+          markerHeight="7"
+          orient="auto-start-reverse"
+        >
+          <path d="M 0 0 L 10 5 L 0 10 z" />
+        </marker>
+      ))}
+    </defs>
+  );
+}
+
+function TopologyRouteMovementGraphic({
+  route,
+  source,
+  target,
+  markerPrefix,
+  pathIndex
+}: {
+  route: TopologyRuntimeRouteMovement;
+  source: TopologyRouteAnchor | null;
+  target: TopologyRouteAnchor | null;
+  markerPrefix: string;
+  pathIndex: number;
+}): React.ReactElement | null {
+  const anchor = target ?? source;
+  if (!anchor) {
+    return null;
+  }
+  const testId = `topology-route-flow-${route.productionRunId}-${route.movement.movementId}`;
+  const title = topologyRouteMovementLabel(route);
+  if (!source || !target) {
+    return (
+      <g
+        className={`topology-route-single-point tone-${route.movement.tone} kind-${route.movement.kind.toLowerCase()}`}
+        data-testid={testId}
+        data-transition-id={route.movement.transitionId ?? ''}
+        data-source-station={source?.stationSystemId ?? ''}
+        data-target-station={target?.stationSystemId ?? ''}
+      >
+        <title>{title}</title>
+        <circle cx={anchor.x} cy={anchor.y} r="22" />
+        <circle cx={anchor.x} cy={anchor.y} r="5" />
+      </g>
+    );
+  }
+
+  const path = topologyRoutePath(source, target, pathIndex);
+  return (
+    <g
+      className={`topology-route-movement tone-${route.movement.tone} kind-${route.movement.kind.toLowerCase()}`}
+      data-testid={testId}
+      data-transition-id={route.movement.transitionId ?? ''}
+      data-source-station={source.stationSystemId}
+      data-target-station={target.stationSystemId}
+    >
+      <title>{title}</title>
+      <path className="topology-route-flow-halo" d={path} />
+      <path
+        className="topology-route-flow-edge"
+        d={path}
+        markerEnd={`url(#${markerPrefix}-${route.movement.tone})`}
+      />
+    </g>
+  );
+}
+
 function SemanticTopology3D({
   layout,
   topology,
   stationStatuses,
   targetStatusByKey,
   runtimeConnected,
+  routeMovements,
   selectedElementId,
   editable,
   camera,
@@ -1197,12 +1634,17 @@ function SemanticTopology3D({
   stationStatuses: Map<string, TopologyRuntimeStatus>;
   targetStatusByKey: Map<string, TopologyRuntimeStatus>;
   runtimeConnected: boolean;
+  routeMovements: TopologyRuntimeRouteMovement[];
   selectedElementId: string | null;
   editable: boolean;
   camera: TopologyCamera;
   onCameraChange(camera: TopologyCamera): void;
   onSelect(elementId: string): void;
-  onPreviewGeometry(elementId: string, geometry: UpdateSiteLayoutElementGeometryRequest): void;
+  onPreviewGeometry(
+    elementId: string,
+    geometry: UpdateSiteLayoutElementGeometryRequest,
+    dirty?: boolean
+  ): void;
   onCommitGeometry(
     elementId: string,
     geometry: UpdateSiteLayoutElementGeometryRequest,
@@ -1378,6 +1820,14 @@ function SemanticTopology3D({
           />
         ))}
 
+        <Topology3DRouteFlowLayer
+          layout={layout}
+          camera={camera}
+          renderElements={renderElements}
+          routeMovements={routeMovements}
+          connected={runtimeConnected}
+        />
+
         <g className="topology-3d-axis" aria-hidden="true" transform="translate(64 598)">
           <circle r="26" />
           <line x1="0" y1="0" x2="22" y2="8" className="x" />
@@ -1453,6 +1903,44 @@ function SemanticTopology3D({
   );
 }
 
+function Topology3DRouteFlowLayer({
+  layout,
+  camera,
+  renderElements,
+  routeMovements,
+  connected
+}: {
+  layout: SiteLayoutResponse;
+  camera: TopologyCamera;
+  renderElements: Topology3DRenderElement[];
+  routeMovements: TopologyRuntimeRouteMovement[];
+  connected: boolean;
+}): React.ReactElement {
+  return (
+    <g className={`topology-3d-route-flow-layer ${connected ? 'connected' : 'stale'}`} data-testid="topology-3d-route-flow">
+      <TopologyRouteArrowMarkers prefix="topology-route-3d" />
+      {routeMovements.map((route, index) => {
+        const source = route.movement.source
+          ? topology3DRouteAnchor(route.movement.source.stationSystemId, renderElements, layout, camera)
+          : null;
+        const target = route.movement.target
+          ? topology3DRouteAnchor(route.movement.target.stationSystemId, renderElements, layout, camera)
+          : null;
+        return (
+          <TopologyRouteMovementGraphic
+            key={`${route.productionRunId}:${route.movement.movementId}`}
+            route={route}
+            source={source}
+            target={target}
+            markerPrefix="topology-route-3d"
+            pathIndex={index}
+          />
+        );
+      })}
+    </g>
+  );
+}
+
 function Topology3DPrism({
   renderElement,
   layout,
@@ -1469,7 +1957,11 @@ function Topology3DPrism({
   selected: boolean;
   editable: boolean;
   onSelect(elementId: string): void;
-  onPreviewGeometry(elementId: string, geometry: UpdateSiteLayoutElementGeometryRequest): void;
+  onPreviewGeometry(
+    elementId: string,
+    geometry: UpdateSiteLayoutElementGeometryRequest,
+    dirty?: boolean
+  ): void;
   onCommitGeometry(
     elementId: string,
     geometry: UpdateSiteLayoutElementGeometryRequest,
@@ -1561,7 +2053,7 @@ function Topology3DPrism({
     dragState.current = null;
     setDragging(false);
     if (cancelled) {
-      onPreviewGeometry(element.elementId, drag.previousGeometry);
+      onPreviewGeometry(element.elementId, drag.previousGeometry, false);
     } else if (drag.moved) {
       onCommitGeometry(element.elementId, drag.latestGeometry, drag.previousGeometry);
     }
@@ -1654,7 +2146,11 @@ function TopologyElementTree({
   selectedElementId: string | null;
   editable: boolean;
   onSelect(elementId: string): void;
-  onPreviewGeometry(elementId: string, geometry: UpdateSiteLayoutElementGeometryRequest): void;
+  onPreviewGeometry(
+    elementId: string,
+    geometry: UpdateSiteLayoutElementGeometryRequest,
+    dirty?: boolean
+  ): void;
   onCommitGeometry(
     elementId: string,
     geometry: UpdateSiteLayoutElementGeometryRequest,
@@ -1737,7 +2233,11 @@ function TopologyCanvasElement({
   selected: boolean;
   editable: boolean;
   onSelect(elementId: string): void;
-  onPreviewGeometry(elementId: string, geometry: UpdateSiteLayoutElementGeometryRequest): void;
+  onPreviewGeometry(
+    elementId: string,
+    geometry: UpdateSiteLayoutElementGeometryRequest,
+    dirty?: boolean
+  ): void;
   onCommitGeometry(
     elementId: string,
     geometry: UpdateSiteLayoutElementGeometryRequest,
@@ -1813,7 +2313,7 @@ function TopologyCanvasElement({
     dragState.current = null;
     setDragging(false);
     if (cancelled) {
-      onPreviewGeometry(element.elementId, drag.previousGeometry);
+      onPreviewGeometry(element.elementId, drag.previousGeometry, false);
     } else if (drag.moved) {
       onCommitGeometry(element.elementId, drag.latestGeometry, drag.previousGeometry);
     }
@@ -1924,9 +2424,15 @@ function InspectorPanel({
   runtimeConnected,
   editable,
   deleteConfirming,
+  semanticDirty,
+  geometryDirty,
+  capabilityDirty,
+  driverDirty,
+  onDraftDirty,
   onSelect,
   onCommit,
   onSaveSemantic,
+  onCreateCapability,
   onSaveDriverBinding,
   onDeleteDriverBinding,
   onDelete
@@ -1939,6 +2445,11 @@ function InspectorPanel({
   runtimeConnected: boolean;
   editable: boolean;
   deleteConfirming: boolean;
+  semanticDirty: boolean;
+  geometryDirty: boolean;
+  capabilityDirty: boolean;
+  driverDirty: boolean;
+  onDraftDirty(kind: TopologyDraftKind, dirty: boolean): void;
   onSelect(elementId: string): void;
   onCommit(
     elementId: string,
@@ -1946,6 +2457,7 @@ function InspectorPanel({
     previousGeometry: UpdateSiteLayoutElementGeometryRequest
   ): void;
   onSaveSemantic(element: SiteLayoutElementResponse, draft: SemanticPropertiesDraft): void;
+  onCreateCapability(draft: CapabilityContractDraft): void;
   onSaveDriverBinding(originalBindingId: string | null, draft: DriverBindingDraft): void;
   onDeleteDriverBinding(bindingId: string): void;
   onDelete(element: SiteLayoutElementResponse): void;
@@ -1965,18 +2477,32 @@ function InspectorPanel({
         runtimeConnected={runtimeConnected}
         editable={editable}
         deleteConfirming={deleteConfirming}
+        semanticDirty={semanticDirty}
+        geometryDirty={geometryDirty}
+        onDraftDirty={onDraftDirty}
         onCommit={onCommit}
         onSaveSemantic={onSaveSemantic}
         onDelete={onDelete}
       />
       {selectedElement?.target.kind === 'System' && topology ? (
-        <DriverBindingEditor
-          topology={topology}
-          selectedSystemId={selectedElement.target.targetId}
-          editable={editable}
-          onSave={onSaveDriverBinding}
-          onDelete={onDeleteDriverBinding}
-        />
+        <>
+          <CapabilityContractEditor
+            topology={topology}
+            editable={editable}
+            dirty={capabilityDirty}
+            onDirtyChange={dirty => onDraftDirty('capability', dirty)}
+            onCreate={onCreateCapability}
+          />
+          <DriverBindingEditor
+            topology={topology}
+            selectedSystemId={selectedElement.target.targetId}
+            editable={editable}
+            dirty={driverDirty}
+            onDirtyChange={dirty => onDraftDirty('driver', dirty)}
+            onSave={onSaveDriverBinding}
+            onDelete={onDeleteDriverBinding}
+          />
+        </>
       ) : null}
       <HierarchyTree
         layout={layout}
@@ -1996,16 +2522,173 @@ function InspectorPanel({
   );
 }
 
+function CapabilityContractEditor({
+  topology,
+  editable,
+  dirty,
+  onDirtyChange,
+  onCreate
+}: {
+  topology: AutomationTopologyResponse;
+  editable: boolean;
+  dirty: boolean;
+  onDirtyChange(dirty: boolean): void;
+  onCreate(draft: CapabilityContractDraft): void;
+}): React.ReactElement {
+  const [expanded, setExpanded] = useState(topology.capabilities.length === 0);
+  const [draft, setDraft] = useState<CapabilityContractDraft>(() => newCapabilityContractDraft(topology));
+
+  useEffect(() => {
+    setDraft(current => resolvePersistedCapabilityDraft(
+      dirty,
+      current,
+      newCapabilityContractDraft(topology)));
+  }, [dirty, topology]);
+
+  return (
+    <section className="topology-capability-editor" data-testid="topology-capability-editor">
+      <header>
+        <div><strong>Capability contracts</strong><span>{topology.capabilities.length}</span></div>
+        <button
+          type="button"
+          className="button ghost"
+          disabled={!editable || dirty}
+          onClick={() => setExpanded(current => !current)}
+          data-testid="new-capability-contract"
+        >
+          <Plus size={12} /> {expanded ? 'Close' : 'New'}
+        </button>
+      </header>
+      {topology.capabilities.length > 0 ? (
+        <div className="topology-capability-list">
+          {topology.capabilities
+            .slice()
+            .sort((left, right) => left.capabilityId.localeCompare(right.capabilityId))
+            .map(capability => (
+              <div key={capability.capabilityId}>
+                <strong>{capability.capabilityId}</strong>
+                <span>{capability.commandName} · {capability.version}</span>
+                <small>{capability.safetyClass} · {capability.timeoutSeconds}s</small>
+              </div>
+            ))}
+        </div>
+      ) : (
+        <p className="topology-driver-empty">No capability contract exists yet. Create one before assigning a Driver.</p>
+      )}
+      {expanded ? (
+        <form
+          className="topology-capability-form"
+          onInputCapture={() => onDirtyChange(true)}
+          onSubmit={event => {
+            event.preventDefault();
+            onCreate(draft);
+          }}
+        >
+          <label>
+            <span>Capability ID</span>
+            <input
+              value={draft.capabilityId}
+              disabled={!editable}
+              onChange={event => setDraft(current => ({ ...current, capabilityId: event.target.value }))}
+              data-testid="capability-contract-id"
+            />
+          </label>
+          <div className="topology-semantic-pair">
+            <label>
+              <span>Command</span>
+              <input
+                value={draft.commandName}
+                disabled={!editable}
+                onChange={event => setDraft(current => ({ ...current, commandName: event.target.value }))}
+                data-testid="capability-contract-command"
+              />
+            </label>
+            <label>
+              <span>Version</span>
+              <input
+                value={draft.version}
+                disabled={!editable}
+                onChange={event => setDraft(current => ({ ...current, version: event.target.value }))}
+                data-testid="capability-contract-version"
+              />
+            </label>
+          </div>
+          <div className="topology-semantic-pair">
+            <label>
+              <span>Timeout (s)</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={draft.timeoutSeconds}
+                disabled={!editable}
+                onChange={event => setDraft(current => ({
+                  ...current,
+                  timeoutSeconds: Number(event.target.value)
+                }))}
+                data-testid="capability-contract-timeout"
+              />
+            </label>
+            <label>
+              <span>Safety</span>
+              <select
+                value={draft.safetyClass}
+                disabled={!editable}
+                onChange={event => setDraft(current => ({ ...current, safetyClass: event.target.value }))}
+                data-testid="capability-contract-safety"
+              >
+                {safetyClasses.map(safetyClass => (
+                  <option key={safetyClass} value={safetyClass}>{safetyClass}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <label>
+            <span>Input JSON Schema (optional)</span>
+            <textarea
+              value={draft.inputSchema}
+              disabled={!editable}
+              onChange={event => setDraft(current => ({ ...current, inputSchema: event.target.value }))}
+              data-testid="capability-contract-input-schema"
+            />
+          </label>
+          <label>
+            <span>Output JSON Schema (optional)</span>
+            <textarea
+              value={draft.outputSchema}
+              disabled={!editable}
+              onChange={event => setDraft(current => ({ ...current, outputSchema: event.target.value }))}
+              data-testid="capability-contract-output-schema"
+            />
+          </label>
+          <button
+            type="submit"
+            className="button primary"
+            disabled={!editable}
+            data-testid="create-capability-contract"
+          >
+            <Plus size={12} /> Create immutable contract
+          </button>
+        </form>
+      ) : null}
+    </section>
+  );
+}
+
 function DriverBindingEditor({
   topology,
   selectedSystemId,
   editable,
+  dirty,
+  onDirtyChange,
   onSave,
   onDelete
 }: {
   topology: AutomationTopologyResponse;
   selectedSystemId: string;
   editable: boolean;
+  dirty: boolean;
+  onDirtyChange(dirty: boolean): void;
   onSave(originalBindingId: string | null, draft: DriverBindingDraft): void;
   onDelete(bindingId: string): void;
 }): React.ReactElement {
@@ -2016,6 +2699,7 @@ function DriverBindingEditor({
   const [deleteConfirmBindingId, setDeleteConfirmBindingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<DriverBindingDraft>(
     () => newDriverBindingDraft(selectedSystemId, topology));
+  const draftSystemIdRef = useRef(selectedSystemId);
   const selectedBinding = selectedBindingId
     ? topology.driverBindings.find(binding => binding.bindingId === selectedBindingId) ?? null
     : null;
@@ -2028,6 +2712,16 @@ function DriverBindingEditor({
     : [];
 
   useEffect(() => {
+    if (draftSystemIdRef.current !== selectedSystemId) {
+      draftSystemIdRef.current = selectedSystemId;
+      setSelectedBindingId(null);
+      setDraft(newDriverBindingDraft(selectedSystemId, topology));
+      setDeleteConfirmBindingId(null);
+      return;
+    }
+    if (dirty) {
+      return;
+    }
     const current = selectedBindingId
       ? topology.driverBindings.find(binding => binding.bindingId === selectedBindingId) ?? null
       : null;
@@ -2038,7 +2732,7 @@ function DriverBindingEditor({
       setDraft(newDriverBindingDraft(selectedSystemId, topology));
     }
     setDeleteConfirmBindingId(null);
-  }, [selectedBindingId, selectedSystemId, topology]);
+  }, [dirty, selectedBindingId, selectedSystemId, topology]);
 
   return (
     <section className="topology-driver-editor" data-testid="topology-driver-binding-editor">
@@ -2047,7 +2741,7 @@ function DriverBindingEditor({
         <button
           type="button"
           className="button ghost"
-          disabled={!editable}
+          disabled={!editable || dirty}
           onClick={() => {
             setSelectedBindingId(null);
             setDraft(newDriverBindingDraft(selectedSystemId, topology));
@@ -2064,6 +2758,7 @@ function DriverBindingEditor({
               type="button"
               key={binding.bindingId}
               className={selectedBindingId === binding.bindingId ? 'active' : ''}
+              disabled={dirty && selectedBindingId !== binding.bindingId}
               onClick={() => setSelectedBindingId(binding.bindingId)}
             >
               <strong>{binding.bindingId}</strong>
@@ -2077,6 +2772,7 @@ function DriverBindingEditor({
       )}
       <form
         className="topology-driver-form"
+        onInputCapture={() => onDirtyChange(true)}
         onSubmit={event => {
           event.preventDefault();
           onSave(selectedBinding?.bindingId ?? null, draft);
@@ -2203,6 +2899,9 @@ function GeometryProperties({
   runtimeConnected,
   editable,
   deleteConfirming,
+  semanticDirty,
+  geometryDirty,
+  onDraftDirty,
   onCommit,
   onSaveSemantic,
   onDelete
@@ -2215,6 +2914,9 @@ function GeometryProperties({
   runtimeConnected: boolean;
   editable: boolean;
   deleteConfirming: boolean;
+  semanticDirty: boolean;
+  geometryDirty: boolean;
+  onDraftDirty(kind: TopologyDraftKind, dirty: boolean): void;
   onCommit(
     elementId: string,
     geometry: UpdateSiteLayoutElementGeometryRequest,
@@ -2227,11 +2929,30 @@ function GeometryProperties({
     element ? toGeometry(element) : null);
   const [semanticDraft, setSemanticDraft] = useState<SemanticPropertiesDraft | null>(
     element && topology ? toSemanticDraft(element, topology) : null);
+  const [geometryInputDirty, setGeometryInputDirty] = useState(false);
+  const targetIdentity = element
+    ? `${element.target.kind}:${element.target.targetId}`
+    : null;
+  const targetIdentityRef = useRef(targetIdentity);
 
   useEffect(() => {
-    setDraft(element ? toGeometry(element) : null);
-    setSemanticDraft(element && topology ? toSemanticDraft(element, topology) : null);
-  }, [element, topology]);
+    if (targetIdentityRef.current !== targetIdentity) {
+      targetIdentityRef.current = targetIdentity;
+      setDraft(element ? toGeometry(element) : null);
+      setSemanticDraft(element && topology ? toSemanticDraft(element, topology) : null);
+      setGeometryInputDirty(false);
+      return;
+    }
+    if (!geometryInputDirty) {
+      setDraft(element ? toGeometry(element) : null);
+    }
+    if (!semanticDirty) {
+      setSemanticDraft(element && topology ? toSemanticDraft(element, topology) : null);
+    }
+    if (!geometryDirty) {
+      setGeometryInputDirty(false);
+    }
+  }, [element, geometryDirty, geometryInputDirty, semanticDirty, targetIdentity, topology]);
 
   if (!layout || !topology || !element || !draft || !semanticDraft) {
     return (
@@ -2274,6 +2995,7 @@ function GeometryProperties({
       </dl>
       <form
         className="topology-semantic-form"
+        onInputCapture={() => onDraftDirty('semantic', true)}
         onSubmit={event => {
           event.preventDefault();
           onSaveSemantic(element, semanticDraft);
@@ -2291,17 +3013,71 @@ function GeometryProperties({
           />
         </label>
         {element.target.kind === 'System' ? (
-          <label>
-            <span>System Type</span>
-            <input
-              value={semanticDraft.systemType}
-              disabled={!editable}
-              onChange={event => setSemanticDraft(current => current
-                ? { ...current, systemType: event.target.value }
-                : current)}
-              data-testid="topology-property-system-type"
-            />
-          </label>
+          <>
+            <label>
+              <span>System Type</span>
+              <input
+                value={semanticDraft.systemType}
+                disabled={!editable}
+                onChange={event => setSemanticDraft(current => current
+                  ? { ...current, systemType: event.target.value }
+                  : current)}
+                data-testid="topology-property-system-type"
+              />
+            </label>
+            <div className="topology-system-capabilities" data-testid="topology-system-capabilities">
+              <div className="topology-property-section-title">System capabilities</div>
+              {topology.capabilities.length === 0 ? (
+                <p>Create a Capability contract below, then assign its role here.</p>
+              ) : (
+                <div className="topology-system-capability-list">
+                  <div className="topology-system-capability-heading">
+                    <span>Contract</span><span>Requires</span><span>Provides</span>
+                  </div>
+                  {topology.capabilities
+                    .slice()
+                    .sort((left, right) => left.capabilityId.localeCompare(right.capabilityId))
+                    .map(capability => (
+                      <div key={capability.capabilityId}>
+                        <span title={capability.commandName}>{capability.capabilityId}</span>
+                        <input
+                          type="checkbox"
+                          checked={semanticDraft.requiredCapabilityIds.includes(capability.capabilityId)}
+                          disabled={!editable}
+                          aria-label={`Require ${capability.capabilityId}`}
+                          onChange={event => setSemanticDraft(current => current
+                            ? {
+                              ...current,
+                              requiredCapabilityIds: toggleCapability(
+                                current.requiredCapabilityIds,
+                                capability.capabilityId,
+                                event.target.checked)
+                            }
+                            : current)}
+                          data-testid={`system-requires-${capability.capabilityId}`}
+                        />
+                        <input
+                          type="checkbox"
+                          checked={semanticDraft.providedCapabilityIds.includes(capability.capabilityId)}
+                          disabled={!editable}
+                          aria-label={`Provide ${capability.capabilityId}`}
+                          onChange={event => setSemanticDraft(current => current
+                            ? {
+                              ...current,
+                              providedCapabilityIds: toggleCapability(
+                                current.providedCapabilityIds,
+                                capability.capabilityId,
+                                event.target.checked)
+                            }
+                            : current)}
+                          data-testid={`system-provides-${capability.capabilityId}`}
+                        />
+                      </div>
+                    ))}
+                </div>
+              )}
+            </div>
+          </>
         ) : null}
         {element.target.kind === 'SlotGroup' ? (
           <div className="topology-semantic-pair">
@@ -2382,6 +3158,10 @@ function GeometryProperties({
       </form>
       <form
         className="topology-geometry-form"
+        onInputCapture={() => {
+          setGeometryInputDirty(true);
+          onDraftDirty('geometry', true);
+        }}
         onSubmit={event => {
           event.preventDefault();
           const containerWidth = parent?.width ?? layout.canvasWidth;
@@ -2750,12 +3530,48 @@ function toSemanticDraft(
   return {
     displayName: system?.displayName ?? group?.displayName ?? slot?.displayName ?? '',
     systemType: system?.systemType ?? '',
+    requiredCapabilityIds: system?.requiredCapabilityIds.slice() ?? [],
+    providedCapabilityIds: system?.providedCapabilityIds.slice() ?? [],
     groupKind: group?.kind ?? slotGroupKinds[0],
     groupCapacity: group?.capacity ?? 1,
     slotAddress: slot?.address ?? '',
     slotMaterialKind: slot?.materialKind ?? slotMaterialKinds[0],
     slotEnabled: slot?.isEnabled ?? true
   };
+}
+
+function newCapabilityContractDraft(topology: AutomationTopologyResponse): CapabilityContractDraft {
+  const existingIds = new Set(topology.capabilities.map(capability => capability.capabilityId));
+  let sequence = topology.capabilities.length + 1;
+  let capabilityId = `automation.execute.${sequence}`;
+  while (existingIds.has(capabilityId)) {
+    sequence += 1;
+    capabilityId = `automation.execute.${sequence}`;
+  }
+  return {
+    capabilityId,
+    commandName: 'Execute',
+    version: '1.0',
+    inputSchema: '',
+    outputSchema: '',
+    timeoutSeconds: 30,
+    safetyClass: 'Normal'
+  };
+}
+
+function toggleCapability(values: string[], capabilityId: string, selected: boolean): string[] {
+  const next = new Set(values);
+  if (selected) {
+    next.add(capabilityId);
+  } else {
+    next.delete(capabilityId);
+  }
+  return [...next].sort((left, right) => left.localeCompare(right));
+}
+
+function optionalText(value: string): string | null {
+  const normalized = value.trim();
+  return normalized.length === 0 ? null : normalized;
 }
 
 function toDriverBindingDraft(binding: DriverBindingRouteResponse): DriverBindingDraft {
@@ -2832,11 +3648,13 @@ function TopologyLiveOverlay({
   topology,
   lineState,
   runtimeView,
+  routeProjections,
   connected
 }: {
   topology: AutomationTopologyResponse;
   lineState: ProductionLineRuntimeStateResponse | null;
   runtimeView: TopologyRuntimeView;
+  routeProjections: ProductionRouteRuntimeProjection[];
   connected: boolean;
 }): React.ReactElement {
   const stationNameById = new Map(topology.systems
@@ -2854,6 +3672,7 @@ function TopologyLiveOverlay({
       stationSystemId: station.stationSystemId,
       operationRunId: operation.operationRunId
     }))));
+  const routeMovements = selectTopologyRuntimeRouteMovements(routeProjections);
   return (
     <aside className={`topology-live-overlay ${connected ? 'connected' : 'stale'}`} data-testid="topology-live-projection">
       <header>
@@ -2885,6 +3704,34 @@ function TopologyLiveOverlay({
             );
           })}
           {(lineState?.productionUnits.length ?? 0) === 0 ? <p>No active products</p> : null}
+        </section>
+
+        <section data-testid="topology-current-material-flow">
+          <h3>CURRENT MATERIAL FLOW</h3>
+          {routeMovements.map(route => (
+            <div
+              className={`topology-live-flow tone-${route.movement.tone}`}
+              key={`${route.productionRunId}:${route.movement.movementId}`}
+              data-testid={`topology-live-route-flow-${route.productionRunId}-${route.movement.movementId}`}
+              data-transition-id={route.movement.transitionId ?? ''}
+              data-flow-kind={route.movement.kind}
+              data-source-station={route.movement.source?.stationSystemId ?? ''}
+              data-target-station={route.movement.target?.stationSystemId ?? ''}
+              data-terminal-disposition={route.movement.terminalDisposition ?? ''}
+            >
+              <Waypoints size={12} />
+              <span>
+                <strong>{route.productionUnitLabel}</strong>
+                <small>{topologyRouteMovementPath(route.movement)}</small>
+              </span>
+              <em>
+                {route.movement.kind}
+                {' · '}
+                {route.movement.sourceJudgement ?? route.movement.target?.executionStatus ?? 'Pending'}
+              </em>
+            </div>
+          ))}
+          {routeMovements.length === 0 ? <p>No current or recent route movement</p> : null}
         </section>
 
         <section>
@@ -2965,6 +3812,119 @@ function TopologyLiveOverlay({
       </div>
     </aside>
   );
+}
+
+function selectTopologyRuntimeRouteMovements(
+  projections: readonly ProductionRouteRuntimeProjection[]
+): TopologyRuntimeRouteMovement[] {
+  return projections.flatMap(projection => {
+    const movements = projection.currentMovements.length > 0
+      ? projection.currentMovements
+      : projection.latestDecision
+        ? [projection.latestDecision]
+        : [];
+    return movements.map(movement => ({
+      productionRunId: projection.productionRunId,
+      productionUnitId: projection.productionUnitId,
+      productionUnitLabel: projection.productionUnitLabel,
+      movement
+    }));
+  });
+}
+
+function topologyRouteMovementPath(movement: ProductionRouteRuntimeMovement): string {
+  const source = movement.source
+    ? `${movement.source.stationSystemId} / ${movement.source.operationId}`
+    : 'LINE ENTRY';
+  const target = movement.terminalDisposition
+    ? `TERMINAL / ${movement.terminalDisposition}`
+    : movement.target
+      ? `${movement.target.stationSystemId} / ${movement.target.operationId}`
+      : movement.targetOperationId ?? 'Awaiting target';
+  return `${source} → ${target}`;
+}
+
+function topologyRouteMovementLabel(route: TopologyRuntimeRouteMovement): string {
+  const transition = route.movement.transitionId
+    ? ` via ${route.movement.transitionId}`
+    : '';
+  return `${route.productionUnitLabel}: ${topologyRouteMovementPath(route.movement)}${transition}`;
+}
+
+function topologyRouteAnchor(
+  stationSystemId: string,
+  layout: SiteLayoutResponse,
+  topology: AutomationTopologyResponse
+): TopologyRouteAnchor | null {
+  if (!topology.systems.some(system => (
+    system.kind === 'Station' && system.systemId === stationSystemId))) {
+    return null;
+  }
+  const element = layout.elements.find(candidate => (
+    candidate.kind === 'SystemShape'
+    && candidate.target.kind === 'System'
+    && candidate.target.targetId === stationSystemId));
+  if (!element) {
+    return null;
+  }
+  const origin = absoluteElementOrigin(element, layout);
+  return {
+    stationSystemId,
+    x: origin.x + element.width / 2,
+    y: origin.y + element.height / 2
+  };
+}
+
+function topology3DRouteAnchor(
+  stationSystemId: string,
+  renderElements: readonly Topology3DRenderElement[],
+  layout: SiteLayoutResponse,
+  camera: TopologyCamera
+): TopologyRouteAnchor | null {
+  const renderElement = renderElements.find(candidate => (
+    candidate.descriptor.system?.kind === 'Station'
+    && candidate.descriptor.system.systemId === stationSystemId));
+  if (!renderElement) {
+    return null;
+  }
+  const point = projectTopology3DPoint(
+    renderElement.absoluteX + renderElement.element.width / 2,
+    renderElement.absoluteY + renderElement.element.height / 2,
+    renderElement.baseZ + renderElement.depth + 18,
+    layout,
+    camera);
+  return { stationSystemId, ...point };
+}
+
+function topologyRoutePath(
+  source: TopologyRouteAnchor,
+  target: TopologyRouteAnchor,
+  pathIndex: number
+): string {
+  const deltaX = target.x - source.x;
+  const deltaY = target.y - source.y;
+  const distance = Math.hypot(deltaX, deltaY);
+  if (distance < 1) {
+    const radius = 38 + pathIndex % 3 * 7;
+    return [
+      `M ${source.x - 8} ${source.y - 12}`,
+      `C ${source.x - radius} ${source.y - radius}`,
+      `${source.x + radius} ${source.y - radius}`,
+      `${source.x + 8} ${source.y - 12}`
+    ].join(' ');
+  }
+
+  const unitX = deltaX / distance;
+  const unitY = deltaY / distance;
+  const startX = source.x + unitX * 24;
+  const startY = source.y + unitY * 24;
+  const endX = target.x - unitX * 30;
+  const endY = target.y - unitY * 30;
+  const direction = pathIndex % 2 === 0 ? 1 : -1;
+  const bend = Math.min(70, Math.max(18, distance * 0.09)) * direction;
+  const controlX = (startX + endX) / 2 - unitY * bend;
+  const controlY = (startY + endY) / 2 + unitX * bend;
+  return `M ${startX} ${startY} Q ${controlX} ${controlY} ${endX} ${endY}`;
 }
 
 function productionUnitTone(

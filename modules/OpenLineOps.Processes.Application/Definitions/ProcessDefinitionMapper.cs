@@ -52,7 +52,9 @@ public static class ProcessDefinitionMapper
                 .Select(issue => new ProcessGraphValidationIssueDetails(
                     issue.Severity.ToString(),
                     issue.Code,
-                    issue.Message))
+                    issue.Message,
+                    issue.TargetKind.ToString(),
+                    issue.TargetId))
                 .ToArray());
     }
 

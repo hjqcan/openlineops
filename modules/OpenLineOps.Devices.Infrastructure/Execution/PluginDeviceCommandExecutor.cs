@@ -30,7 +30,7 @@ public sealed class PluginDeviceCommandExecutor : IDeviceCommandExecutor
                 "Plugin device execution requires a PluginCommand release route with a frozen package identity.");
         }
 
-        var packageIdentity = new PluginPackageRuntimeIdentity(
+        var runtimeIdentity = new PluginPackageRuntimeIdentity(
             request.PluginPackage.PluginId,
             request.PluginPackage.Version,
             request.PluginPackage.PackageContentSha256,
@@ -39,11 +39,16 @@ public sealed class PluginDeviceCommandExecutor : IDeviceCommandExecutor
             request.PluginPackage.ContractVersion,
             request.PluginPackage.RuntimeIdentifier,
             request.PluginPackage.AbiVersion);
-        if (!packageIdentity.IsComplete)
+        if (!runtimeIdentity.IsComplete)
         {
             return DeviceCommandExecutionResult.Rejected(
-                "Project release plugin package identity is incomplete.");
+                "Plugin device execution was rejected because the immutable frozen package identity is incomplete.");
         }
+
+        var packageIdentity = new PluginPackageExecutionIdentity(
+            request.ProjectId,
+            request.ApplicationId,
+            runtimeIdentity);
 
         var invocationResult = await _commandInvoker
             .ExecuteAsync(

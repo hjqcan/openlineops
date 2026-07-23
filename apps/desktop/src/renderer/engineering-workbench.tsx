@@ -6,6 +6,8 @@ import {
   GitBranch,
   Layers3,
   RefreshCw,
+  RotateCcw,
+  Save,
   Send,
   SlidersHorizontal
 } from 'lucide-react';
@@ -33,6 +35,21 @@ import {
   publishConfigurationSnapshot,
   publishRecipe
 } from './api';
+import { useEditorDocument } from './editor-workspace';
+import type { EditorProblem } from './editor-workspace-model';
+import {
+  acceptSubmittedEditorDraft,
+  createEditorDraftBaseline,
+  isEditorDraftDirty,
+  replaceEditorDraft,
+  revertEditorDraft,
+  synchronizeCleanEditorDraft
+} from './editor-draft-baseline-model';
+import {
+  createEngineeringDeviceOwnerOptions,
+  engineeringSourceDraftsEqual,
+  type EngineeringDraft
+} from './engineering-draft-model';
 
 interface EngineeringWorkbenchProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
@@ -48,22 +65,6 @@ interface EngineeringResources {
   recipes: RecipeResponse[];
   stations: StationProfileResponse[];
   processDefinitions: ProcessDefinitionSummary[];
-}
-
-interface EngineeringDraft {
-  recipeId: string;
-  recipeVersionId: string;
-  recipeName: string;
-  stationProfileId: string;
-  stationSystemId: string;
-  stationName: string;
-  deviceBindingId: string;
-  deviceOwnerSystemId: string;
-  capabilityId: string;
-  deviceKey: string;
-  snapshotId: string;
-  processDefinitionId: string;
-  processVersionId: string;
 }
 
 const emptyResources: EngineeringResources = {
@@ -114,8 +115,19 @@ export function EngineeringWorkbench({
   scopeKeyRef.current = engineeringScopeKey;
 
   const [resources, setResources] = useState<EngineeringResources>(emptyResources);
-  const [draft, setDraft] = useState<EngineeringDraft>(
-    () => createEngineeringDraft(undefined, effectiveApplicationId));
+  const [resourcesLoaded, setResourcesLoaded] = useState(false);
+  const [draftState, setDraftState] = useState(
+    () => createEditorDraftBaseline(
+      createEngineeringDraft(undefined, effectiveApplicationId)));
+  const draft = draftState.current;
+  const setDraft = useCallback((update: React.SetStateAction<EngineeringDraft>) => {
+    setDraftState(state => replaceEditorDraft(
+      state,
+      typeof update === 'function'
+        ? update(state.current)
+        : update));
+  }, []);
+  const draftDirty = isEditorDraftDirty(draftState, engineeringSourceDraftsEqual);
   const [createdProject, setCreatedProject] = useState<EngineeringProjectResponse | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -140,21 +152,107 @@ export function EngineeringWorkbench({
     () => resources.topology?.systems.filter(system =>
       isSystemWithinStation(system, draft.stationSystemId, resources.topology!)) ?? [],
     [draft.stationSystemId, resources.topology]);
+  const deviceOwnerOptions = useMemo(
+    () => createEngineeringDeviceOwnerOptions(deviceOwnerSystems),
+    [deviceOwnerSystems]);
   const selectedDeviceOwner = deviceOwnerSystems.find(
     system => system.systemId === draft.deviceOwnerSystemId) ?? null;
-  const ownerCapabilityIds = selectedDeviceOwner
-    ? [...new Set([
-      ...selectedDeviceOwner.requiredCapabilityIds,
-      ...selectedDeviceOwner.providedCapabilityIds
-    ])].sort((left, right) => left.localeCompare(right))
-    : [];
-  const canPublishSnapshot = isBackendHealthy
+  const ownerCapabilityIds = useMemo(
+    () => selectedDeviceOwner
+      ? [...new Set([
+        ...selectedDeviceOwner.requiredCapabilityIds,
+        ...selectedDeviceOwner.providedCapabilityIds
+      ])].sort((left, right) => left.localeCompare(right))
+      : [],
+    [selectedDeviceOwner]);
+  const savedRecipe = resources.recipes.find(recipe => recipe.recipeId === draft.recipeId) ?? null;
+  const savedStationProfile = resources.stations.find(
+    station => station.stationProfileId === draft.stationProfileId) ?? null;
+  const sourcePersisted = savedRecipe !== null
+    && savedStationProfile !== null
+    && recipeMatchesDraft(savedRecipe, draft)
+    && stationProfileMatchesDraft(savedStationProfile, draft);
+  const canSaveSource = isBackendHealthy
     && !busy
+    && resourcesLoaded
     && engineeringIdentity !== null
-    && selectedProcess !== null
     && resources.topology !== null
     && selectedDeviceOwner !== null
     && ownerCapabilityIds.includes(draft.capabilityId);
+  const canPublishSnapshot = canSaveSource
+    && !draftDirty
+    && selectedProcess !== null
+    && sourcePersisted;
+  const sourceProblems = useMemo<EditorProblem[]>(() => {
+    const problems: EditorProblem[] = [];
+    const requiredFields: Array<[keyof EngineeringDraft, string, string]> = [
+      ['recipeId', 'Recipe ID is required.', 'engineering-recipe-id'],
+      ['recipeVersionId', 'Recipe version is required.', 'engineering-recipe-version'],
+      ['recipeName', 'Recipe display name is required.', 'engineering-recipe-name'],
+      ['stationProfileId', 'Station profile ID is required.', 'engineering-station-profile-id'],
+      ['stationSystemId', 'A topology Station is required.', 'engineering-station-system'],
+      ['stationName', 'Station display name is required.', 'engineering-station-name'],
+      ['deviceBindingId', 'Device binding ID is required.', 'engineering-device-binding-id'],
+      ['deviceOwnerSystemId', 'A device owner System is required.', 'engineering-device-owner-system'],
+      ['capabilityId', 'A declared device capability is required.', 'engineering-device-capability'],
+      ['deviceKey', 'Device key is required.', 'engineering-device-key']
+    ];
+    for (const [field, message, targetId] of requiredFields) {
+      if (!draft[field].trim()) {
+        problems.push({ id: `engineering-${field}`, severity: 'Error', message, targetId });
+      }
+    }
+    if (draft.deviceOwnerSystemId && selectedDeviceOwner === null) {
+      problems.push({
+        id: 'engineering-device-owner-scope',
+        severity: 'Error',
+        message: 'The device owner must belong to the selected Station subtree.',
+        targetId: 'engineering-device-owner-system'
+      });
+    }
+    if (draft.capabilityId && !ownerCapabilityIds.includes(draft.capabilityId)) {
+      problems.push({
+        id: 'engineering-capability-contract',
+        severity: 'Error',
+        message: 'The selected owner System does not declare this capability.',
+        targetId: 'engineering-device-capability'
+      });
+    }
+    return problems;
+  }, [draft, ownerCapabilityIds, selectedDeviceOwner]);
+  const publicationProblems = useMemo<EditorProblem[]>(() => {
+    const problems: EditorProblem[] = [];
+    const requiredFields: Array<[keyof EngineeringDraft, string, string]> = [
+      ['snapshotId', 'Configuration snapshot ID is required.', 'engineering-snapshot-id'],
+      ['processDefinitionId', 'A published process is required.', 'engineering-process-definition'],
+      ['processVersionId', 'The published process version is required.', 'engineering-process-version']
+    ];
+    for (const [field, message, targetId] of requiredFields) {
+      if (!draft[field].trim()) {
+        problems.push({ id: `engineering-${field}`, severity: 'Error', message, targetId });
+      }
+    }
+    if (draftDirty) {
+      problems.push({
+        id: 'engineering-source-unsaved',
+        severity: 'Error',
+        message: 'Save the mutable Recipe and Station Profile source before publishing a snapshot.',
+        targetId: 'save-engineering-source'
+      });
+    }
+    if (!draftDirty && (!savedRecipe || !savedStationProfile)) {
+      problems.push({
+        id: 'engineering-source-missing',
+        severity: 'Error',
+        message: 'The selected Recipe and Station Profile must exist before publication.',
+        targetId: 'save-engineering-source'
+      });
+    }
+    return problems;
+  }, [draft, draftDirty, savedRecipe, savedStationProfile]);
+  const engineeringProblems = useMemo(
+    () => [...sourceProblems, ...publicationProblems],
+    [publicationProblems, sourceProblems]);
 
   const loadResources = useCallback(async () => {
     if (!isBackendHealthy || !projectApplicationApiScope || !engineeringIdentity) {
@@ -185,41 +283,63 @@ export function EngineeringWorkbench({
       stations,
       processDefinitions
     });
+    setResourcesLoaded(true);
     setCreatedProject(
       projects.find(project => project.projectId === engineeringIdentity.projectId) ?? null);
 
     const publishedDefinitions = processDefinitions.filter(
       definition => definition.status === 'Published');
-    setDraft(current => {
+    setDraftState(state => {
+      const current = state.current;
+      const recipe = recipes.find(candidate => candidate.recipeId === current.recipeId)
+        ?? recipes.find(candidate => candidate.status === 'Draft')
+        ?? recipes[0]
+        ?? null;
+      const stationProfile = stations.find(
+        candidate => candidate.stationProfileId === current.stationProfileId)
+        ?? stations[0]
+        ?? null;
       const process = publishedDefinitions.find(
         definition => definition.processDefinitionId === current.processDefinitionId)
         ?? publishedDefinitions[0]
         ?? null;
       const topology = topologyResponse?.ok ? topologyResponse.body ?? null : null;
-      const stations = topology?.systems.filter(system => system.kind === 'Station') ?? [];
-      const stationSystemId = stations.some(system => system.systemId === current.stationSystemId)
-        ? current.stationSystemId
-        : stations[0]?.systemId ?? current.stationSystemId;
+      const topologyStations = topology?.systems.filter(system => system.kind === 'Station') ?? [];
+      const preferredStationSystemId = stationProfile?.stationSystemId ?? current.stationSystemId;
+      const stationSystemId = topologyStations.some(
+        system => system.systemId === preferredStationSystemId)
+        ? preferredStationSystemId
+        : topologyStations[0]?.systemId ?? preferredStationSystemId;
       const owners = topology?.systems.filter(system =>
         isSystemWithinStation(system, stationSystemId, topology)) ?? [];
+      const savedBinding = stationProfile?.deviceBindings[0] ?? null;
+      const preferredOwnerSystemId = savedBinding?.ownerSystemId ?? current.deviceOwnerSystemId;
       const deviceOwnerSystemId = owners.some(system =>
-        system.systemId === current.deviceOwnerSystemId)
-        ? current.deviceOwnerSystemId
+        system.systemId === preferredOwnerSystemId)
+        ? preferredOwnerSystemId
         : owners[0]?.systemId ?? stationSystemId;
       const owner = owners.find(system => system.systemId === deviceOwnerSystemId);
       const capabilities = owner
         ? [...new Set([...owner.requiredCapabilityIds, ...owner.providedCapabilityIds])]
         : [];
-      return {
+      const normalized = {
         ...current,
+        recipeId: recipe?.recipeId ?? current.recipeId,
+        recipeVersionId: recipe?.versionId ?? current.recipeVersionId,
+        recipeName: recipe?.displayName ?? current.recipeName,
+        stationProfileId: stationProfile?.stationProfileId ?? current.stationProfileId,
         stationSystemId,
+        stationName: stationProfile?.displayName ?? current.stationName,
+        deviceBindingId: savedBinding?.deviceBindingId ?? current.deviceBindingId,
         deviceOwnerSystemId,
-        capabilityId: capabilities.includes(current.capabilityId)
-          ? current.capabilityId
-          : capabilities[0] ?? current.capabilityId,
+        capabilityId: capabilities.includes(savedBinding?.capabilityId ?? current.capabilityId)
+          ? savedBinding?.capabilityId ?? current.capabilityId
+          : capabilities[0] ?? savedBinding?.capabilityId ?? current.capabilityId,
+        deviceKey: savedBinding?.deviceKey ?? current.deviceKey,
         processDefinitionId: process?.processDefinitionId ?? '',
         processVersionId: process?.versionId ?? ''
       };
+      return synchronizeCleanEditorDraft(state, normalized, engineeringSourceDraftsEqual);
     });
   }, [
     activeApplication?.topologyId,
@@ -231,7 +351,9 @@ export function EngineeringWorkbench({
 
   useEffect(() => {
     setResources(emptyResources);
-    setDraft(createEngineeringDraft(undefined, effectiveApplicationId));
+    setResourcesLoaded(false);
+    setDraftState(createEditorDraftBaseline(
+      createEngineeringDraft(undefined, effectiveApplicationId)));
     setCreatedProject(null);
     setBusy(false);
   }, [engineeringScopeKey]);
@@ -253,61 +375,77 @@ export function EngineeringWorkbench({
     setDraft(createEngineeringDraft(selectedProcess ?? undefined, effectiveApplicationId));
   }, [effectiveApplicationId, selectedProcess]);
 
-  const createRuntimeSnapshot = useCallback(async () => {
-    const process = selectedProcess;
-    if (!process) {
-      onMessage('Publish a process definition before creating an engineering snapshot');
-      return;
-    }
+  const revertDraft = useCallback(async () => {
+    setDraftState(state => {
+      const reverted = revertEditorDraft(state);
+      return {
+        ...reverted,
+        current: {
+          ...reverted.current,
+          snapshotId: state.current.snapshotId,
+          processDefinitionId: state.current.processDefinitionId,
+          processVersionId: state.current.processVersionId
+        }
+      };
+    });
+    onMessage('Engineering source changes discarded; the last saved Recipe and Station Profile were restored.');
+  }, [onMessage]);
+
+  const saveEngineeringSource = useCallback(async () => {
     if (!engineeringIdentity || !projectApplicationApiScope) {
-      onMessage('Open a project Application before creating a configuration snapshot');
-      return;
+      throw new Error('Open a project Application before saving engineering source.');
     }
 
+    const submittedDraft = draft;
     const requestedScopeKey = engineeringScopeKey;
     const isCurrentScope = () => scopeKeyRef.current === requestedScopeKey;
     setBusy(true);
     try {
-      const hasWorkspace = resources.workspaces.some(
-        workspace => workspace.workspaceId === engineeringIdentity.workspaceId);
-      if (!hasWorkspace) {
+      let persistedWorkspace = resources.workspaces.find(
+        workspace => workspace.workspaceId === engineeringIdentity.workspaceId) ?? null;
+      if (!persistedWorkspace) {
         const workspace = await createWorkspace({
           workspaceId: engineeringIdentity.workspaceId,
           displayName: engineeringIdentity.workspaceName
         }, projectApplicationApiScope);
         if (!isCurrentScope()) {
-          return;
+          throw new Error('The active Application changed while saving engineering source.');
         }
-        if (!workspace.ok) {
-          onMessage(`Workspace create failed: ${workspace.status} ${workspace.text}`);
-          return;
+        if (!workspace.ok || !workspace.body) {
+          throw new Error(`Workspace create failed: ${workspace.status} ${workspace.text}`);
         }
+        persistedWorkspace = workspace.body;
       }
 
-      const hasProject = resources.projects.some(
-        project => project.projectId === engineeringIdentity.projectId);
-      if (!hasProject) {
+      let persistedProject = resources.projects.find(
+        project => project.projectId === engineeringIdentity.projectId) ?? null;
+      if (!persistedProject) {
         const project = await createEngineeringProject({
           projectId: engineeringIdentity.projectId,
           workspaceId: engineeringIdentity.workspaceId,
           displayName: engineeringIdentity.projectName
         }, projectApplicationApiScope);
         if (!isCurrentScope()) {
-          return;
+          throw new Error('The active Application changed while saving engineering source.');
         }
-        if (!project.ok) {
-          onMessage(`Configuration project create failed: ${project.status} ${project.text}`);
-          return;
+        if (!project.ok || !project.body) {
+          throw new Error(`Configuration project create failed: ${project.status} ${project.text}`);
         }
+        persistedProject = project.body;
       }
 
-      const existingRecipe = resources.recipes.find(recipe => recipe.recipeId === draft.recipeId);
-      let recipeStatus = existingRecipe?.status ?? null;
-      if (!existingRecipe) {
+      const existingRecipe = resources.recipes.find(
+        recipe => recipe.recipeId === submittedDraft.recipeId) ?? null;
+      if (existingRecipe && !recipeMatchesDraft(existingRecipe, submittedDraft)) {
+        throw new Error(
+          `Recipe ${submittedDraft.recipeId} already exists with different immutable source. Use a new Recipe ID.`);
+      }
+      let persistedRecipe = existingRecipe;
+      if (!persistedRecipe) {
         const recipe = await createRecipe({
-          recipeId: draft.recipeId,
-          versionId: draft.recipeVersionId,
-          displayName: draft.recipeName,
+          recipeId: submittedDraft.recipeId,
+          versionId: submittedDraft.recipeVersionId,
+          displayName: submittedDraft.recipeName,
           parameters: [
             {
               key: 'inspection.mode',
@@ -316,69 +454,77 @@ export function EngineeringWorkbench({
           ]
         }, projectApplicationApiScope);
         if (!isCurrentScope()) {
-          return;
+          throw new Error('The active Application changed while saving engineering source.');
         }
         if (!recipe.ok || !recipe.body) {
-          onMessage(`Recipe create failed: ${recipe.status} ${recipe.text}`);
-          return;
+          throw new Error(`Recipe create failed: ${recipe.status} ${recipe.text}`);
         }
-        recipeStatus = recipe.body.status;
+        persistedRecipe = recipe.body;
       }
 
-      if (recipeStatus !== 'Published') {
-        const publishedRecipe = await publishRecipe(draft.recipeId, projectApplicationApiScope);
-        if (!isCurrentScope()) {
-          return;
-        }
-        if (!publishedRecipe.ok) {
-          onMessage(`Recipe publish failed: ${publishedRecipe.status} ${publishedRecipe.text}`);
-          return;
-        }
+      const existingStation = resources.stations.find(
+        station => station.stationProfileId === submittedDraft.stationProfileId) ?? null;
+      if (existingStation && !stationProfileMatchesDraft(existingStation, submittedDraft)) {
+        throw new Error(
+          `Station Profile ${submittedDraft.stationProfileId} already exists with different immutable source. Use a new Station Profile ID.`);
       }
-
-      const hasStation = resources.stations.some(
-        station => station.stationProfileId === draft.stationProfileId);
-      if (!hasStation) {
+      let persistedStation = existingStation;
+      if (!persistedStation) {
         const station = await createStationProfile({
-          stationProfileId: draft.stationProfileId,
-          stationSystemId: draft.stationSystemId,
-          displayName: draft.stationName,
+          stationProfileId: submittedDraft.stationProfileId,
+          stationSystemId: submittedDraft.stationSystemId,
+          displayName: submittedDraft.stationName,
           deviceBindings: [
             {
-              deviceBindingId: draft.deviceBindingId,
-              ownerSystemId: draft.deviceOwnerSystemId,
-              capabilityId: draft.capabilityId,
-              deviceKey: draft.deviceKey
+              deviceBindingId: submittedDraft.deviceBindingId,
+              ownerSystemId: submittedDraft.deviceOwnerSystemId,
+              capabilityId: submittedDraft.capabilityId,
+              deviceKey: submittedDraft.deviceKey
             }
           ]
         }, projectApplicationApiScope);
         if (!isCurrentScope()) {
-          return;
+          throw new Error('The active Application changed while saving engineering source.');
         }
-        if (!station.ok) {
-          onMessage(`Station create failed: ${station.status} ${station.text}`);
-          return;
+        if (!station.ok || !station.body) {
+          throw new Error(`Station create failed: ${station.status} ${station.text}`);
         }
+        persistedStation = station.body;
       }
 
-      const snapshot = await publishConfigurationSnapshot(engineeringIdentity.projectId, {
-        snapshotId: draft.snapshotId,
-        processDefinitionId: process.processDefinitionId,
-        processVersionId: process.versionId,
-        recipeId: draft.recipeId,
-        stationProfileId: draft.stationProfileId
-      }, projectApplicationApiScope);
-      if (!isCurrentScope()) {
-        return;
+      setResources(current => ({
+        ...current,
+        workspaces: replaceByIdentity(
+          current.workspaces,
+          persistedWorkspace,
+          workspace => workspace.workspaceId),
+        projects: replaceByIdentity(
+          current.projects,
+          persistedProject,
+          project => project.projectId),
+        recipes: replaceByIdentity(
+          current.recipes,
+          persistedRecipe,
+          recipe => recipe.recipeId),
+        stations: replaceByIdentity(
+          current.stations,
+          persistedStation,
+          station => station.stationProfileId)
+      }));
+      setDraftState(state => acceptSubmittedEditorDraft(state, submittedDraft));
+      onMessage(`Engineering source saved ${submittedDraft.recipeId} / ${submittedDraft.stationProfileId}`);
+      try {
+        await loadResources();
+      } catch (error) {
+        onMessage(`Engineering source saved; resource refresh failed: ${String(error)}`);
       }
-      if (!snapshot.ok || !snapshot.body) {
-        onMessage(`Snapshot publish failed: ${snapshot.status} ${snapshot.text}`);
-        return;
+    } catch (error) {
+      try {
+        await loadResources();
+      } catch (refreshError) {
+        onMessage(`Engineering source save failed and refresh also failed: ${String(refreshError)}`);
       }
-
-      setCreatedProject(snapshot.body);
-      onMessage(`Snapshot published ${draft.snapshotId}`);
-      await loadResources();
+      throw error;
     } finally {
       if (isCurrentScope()) {
         setBusy(false);
@@ -394,9 +540,107 @@ export function EngineeringWorkbench({
     resources.projects,
     resources.recipes,
     resources.stations,
-    resources.workspaces,
-    selectedProcess
+    resources.workspaces
   ]);
+
+  const createRuntimeSnapshot = useCallback(async () => {
+    const process = selectedProcess;
+    if (!process) {
+      throw new Error('Publish a process definition before creating an engineering snapshot.');
+    }
+    if (!engineeringIdentity || !projectApplicationApiScope) {
+      throw new Error('Open a project Application before creating a configuration snapshot.');
+    }
+    if (draftDirty) {
+      throw new Error('Save the mutable Recipe and Station Profile source before publishing a snapshot.');
+    }
+    const recipe = resources.recipes.find(candidate => candidate.recipeId === draft.recipeId) ?? null;
+    const station = resources.stations.find(
+      candidate => candidate.stationProfileId === draft.stationProfileId) ?? null;
+    if (!recipe || !recipeMatchesDraft(recipe, draft)) {
+      throw new Error(`Saved Recipe ${draft.recipeId} does not match the current source fields.`);
+    }
+    if (!station || !stationProfileMatchesDraft(station, draft)) {
+      throw new Error(`Saved Station Profile ${draft.stationProfileId} does not match the current source fields.`);
+    }
+    if (!resources.projects.some(project => project.projectId === engineeringIdentity.projectId)) {
+      throw new Error('Save engineering source before publishing its configuration snapshot.');
+    }
+
+    const requestedScopeKey = engineeringScopeKey;
+    const isCurrentScope = () => scopeKeyRef.current === requestedScopeKey;
+    setBusy(true);
+    try {
+      if (recipe.status !== 'Published') {
+        const publishedRecipe = await publishRecipe(draft.recipeId, projectApplicationApiScope);
+        if (!isCurrentScope()) {
+          throw new Error('The active Application changed while publishing the configuration snapshot.');
+        }
+        if (!publishedRecipe.ok) {
+          throw new Error(`Recipe publish failed: ${publishedRecipe.status} ${publishedRecipe.text}`);
+        }
+      }
+
+      const snapshot = await publishConfigurationSnapshot(engineeringIdentity.projectId, {
+        snapshotId: draft.snapshotId,
+        processDefinitionId: process.processDefinitionId,
+        processVersionId: process.versionId,
+        recipeId: draft.recipeId,
+        stationProfileId: draft.stationProfileId
+      }, projectApplicationApiScope);
+      if (!isCurrentScope()) {
+        throw new Error('The active Application changed while publishing the configuration snapshot.');
+      }
+      if (!snapshot.ok || !snapshot.body) {
+        throw new Error(`Snapshot publish failed: ${snapshot.status} ${snapshot.text}`);
+      }
+
+      setCreatedProject(snapshot.body);
+      onMessage(`Snapshot published ${draft.snapshotId}`);
+      try {
+        await loadResources();
+      } catch (error) {
+        onMessage(`Snapshot published ${draft.snapshotId}; resource refresh failed: ${String(error)}`);
+      }
+    } catch (error) {
+      try {
+        await loadResources();
+      } catch (refreshError) {
+        onMessage(`Snapshot publish failed and resource refresh also failed: ${String(refreshError)}`);
+      }
+      throw error;
+    } finally {
+      if (isCurrentScope()) {
+        setBusy(false);
+      }
+    }
+  }, [
+    draft,
+    engineeringIdentity,
+    engineeringScopeKey,
+    loadResources,
+    onMessage,
+    projectApplicationApiScope,
+    resources.projects,
+    resources.recipes,
+    resources.stations,
+    selectedProcess,
+    draftDirty
+  ]);
+
+  useEditorDocument({
+    dirty: draftDirty,
+    editRevision: draft,
+    canSave: canSaveSource && sourceProblems.length === 0,
+    save: saveEngineeringSource,
+    revert: revertDraft,
+    focus: targetId => {
+      if (targetId) {
+        document.querySelector<HTMLElement>(`[data-testid="${targetId}"]`)?.focus();
+      }
+    },
+    problems: engineeringProblems
+  });
 
   return (
     <section className="engineering-workbench">
@@ -424,15 +668,36 @@ export function EngineeringWorkbench({
             className="button ghost"
             onClick={resetDraft}
             disabled={!engineeringIdentity || busy}
+            data-testid="new-engineering-configuration"
           >
             <SlidersHorizontal size={15} />
-            Reset Fields
+            New Configuration
+          </button>
+          <button
+            type="button"
+            className="button ghost"
+            onClick={() => void revertDraft()}
+            disabled={!draftDirty || busy}
+            data-testid="discard-engineering-draft"
+          >
+            <RotateCcw size={15} />
+            Discard Changes
+          </button>
+          <button
+            type="button"
+            className="button"
+            onClick={() => void saveEngineeringSource().catch(error => onMessage(String(error)))}
+            disabled={(!draftDirty && sourcePersisted) || !canSaveSource || sourceProblems.length > 0}
+            data-testid="save-engineering-source"
+          >
+            <Save size={15} />
+            Save Source
           </button>
           <button
             type="button"
             className="button primary"
-            onClick={createRuntimeSnapshot}
-            disabled={!canPublishSnapshot}
+            onClick={() => void createRuntimeSnapshot().catch(error => onMessage(String(error)))}
+            disabled={!canPublishSnapshot || engineeringProblems.length > 0}
             data-testid="create-engineering-bundle"
           >
             <Send size={15} />
@@ -468,6 +733,7 @@ export function EngineeringWorkbench({
             <FieldGroup title="Recipe">
               <TextField
                 label="Recipe ID"
+                testId="engineering-recipe-id"
                 value={draft.recipeId}
                 onChange={value => setDraft(current => ({
                   ...current,
@@ -477,11 +743,13 @@ export function EngineeringWorkbench({
               />
               <TextField
                 label="Recipe Version"
+                testId="engineering-recipe-version"
                 value={draft.recipeVersionId}
                 onChange={value => setDraft(current => ({ ...current, recipeVersionId: value }))}
               />
               <TextField
                 label="Display Name"
+                testId="engineering-recipe-name"
                 value={draft.recipeName}
                 onChange={value => setDraft(current => ({ ...current, recipeName: value }))}
               />
@@ -490,6 +758,7 @@ export function EngineeringWorkbench({
             <FieldGroup title="Station Profile">
               <TextField
                 label="Station Profile ID"
+                testId="engineering-station-profile-id"
                 value={draft.stationProfileId}
                 onChange={value => setDraft(current => ({ ...current, stationProfileId: value }))}
               />
@@ -528,11 +797,13 @@ export function EngineeringWorkbench({
               </label>
               <TextField
                 label="Display Name"
+                testId="engineering-station-name"
                 value={draft.stationName}
                 onChange={value => setDraft(current => ({ ...current, stationName: value }))}
               />
               <TextField
                 label="Device Binding ID"
+                testId="engineering-device-binding-id"
                 value={draft.deviceBindingId}
                 onChange={value => setDraft(current => ({ ...current, deviceBindingId: value }))}
               />
@@ -560,11 +831,9 @@ export function EngineeringWorkbench({
                   }}
                   data-testid="engineering-device-owner-system"
                 >
-                  {deviceOwnerSystems.length === 0 ? (
-                    <option value="">No System in selected Station</option>
-                  ) : deviceOwnerSystems.map(system => (
-                    <option key={system.systemId} value={system.systemId}>
-                      {system.displayName} ({system.systemId})
+                  {deviceOwnerOptions.map(option => (
+                    <option key={`owner-option:${option.value}`} value={option.value}>
+                      {option.label}
                     </option>
                   ))}
                 </select>
@@ -588,6 +857,7 @@ export function EngineeringWorkbench({
               </label>
               <TextField
                 label="Device Key"
+                testId="engineering-device-key"
                 value={draft.deviceKey}
                 onChange={value => setDraft(current => ({ ...current, deviceKey: value }))}
               />
@@ -607,6 +877,7 @@ export function EngineeringWorkbench({
                       processVersionId: nextProcess?.versionId ?? ''
                     }));
                   }}
+                  data-testid="engineering-process-definition"
                 >
                   {publishedProcesses.length === 0 ? (
                     <option value="">No published process</option>
@@ -619,11 +890,13 @@ export function EngineeringWorkbench({
               </label>
               <TextField
                 label="Snapshot ID"
+                testId="engineering-snapshot-id"
                 value={draft.snapshotId}
                 onChange={value => setDraft(current => ({ ...current, snapshotId: value }))}
               />
               <TextField
                 label="Process Version"
+                testId="engineering-process-version"
                 value={selectedProcess?.versionId ?? draft.processVersionId}
                 onChange={value => setDraft(current => ({ ...current, processVersionId: value }))}
                 readOnly
@@ -706,11 +979,13 @@ function FieldGroup({
 function TextField({
   label,
   value,
+  testId,
   readOnly = false,
   onChange
 }: {
   label: string;
   value: string;
+  testId?: string;
   readOnly?: boolean;
   onChange(value: string): void;
 }): React.ReactElement {
@@ -718,6 +993,7 @@ function TextField({
     <label>
       <span>{label}</span>
       <input
+        data-testid={testId}
         value={value}
         readOnly={readOnly}
         onChange={event => onChange(event.target.value)}
@@ -832,6 +1108,36 @@ function isSystemWithinStation(
       : undefined;
   }
   return false;
+}
+
+function recipeMatchesDraft(recipe: RecipeResponse, draft: EngineeringDraft): boolean {
+  const mode = recipe.parameters.find(parameter => parameter.key === 'inspection.mode') ?? null;
+  return recipe.versionId === draft.recipeVersionId
+    && recipe.displayName === draft.recipeName
+    && recipe.parameters.length === 1
+    && mode?.value === 'desktop-engineering';
+}
+
+function stationProfileMatchesDraft(
+  station: StationProfileResponse,
+  draft: EngineeringDraft
+): boolean {
+  const binding = station.deviceBindings.length === 1 ? station.deviceBindings[0] : null;
+  return station.stationSystemId === draft.stationSystemId
+    && station.displayName === draft.stationName
+    && binding?.deviceBindingId === draft.deviceBindingId
+    && binding.ownerSystemId === draft.deviceOwnerSystemId
+    && binding.capabilityId === draft.capabilityId
+    && binding.deviceKey === draft.deviceKey;
+}
+
+function replaceByIdentity<T>(
+  rows: T[],
+  item: T,
+  identity: (value: T) => string
+): T[] {
+  const itemIdentity = identity(item);
+  return [...rows.filter(row => identity(row) !== itemIdentity), item];
 }
 
 function formatDate(value: string): string {

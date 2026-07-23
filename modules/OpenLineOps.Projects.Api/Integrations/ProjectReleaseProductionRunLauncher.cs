@@ -122,6 +122,13 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                     new ConfigurationSnapshotId(configuration.ConfigurationSnapshotId),
                     new RecipeSnapshotId(configuration.RecipeSnapshotId),
                     executableResult.Value,
+                    operation.InputMappings.Select(mapping => new OperationInputMappingPlan(
+                        mapping.TargetInputKey,
+                        mapping.SourceOperationId,
+                        mapping.SourceOutputKey,
+                        ParseExact<ProductionContextValueKind>(
+                            mapping.ExpectedValueKind,
+                            "Operation input mapping value kind"))),
                     CreateResourceRequirements(
                         line.LineDefinitionId,
                         operation,
@@ -404,7 +411,12 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                         ParseExact<ProductionContextValueKind>(
                             transition.ExpectedOutputKind!,
                             "Production Context value kind"),
-                        transition.ExpectedOutputValue!)));
+                        transition.ExpectedOutputValue!)),
+            transition.TerminalDisposition is null
+                ? null
+                : ParseExact<ProductDisposition>(
+                    transition.TerminalDisposition,
+                    "terminal disposition"));
     }
 
     private static T ParseExact<T>(string value, string description)

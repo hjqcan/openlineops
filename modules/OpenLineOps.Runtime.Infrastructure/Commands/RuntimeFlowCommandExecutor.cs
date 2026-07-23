@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using OpenLineOps.Runtime.Application.Commands;
+using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.Runtime.Infrastructure.Commands;
 
@@ -103,12 +105,30 @@ public sealed class RuntimeFlowCommandExecutor : IRuntimeCommandExecutor
             return RuntimeCommandExecutionResult.Rejected(
                 $"Runtime result patch payload is invalid JSON: {exception.Message}");
         }
+        catch (InvalidDataException exception)
+        {
+            return RuntimeCommandExecutionResult.Rejected(exception.Message);
+        }
     }
 
     private static JsonNode? ResolveResultValue(
         JsonNode? value,
         RuntimeCommandExecutionContext context)
     {
+        if (value is JsonObject productionInputReference
+            && productionInputReference.Count == 1
+            && productionInputReference["$productionInput"] is JsonValue inputKeyValue
+            && inputKeyValue.TryGetValue<string>(out var inputKey))
+        {
+            if (!context.ProductionInputs.TryGetValue(inputKey, out var productionInput))
+            {
+                throw new InvalidDataException(
+                    $"Runtime result patch references undeclared Production Context input '{inputKey}'.");
+            }
+
+            return ToJsonValue(productionInput);
+        }
+
         if (value is not JsonObject contextValue
             || contextValue.Count != 1
             || contextValue["$context"] is not JsonValue contextNameValue
@@ -125,6 +145,20 @@ public sealed class RuntimeFlowCommandExecutor : IRuntimeCommandExecutor
             _ => value.DeepClone()
         };
     }
+
+    private static JsonValue ToJsonValue(ProductionContextValue value) => value.Kind switch
+    {
+        ProductionContextValueKind.Text or ProductionContextValueKind.DateTimeUtc =>
+            JsonValue.Create(value.CanonicalValue)!,
+        ProductionContextValueKind.Boolean =>
+            JsonValue.Create(string.Equals(value.CanonicalValue, "true", StringComparison.Ordinal))!,
+        ProductionContextValueKind.WholeNumber =>
+            JsonValue.Create(long.Parse(value.CanonicalValue, NumberStyles.Integer, CultureInfo.InvariantCulture))!,
+        ProductionContextValueKind.FixedPoint =>
+            JsonValue.Create(decimal.Parse(value.CanonicalValue, NumberStyles.Number, CultureInfo.InvariantCulture))!,
+        _ => throw new InvalidDataException(
+            $"Unsupported Production Context value kind {value.Kind}.")
+    };
 
     private static bool TryReadDuration(
         string? inputPayload,

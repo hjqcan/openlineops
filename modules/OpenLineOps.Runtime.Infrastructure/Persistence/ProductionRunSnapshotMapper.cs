@@ -36,6 +36,13 @@ internal static class ProductionRunSnapshotMapper
             snapshot.Judgement.ToString(),
             snapshot.Disposition.ToString(),
             snapshot.ControlState.ToString(),
+            snapshot.SafeStopRequestedBy,
+            snapshot.SafeStopReason,
+            snapshot.SafeStopRequestedAtUtc,
+            snapshot.SafeStopAcknowledgedAtUtc,
+            snapshot.ScrapRequestedBy,
+            snapshot.ScrapReason,
+            snapshot.ScrapRequestedAtUtc,
             snapshot.CreatedAtUtc,
             snapshot.LastTransitionAtUtc,
             snapshot.StartedAtUtc,
@@ -50,6 +57,7 @@ internal static class ProductionRunSnapshotMapper
                 decision.SourceOperationRunId,
                 decision.TransitionId,
                 decision.TargetOperationId,
+                decision.TerminalDisposition?.ToString(),
                 decision.SourceJudgement.ToString(),
                 decision.Traversal,
                 decision.DecidedAtUtc)).ToArray(),
@@ -82,13 +90,7 @@ internal static class ProductionRunSnapshotMapper
         var operations = Required(snapshot.Operations, "operation runs")
             .Select(operation => ToAggregate(operation, definitionById)).ToArray();
         var decisions = Required(snapshot.RouteDecisions, "route decisions")
-            .Select(decision => new RouteDecisionSnapshot(
-                Text(decision.SourceOperationRunId, "route source Operation Run id"),
-                Text(decision.TransitionId, "route transition id"),
-                Text(decision.TargetOperationId, "route target operation id"),
-                Enum<ResultJudgement>(decision.SourceJudgement, "route source judgement"),
-                Positive(decision.Traversal, "route traversal"),
-                decision.DecidedAtUtc)).ToArray();
+            .Select(ToAggregate).ToArray();
         var traversalItems = Required(snapshot.TransitionTraversals, "transition traversals");
         var traversalCounts = traversalItems.ToDictionary(
             item => Text(item.TransitionId, "transition traversal id"),
@@ -122,6 +124,13 @@ internal static class ProductionRunSnapshotMapper
             Enum<ResultJudgement>(snapshot.Judgement, "result judgement"),
             Enum<ProductDisposition>(snapshot.Disposition, "product disposition"),
             Enum<ProductionRunControlState>(snapshot.ControlState, "control state"),
+            Optional(snapshot.SafeStopRequestedBy, "Safe Stop actor"),
+            Optional(snapshot.SafeStopReason, "Safe Stop reason"),
+            snapshot.SafeStopRequestedAtUtc,
+            snapshot.SafeStopAcknowledgedAtUtc,
+            Optional(snapshot.ScrapRequestedBy, "Scrap actor"),
+            Optional(snapshot.ScrapReason, "Scrap reason"),
+            snapshot.ScrapRequestedAtUtc,
             snapshot.CreatedAtUtc,
             snapshot.LastTransitionAtUtc,
             snapshot.StartedAtUtc,
@@ -186,6 +195,7 @@ internal static class ProductionRunSnapshotMapper
         transition.TransitionId,
         transition.SourceOperationId,
         transition.TargetOperationId,
+        transition.TerminalDisposition?.ToString(),
         transition.Kind.ToString(),
         transition.RequiredJudgement?.ToString(),
         transition.MaxTraversals,
@@ -197,7 +207,7 @@ internal static class ProductionRunSnapshotMapper
     private static RouteTransitionDefinition ToAggregate(PersistedRouteTransition transition) => new(
         Text(transition.TransitionId, "transition id"),
         Text(transition.SourceOperationId, "source operation id"),
-        Text(transition.TargetOperationId, "target operation id"),
+        Optional(transition.TargetOperationId, "target operation id"),
         Enum<RuntimeRouteTransitionKind>(transition.Kind, "transition kind"),
         transition.RequiredJudgement is null
             ? null
@@ -214,7 +224,32 @@ internal static class ProductionRunSnapshotMapper
                         Enum<ProductionContextValueKind>(
                             transition.ExpectedOutputKind,
                             "expected output kind"),
-                        Text(transition.ExpectedOutputValue, "expected output value"))));
+                        Text(transition.ExpectedOutputValue, "expected output value"))),
+        transition.TerminalDisposition is null
+            ? null
+            : Enum<ProductDisposition>(transition.TerminalDisposition, "terminal disposition"));
+
+    private static RouteDecisionSnapshot ToAggregate(PersistedRouteDecision decision)
+    {
+        var targetOperationId = Optional(decision.TargetOperationId, "route target operation id");
+        ProductDisposition? terminalDisposition = decision.TerminalDisposition is null
+            ? null
+            : Enum<ProductDisposition>(decision.TerminalDisposition, "route terminal disposition");
+        if ((targetOperationId is null) == (terminalDisposition is null))
+        {
+            throw new InvalidDataException(
+                "Persisted route decision requires exactly one target Operation or terminal disposition.");
+        }
+
+        return new RouteDecisionSnapshot(
+            Text(decision.SourceOperationRunId, "route source Operation Run id"),
+            Text(decision.TransitionId, "route transition id"),
+            targetOperationId,
+            terminalDisposition,
+            Enum<ResultJudgement>(decision.SourceJudgement, "route source judgement"),
+            Positive(decision.Traversal, "route traversal"),
+            decision.DecidedAtUtc);
+    }
 
     private static PersistedOperationRun ToSnapshot(OperationRunSnapshot operation) => new(
         operation.Definition.OperationId,
@@ -230,6 +265,8 @@ internal static class ProductionRunSnapshotMapper
         operation.CompletedStepCount,
         operation.CommandCount,
         operation.IncidentCount,
+        operation.RecoveryDecisionId,
+        operation.ExecutionEvidence,
         operation.Outputs.Select(pair => new PersistedProductionContextValue(
             pair.Key,
             pair.Value.Kind.ToString(),
@@ -237,7 +274,13 @@ internal static class ProductionRunSnapshotMapper
         operation.FencingTokens.Select(pair => new PersistedFencingToken(
             pair.Key.Kind.ToString(),
             pair.Key.ResourceId,
-            pair.Value)).ToArray());
+            pair.Value)).ToArray(),
+        operation.SourceOperationRunBindings
+            .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+            .Select(static pair => new PersistedSourceOperationRunBinding(
+                pair.Key,
+                pair.Value))
+            .ToArray());
 
     private static PersistedRecoveryDecision ToSnapshot(ProductionRecoveryDecision decision) => new(
         decision.DecisionId,
@@ -325,6 +368,19 @@ internal static class ProductionRunSnapshotMapper
             throw new InvalidDataException("Persisted operation fencing resources must be unique.");
         }
 
+        var sourceBindingItems = Required(
+            operation.SourceOperationRunBindings,
+            "source Operation Run bindings");
+        var sourceBindings = sourceBindingItems.ToDictionary(
+            item => Text(item.OperationId, "source binding Operation id"),
+            item => Text(item.OperationRunId, "source binding Operation Run id"),
+            StringComparer.Ordinal);
+        if (sourceBindings.Count != sourceBindingItems.Length)
+        {
+            throw new InvalidDataException(
+                "Persisted source Operation Run binding keys must be unique.");
+        }
+
         return new OperationRunSnapshot(
             definition,
             Text(operation.OperationRunId, "Operation Run id"),
@@ -341,8 +397,11 @@ internal static class ProductionRunSnapshotMapper
             operation.CompletedStepCount,
             operation.CommandCount,
             operation.IncidentCount,
+            operation.RecoveryDecisionId,
+            operation.ExecutionEvidence,
             outputs,
-            fencingTokens);
+            fencingTokens,
+            sourceBindings);
     }
 
     private static void RequireCurrentSchema(PersistedProductionRun snapshot)
@@ -417,6 +476,13 @@ internal sealed record PersistedProductionRun(
     string? Judgement,
     string? Disposition,
     string? ControlState,
+    string? SafeStopRequestedBy,
+    string? SafeStopReason,
+    DateTimeOffset? SafeStopRequestedAtUtc,
+    DateTimeOffset? SafeStopAcknowledgedAtUtc,
+    string? ScrapRequestedBy,
+    string? ScrapReason,
+    DateTimeOffset? ScrapRequestedAtUtc,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset LastTransitionAtUtc,
     DateTimeOffset? StartedAtUtc,
@@ -453,6 +519,7 @@ internal sealed record PersistedRouteTransition(
     string? TransitionId,
     string? SourceOperationId,
     string? TargetOperationId,
+    string? TerminalDisposition,
     string? Kind,
     string? RequiredJudgement,
     int? MaxTraversals,
@@ -475,8 +542,11 @@ internal sealed record PersistedOperationRun(
     int CompletedStepCount,
     int CommandCount,
     int IncidentCount,
+    Guid? RecoveryDecisionId,
+    OperationExecutionEvidence? ExecutionEvidence,
     PersistedProductionContextValue[]? Outputs,
-    PersistedFencingToken[]? FencingTokens);
+    PersistedFencingToken[]? FencingTokens,
+    PersistedSourceOperationRunBinding[]? SourceOperationRunBindings);
 
 internal sealed record PersistedProductionContextValue(string? Key, string? Kind, string? Value);
 
@@ -485,10 +555,15 @@ internal sealed record PersistedFencingToken(
     string? ResourceId,
     long FencingToken);
 
+internal sealed record PersistedSourceOperationRunBinding(
+    string? OperationId,
+    string? OperationRunId);
+
 internal sealed record PersistedRouteDecision(
     string? SourceOperationRunId,
     string? TransitionId,
     string? TargetOperationId,
+    string? TerminalDisposition,
     string? SourceJudgement,
     int Traversal,
     DateTimeOffset DecidedAtUtc);

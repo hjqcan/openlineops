@@ -2,24 +2,129 @@
 
 The production Station Agent is a Windows service. Its normal control plane,
 RabbitMQ connection, signed-package installer, safety receiver, and SQLite
-stores run under one dedicated service account. Vendor executables do not run
-with that account's full token: the Station Runtime launches each one in a
+stores run under the Station's restricted LocalService identity. Vendor
+executables do not run under an unrestricted host token: the Station Runtime launches each one in a
 Windows AppContainer and a kill-on-close Job Object.
 
 ## Service identity
 
-Create one non-administrative local or domain account per Station. Do not use
-LocalSystem, an administrator, a shared interactive operator account, or the
-Coordinator identity. Windows must load a user profile for the account so that
-`LOCALAPPDATA` is available; AppContainer process creation fails closed when it
-is absent.
+Run every Station service under `NT AUTHORITY\LocalService` (`S-1-5-19`) and
+configure SCM `SERVICE_SID_TYPE_RESTRICTED`. Stations share that built-in base
+account but have distinct service names and therefore distinct
+`S-1-5-80-...` service SIDs. Startup must fail unless the token contains the
+service-logon SID and the exact service SID as enabled entries, with the exact
+service SID also present in the restricted SID list. Do not use LocalSystem, an
+administrator, an interactive operator, the Coordinator identity, or a custom
+per-Station account.
 
-Configure the exact account name or SID in
-`AllowedRestrictedExternalProgramHostAccounts` or
-`AllowedRestrictedExternalProgramHostSids`. SID configuration is preferred
-because it is not affected by account renaming. The Agent refuses to start when
-both allowlists are empty, and the runtime refuses vendor execution when the
-current identity is unauthenticated, SYSTEM, administrative, or not allowlisted.
+Service-token evidence uses `TokenElevationTypeDefault` to prove that the SCM
+token has no UAC linked token. It does not use `TokenElevation` as an
+administrator test: service logons are outside the interactive UAC split-token
+model. Non-administrative status is proven from the exact LocalService user SID,
+the complete absence of the Administrators group, and the non-LocalSystem user;
+the primary, restricted, service-logon, and exact restricted service-SID facts
+then prove the complete Station identity boundary.
+
+Configure only the exact SCM service name in `OpenLineOps:WindowsServiceName`.
+The Agent derives its `S-1-5-80-...` SID from that name and refuses to start
+unless the token user is LocalService, the service-logon SID `S-1-5-6` is
+enabled and non-deny-only, the token reports restrictions, and the derived
+service SID is both enabled and present in the restricted SID list. There is no
+independent service-SID configuration value that can drift from the SCM name.
+
+### Test-only identity attestation
+
+An external test process is not allowed to open a production Station token with
+`TOKEN_DUPLICATE`, and the test harness never reads or modifies the token DACL.
+The Windows process E2E uses one fixed, self-contained Test Relay and does not
+install another service or virtual account. Before acquiring any creation
+capability, the runner validates the exact Station SCM name and service SID,
+binds the SCM-reported PID to its retained process handle, and verifies creation
+time, liveness, canonical Agent image, SHA-256 and absence from every job. A
+source already in a job is rejected because inherited job policy cannot be
+proven compatible.
+
+The runner creates a protected bridge root owned by its exact SID. LocalSystem,
+Administrators and that runner SID receive full control; the exact Station
+service SID receives only inherited read/execute/synchronize rights. The root
+contains an immutable `relay/` bundle and strict `protocol/request.json`; there
+is no writable result channel. Before native creation, before resume and after
+successful completion, the runner rejects reparse/device entries, unexpected
+owners or ACL rules, and every missing, changed or additional file using an
+exact relative path, length and SHA-256 inventory.
+
+The only source-process capability acquired for relay creation is a
+non-inheritable `PROCESS_CREATE_PROCESS` handle. `CompareObjectHandles` must
+prove that it refers to the same kernel process object as the already-retained
+Station handle; access denial or comparison failure stops the E2E. The runner
+passes this handle only to
+`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` while creating the fixed relay
+suspended. The same `STARTUPINFOEX` supplies a private job through
+`PROC_THREAD_ATTRIBUTE_JOB_LIST`, atomically containing the relay before its
+only thread can run. The job is non-inheritable, kill-on-close and limited to
+one active process. The relay process object's protected DACL grants the runner
+only terminate, query and synchronize rights for later opens. The runner retains
+the exact native process handle returned by creation. The create-only Station
+handle is closed immediately after `CreateProcess` returns, before relay
+validation, resume, pipe impersonation or the protected test action.
+
+While the relay remains suspended, the runner binds its retained handle to the
+exact PID and creation time, validates the canonical Test Relay image and hash,
+and verifies membership in the exact private job. It then repeats the Station
+SCM/PID/time/image/hash/job checks and the complete bridge inventory and ACL
+checks. Only after those facts remain stable is the relay resumed.
+
+Running with the parent Station identity supplied by Windows, the relay uses
+only its non-transferable current-process token pseudo-handle to prove a primary,
+unlinked, restricted `NT AUTHORITY\LocalService` token with no Administrators
+SID, the enabled service-logon SID, and the exact Station SID both enabled in
+`TokenGroups` and present in `TokenRestrictedSids`. It opens the frozen Agent
+and Test Relay executables by canonical non-reparse file handles and verifies
+their SHA-256 values. The relay then connects to a random, single-instance
+control pipe whose protected DACL grants only the exact Station SID
+read/write/synchronize client rights.
+
+The runner uses `GetNamedPipeClientProcessId` to bind that connection to the
+retained relay PID, verifies the exact Station identity through `RunAsClient`,
+and requires the request's 256-bit nonce. The protected test action runs only
+under that independently revalidated impersonated identity. One exact `0xA5`
+receipt completes the relay protocol; the relay repeats its token and image
+checks before exiting, and any captured test-action failure is then rethrown.
+A successful protocol revalidates the frozen bundle and ACL before removal. On
+every path the runner terminates and waits the exact one-process job when
+needed, treats an unproven cleanup as failure, and removes the bridge tree.
+
+This boundary never opens, duplicates, copies or exports a Station token; reads
+or changes a token DACL; reads or changes the Station process DACL; enables
+`SeDebugPrivilege`; uses handle inheritance, breakaway, a LocalSystem broker or
+an arbitrary command; or falls back to a broader access mask or alternate
+protocol. The Test Relay executable and its test-only staging directory are
+rejected from every deployable release artifact. Only its buildable source may
+appear in the source archive.
+
+## Station-local IPC
+
+Material-arrival and resource-fence named pipes are owned by, and grant access
+only to, the exact service SID derived from `WindowsServiceName`. Their DACLs
+are protected from inheritance, clients verify the owner and complete ACL
+before sending data, and `FirstPipeInstance` prevents name preemption. Each
+server keeps its first instance for its complete lifetime and disconnects only
+between bounded requests, so another process cannot occupy the name during a
+recreation window.
+
+The resource-fence authority also requires a per-Job cryptographically random
+256-bit token and exact Job, run, operation, and lease evidence. A response is
+not released for reuse until the Station Runtime confirms that it read the
+complete frame; an incomplete caller times out. The token is defense in depth,
+not a substitute for the service-SID ACL. A second service running under the
+same LocalService base account cannot connect because it has a different
+restricted service SID.
+
+A scanner or PLC bridge may use the local arrival pipe only when it is hosted
+inside the Agent or deliberately launched as its child with the same Station
+service token. An independently managed adapter must use the authenticated
+Coordinator arrival endpoint. Running a separate process merely as
+LocalService never grants Station-local IPC access.
 
 Use a stable deployment-specific `ExternalProgramAppContainerProfileNamespace`
 of at most 128 characters without leading, trailing, or control whitespace.
@@ -35,43 +140,154 @@ machine-wide prefix scan.
 ```json
 {
   "OpenLineOps": {
+    "WindowsServiceName": "OpenLineOpsAgent-LineA-Eol",
     "Agent": {
       "AgentId": "agent-line-a-eol",
       "StationId": "station.eol",
-      "AllowedRestrictedExternalProgramHostSids": [
-        "S-1-5-21-..."
-      ],
+      "StationSystemId": "station.system.eol",
+      "HeartbeatInterval": "00:00:05",
+      "PackageCacheDirectory": "C:\\ProgramData\\OpenLineOps\\StationCaches\\LineA-Eol\\content-anchor\\content",
       "ExternalProgramAppContainerProfileNamespace": "OpenLineOps.LineA.Eol.ExternalPrograms"
     }
   }
 }
 ```
 
-## Package cache and work directories
+## Provisioned package-cache namespace
+
+`PackageCacheDirectory` is required and has no implicit `DataDirectory/content`
+fallback. Its immediate parent is a dedicated namespace anchor containing only
+that cache root. It must use an absolute canonical local drive path on a ready
+fixed NTFS volume; one trailing separator is normalized, while relative,
+dot-segment, repeated-separator, UNC, device, network, removable, and non-NTFS
+paths are invalid. A LocalSystem or elevated Administrator provisions it before
+normal service startup with the signed bundle entry point:
+
+```powershell
+& 'C:\Program Files\OpenLineOps\StationAgent\OpenLineOps.Agent.exe' --provision-content-cache `
+  --OpenLineOps:WindowsServiceName 'OpenLineOpsStationAgent-LineA-Eol' `
+  --OpenLineOps:Agent:PackageCacheDirectory 'C:\ProgramData\OpenLineOps\StationCaches\LineA-Eol\content-anchor\content'
+```
+
+Provisioning derives both the Station service SID and the external-program
+content capability SID; neither is accepted as an independent deployment
+input. It creates or verifies the protected anchor and cache ACLs, rejects
+reparse points, alternate data streams and unknown anchor children, and is
+idempotent only for the exact same namespace and identities. The runtime
+service never provisions or repairs the namespace. Missing or drifted
+protection therefore stops startup or package installation instead of turning
+an execution identity into an ACL administrator.
+
+Provisioning also queries SCM and proceeds only when the exact configured
+service is absent or fully stopped. Every installed or pending non-stopped state
+is rejected. Protected package removal has a separate strict command,
+`--remove-content-cache-package <lowercaseSha256>`; it requires the service to
+exist and be fully stopped, shares the cache-wide cross-process lock, and
+revalidates the exact marker record and hash plus the content namespace, type,
+immutable ACL, streams, and single-link provenance. It then deletes the marker
+before content. It does not rehash an unavailable package inventory from the
+content hash alone. The provisioning and removal modes are mutually exclusive,
+require an elevated Administrator or LocalSystem, and are never reachable
+through normal service execution.
 
 The Agent verifies the `.olopkg` signature, canonical manifest, complete file
 inventory, sizes, and SHA-256 hashes before moving content into its
-content-addressed cache. On Windows, every installed cache directory disables
-ACL inheritance and grants:
+content-addressed cache. The dedicated anchor prevents the Station token from
+renaming or replacing the cache root through parent-directory authority. On
+Windows, the cache boundary and every installed object disable ACL inheritance
+and apply exact grants and denials:
 
 - SYSTEM and Administrators: full control for installation and controlled
   removal;
-- the dedicated Agent service identity: read and execute;
-- the OpenLineOps external-program content capability SID: read and execute.
+- the exact Agent service SID: the minimum create/read/execute authority needed
+  for transactional installation, with frozen mutation, deletion, permission
+  changes, ownership changes, and cache-root replacement denied;
+- the OpenLineOps external-program content capability SID: read and execute,
+  with write, rename, delete, permission changes, and ownership changes
+  explicitly denied.
 
-The service-account and capability read grants are both required by the
+The service-SID and capability read grants are both required by the
 AppContainer dual-principal access check. Every Job profile receives the content
 capability while each vendor invocation retains its own writable workspace.
-Files and directories are marked read-only. Runtime verification rejects
-an extra file, a missing file, a changed size or hash, ACL drift, inherited
-permissions, or writable content. Cache deletion is performed only by the
-installer's bounded content-addressed cleanup operation.
+The administrator-owned anchor and cache boundary use their exact protected
+ACLs. Frozen content and marker objects are Station-owned. A cleanup transition
+preserves its proven Station-service or LocalService pre-transition owner. Both
+states use an exact OWNER RIGHTS deny so filesystem ownership cannot restore
+implicit permission-change or ownership-change authority to the Station token.
+Frozen files and directories are marked read-only. Before every Station
+operation dispatch, the Agent revalidates
+the signed package, transaction marker, complete cached inventory, hashes,
+owners, ACLs, link counts, streams, stable file identities, and read-only
+attributes. Verification rejects an extra or missing object, size or hash
+change, ACL drift, inheritance, a hard-link alias, an alternate stream, a
+reparse point, or writable content. A commit marker records transaction state,
+carries no package trust or provenance, and never substitutes for signature or
+content verification. Administrative
+cleanup uses a separately authorized, bounded path and does not give the normal
+service token permission to rewrite a frozen object's ACL.
 
-Grant the service account modify access to the configured Agent data,
+Grant the exact service SID modify access to the configured Agent data,
 runtime-work, artifact, and SQLite directories. Do not grant the AppContainer
 access to those roots. For each invocation, the host creates a unique work
 directory and grants only that directory to the AppContainer. The frozen
 package remains read-only.
+
+The release bundle also contains the self-contained Python Script Worker.
+Agent configuration binds Station Runtime to its absolute co-packaged path and
+to one explicit sandbox policy. Production requires the signed co-packaged
+`OpenLineOps.LeastPrivilegeLauncher.exe` and the fixed
+`PerExecutionAppContainer` identity.
+
+Every invocation creates a unique AppContainer profile and package SID. The
+Worker payload is copied from the verified sibling executable into that
+profile: its content directory has a protected read-and-execute ACL while its
+runtime directory grants modify access only to the current package SID, the
+trusted service identity, and SYSTEM. Windows supplies the AppContainer Low
+integrity token (RID 4096). No network capability is present. The stable
+`OpenLineOps.pythonRuntime` capability receives read-and-execute access to the
+reviewed Python installation and is the only additional Worker capability.
+That access is installed explicitly after Python installation or update:
+
+```powershell
+& 'C:\Program Files\OpenLineOps\StationAgent\OpenLineOps.LeastPrivilegeLauncher.exe' provision-python-runtime --runtime-dll 'C:\Program Files\Python312\python312.dll'
+```
+
+This command is an installer/administrator operation whose caller must already
+have permission to change the Python tree DACL. Normal Agent execution never
+changes that DACL: it verifies the inheritable capability rule and fails closed
+with an actionable provisioning error if the rule is absent. Consequently the
+Station service identity requires neither elevation nor `WRITE_DAC` over the
+host Python installation.
+
+The launcher creates the Worker suspended with
+`PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`, passes only the standard-stream
+handles and its explicit environment, assigns the process to an unnamed
+kill-on-close Job Object, and resumes it only after assignment. Worker exit,
+cancellation, launcher termination, or Agent failure closes the Job and kills
+every descendant before profile cleanup. Deleting the AppContainer profile is
+the cleanup authority for its complete writable tree, including read-only,
+deep, and wide content; there is no custom recursive delete path.
+
+The protected `%LOCALAPPDATA%\OpenLineOps\ScriptWorker` directory contains
+only locked active-profile markers. A normal exit deletes the profile and
+marker. After a crash, the next launcher can exclusively open only stale
+markers, deletes their exact canonical profiles, and never scans or deletes
+another namespace. Locked markers protect concurrent executions. Cleanup
+failure returns launcher failure and retains the marker for recovery instead
+of hiding residue behind a successful result.
+
+Agent startup fails closed if the launcher is missing, redirected, a reparse
+point, file-identity aliased, or configured with another identity or argument
+layout. It never uses `runas`, a password, or an interactive prompt.
+Container isolation is not an Agent option: the Windows worker and host Python
+DLL are never represented as files inside an unverified image.
+`ExternalProcess` is limited to development or test configuration with required
+least privilege explicitly disabled. The configured host Python runtime DLL
+path is passed explicitly through the cleared Station Runtime environment;
+ambient worker commands are ignored. Windows rewrites standard AppContainer
+`TEMP` and `LOCALAPPDATA` locations into the profile. OpenLineOps therefore
+uses a dedicated per-execution runtime-root variable and keeps the bundle
+extraction root inside the same profile.
 
 On Windows, the native launcher supports a frozen executable whose absolute
 path exceeds `MAX_PATH` by passing an extended-length application name directly
@@ -110,15 +326,22 @@ permissions frozen in its resource definition.
 
 Before enabling production work on a Station:
 
-1. Confirm the Windows service runs under the configured non-administrative
-   account and that its profile is loaded.
+1. Confirm the Windows service runs as LocalService, its service SID type is
+   `Restricted`, and its exact service SID is enabled and restricted in the
+   process token.
 2. Confirm Broker TLS is required and the Agent trusts only the intended RSA
    public keys.
-3. Install a signed package and verify that direct write, rename, and delete
-   attempts against its cache fail.
-4. Run the imported vendor-program trial with network denied, then explicitly
+3. Run `--provision-content-cache` elevated, start the real restricted service,
+   and verify with that service token that cache-root replacement and frozen
+   write, rename, delete, ACL-change, ownership-change, hard-link, and
+   alternate-stream attempts all fail while reads succeed.
+4. Stop the service, remove a retired package only through
+   `--remove-content-cache-package <lowercaseSha256>`, and prove the command
+   rejects running, pending, missing-service, malformed-hash, and drifted-cache
+   states.
+5. Run the imported vendor-program trial with network denied, then explicitly
    opt into `internetClient` only when the protocol requires it.
-5. Exercise operator cancel, timeout, Agent termination, and Safe Stop, and
+6. Exercise operator cancel, timeout, Agent termination, and Safe Stop, and
    confirm no vendor descendant process remains.
-6. Keep Emergency Stop on the independent Agent safety channel; vendor process
+7. Keep Emergency Stop on the independent Agent safety channel; vendor process
    cancellation is not a substitute for hardware safety circuitry.

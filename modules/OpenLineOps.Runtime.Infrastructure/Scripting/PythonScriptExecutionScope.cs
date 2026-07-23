@@ -56,6 +56,7 @@ public static class PythonScriptExecutionScope
     {
         using var scope = session.CreateChildScope();
         scope.Set("input_payload", request.InputPayload);
+        scope.Set("__openlineops_production_inputs_json", request.ProductionInputsJson);
         scope.Set("script_version", request.ScriptVersion);
         scope.Set("session_id", request.SessionId);
         scope.Set("production_run_id", request.ProductionRunId);
@@ -77,6 +78,8 @@ public static class PythonScriptExecutionScope
         scope.Set("target_kind", request.TargetKind);
         scope.Set("target_id", request.TargetId);
         scope.Set("command_name", request.CommandName);
+
+        scope.Exec("import json\nproduction_inputs = json.loads(__openlineops_production_inputs_json)");
 
         scope.Exec("""
             import io

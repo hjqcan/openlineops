@@ -1,3 +1,5 @@
+using OpenLineOps.ContentProtection;
+
 namespace OpenLineOps.Devices.Infrastructure.Execution.ExternalPrograms;
 
 public sealed class ExternalProgramHostOptions
@@ -46,9 +48,7 @@ public sealed class ExternalProgramHostOptions
 
     public bool AppContainerProfileExternallyOwned { get; set; }
 
-    public IList<string> AllowedRestrictedHostAccounts { get; } = new List<string>();
-
-    public IList<string> AllowedRestrictedHostSids { get; } = new List<string>();
+    public string? RestrictedServiceSid { get; set; }
 
     public IList<string> AllowedInheritedEnvironmentVariables { get; } =
         new List<string> { "SystemRoot", "WINDIR" };
@@ -110,38 +110,37 @@ public sealed class ExternalProgramHostOptions
             }
         }
 
-
-        ValidateIdentityAllowlist();
+        ValidateRestrictedServiceIdentity();
     }
 
-    private void ValidateIdentityAllowlist()
+    private void ValidateRestrictedServiceIdentity()
     {
-        var accounts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var account in AllowedRestrictedHostAccounts)
+        if (RestrictedServiceSid is not null)
         {
-            if (!IsCanonical(account) || !accounts.Add(account))
+            if (!WindowsStationServiceIdentityReader.IsCanonicalServiceSid(
+                    RestrictedServiceSid))
             {
                 throw new InvalidOperationException(
-                    "Allowed restricted host accounts must be canonical and unique.");
+                    "RestrictedServiceSid must be an exact canonical Windows service SID.");
             }
         }
 
-        var sids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var sid in AllowedRestrictedHostSids)
-        {
-            if (!IsCanonical(sid) || !sids.Add(sid))
-            {
-                throw new InvalidOperationException(
-                    "Allowed restricted host SIDs must be canonical and unique.");
-            }
-        }
-
-        if (RequireRestrictedHostIdentity
-            && accounts.Count == 0
-            && sids.Count == 0)
+        if (RequireRestrictedHostIdentity && RestrictedServiceSid is null)
         {
             throw new InvalidOperationException(
-                "Restricted external program hosting requires an allowed service account or SID.");
+                "Restricted external program hosting requires one exact Station service SID.");
+        }
+
+        if (RequireImmutableContentProtection && !RequireRestrictedHostIdentity)
+        {
+            throw new InvalidOperationException(
+                "Immutable external program content requires the restricted Station service identity.");
+        }
+
+        if (RequireImmutableContentProtection && !RequireAppContainerIsolation)
+        {
+            throw new InvalidOperationException(
+                "Immutable external program content requires AppContainer isolation.");
         }
 
         if (RequireAppContainerIsolation

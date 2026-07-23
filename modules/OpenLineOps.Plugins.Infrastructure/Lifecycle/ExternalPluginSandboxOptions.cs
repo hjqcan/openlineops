@@ -32,10 +32,10 @@ public sealed class ExternalPluginSandboxOptions
 
     public string? ContainerWorkingDirectory { get; set; }
 
-    public string ContainerExecutablePath { get; set; } = "dotnet";
+    public string ContainerExecutablePath { get; set; } = "OpenLineOps.PluginHost";
 
     public string ContainerArgumentsTemplate { get; set; } =
-        "\"{EntryAssemblyPath}\" --openlineops-plugin-host --manifest \"{ManifestPath}\"";
+        "--openlineops-plugin-host --manifest \"{ManifestPath}\" --entry \"{EntryAssemblyPath}\" --type \"{EntryType}\"";
 
     public string ContainerNetwork { get; set; } = "none";
 

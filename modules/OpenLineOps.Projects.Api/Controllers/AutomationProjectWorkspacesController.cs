@@ -13,6 +13,7 @@ using AppOpenWorkspaceRequest = OpenLineOps.Projects.Application.ProjectWorkspac
 namespace OpenLineOps.Projects.Api.Controllers;
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.EngineeringPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Projects)]
 [Route(OpenLineOpsApiRoutes.AutomationProjectWorkspaces)]
 public sealed class AutomationProjectWorkspacesController : ControllerBase

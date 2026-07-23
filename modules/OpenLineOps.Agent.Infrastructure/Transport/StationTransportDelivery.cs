@@ -76,7 +76,9 @@ public sealed class StationJobDeliveryProcessor(
                         ValidateEnvelope(
                             delivery,
                             nameof(ResourceLeaseChanged),
-                            $"station.{options.AgentId}.{options.StationId}.resource-lease-changed");
+                            StationTransportRoute.ResourceLeaseChanged(
+                                options.AgentId,
+                                options.StationId));
                         var change = JsonSerializer.Deserialize<ResourceLeaseChanged>(
                             delivery.Body.Span,
                             JsonOptions)
@@ -90,7 +92,9 @@ public sealed class StationJobDeliveryProcessor(
                         ValidateEnvelope(
                             delivery,
                             nameof(StationJobRequested),
-                            $"station.{options.AgentId}.{options.StationId}");
+                            StationTransportRoute.Job(
+                                options.AgentId,
+                                options.StationId));
                         var request = JsonSerializer.Deserialize<StationJobRequested>(
                             delivery.Body.Span,
                             JsonOptions)
@@ -151,6 +155,10 @@ public sealed class StationJobDeliveryProcessor(
             || request.RuntimeSessionId == Guid.Empty
             || !string.Equals(request.AgentId, options.AgentId, StringComparison.Ordinal)
             || !string.Equals(request.StationId, options.StationId, StringComparison.Ordinal)
+            || !string.Equals(
+                request.StationSystemId,
+                options.StationSystemId,
+                StringComparison.Ordinal)
             || !Guid.TryParseExact(delivery.MessageId, "D", out var messageId)
             || messageId != request.MessageId
             || !Guid.TryParseExact(delivery.CorrelationId, "D", out var correlationId)
@@ -168,6 +176,10 @@ public sealed class StationJobDeliveryProcessor(
         StationMessageContract.Validate(change);
         if (!string.Equals(change.AgentId, options.AgentId, StringComparison.Ordinal)
             || !string.Equals(change.StationId, options.StationId, StringComparison.Ordinal)
+            || !string.Equals(
+                change.StationSystemId,
+                options.StationSystemId,
+                StringComparison.Ordinal)
             || !Guid.TryParseExact(delivery.MessageId, "D", out var messageId)
             || messageId != change.MessageId
             || !Guid.TryParseExact(delivery.CorrelationId, "D", out var correlationId)
@@ -257,6 +269,9 @@ public static class StationAgentEventPublicationFactory
                 static message => message.JobId,
                 static message => message.AgentId,
                 static message => message.StationId),
+            nameof(AgentPresenceReported) => CreatePresence(
+                options,
+                Deserialize<AgentPresenceReported>(payloadJson)),
             _ => throw new InvalidDataException(
                 $"Unsupported Station Agent event kind '{kind}'.")
         };
@@ -356,7 +371,7 @@ public static class StationAgentEventPublicationFactory
         ValidateIdentity(id, correlation, agent, station, options.AgentId, options.StationId);
         return new StationAgentEventPublication(
             options.EventExchange,
-            $"station.{station}.{kind}",
+            StationTransportRoute.Event(agent, station, kind),
             kind,
             agent,
             id,
@@ -379,6 +394,35 @@ public static class StationAgentEventPublicationFactory
             static value => value.StationId);
     }
 
+    private static StationAgentEventPublication CreatePresence(
+        RabbitMqStationTransportOptions options,
+        AgentPresenceReported message)
+    {
+        AgentPresenceContract.Validate(message);
+        if (!string.Equals(message.AgentId, options.AgentId, StringComparison.Ordinal)
+            || !string.Equals(message.StationId, options.StationId, StringComparison.Ordinal)
+            || !string.Equals(
+                message.StationSystemId,
+                options.StationSystemId,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Agent presence identity does not match the configured Agent/Station target.");
+        }
+
+        return new StationAgentEventPublication(
+            options.EventExchange,
+            StationTransportRoute.Event(
+                message.AgentId,
+                message.StationId,
+                nameof(AgentPresenceReported)),
+            nameof(AgentPresenceReported),
+            message.AgentId,
+            AgentPresenceContract.MessageId(message),
+            message.SessionId,
+            JsonSerializer.SerializeToUtf8Bytes(message, JsonOptions));
+    }
+
     private static StationAgentEventPublication CreateSafety<T>(
         RabbitMqStationSafetyOptions options,
         string kind,
@@ -398,7 +442,7 @@ public static class StationAgentEventPublicationFactory
             options.StationId);
         return new StationAgentEventPublication(
             options.EventExchange,
-            $"station.{stationId}.{routeSuffix}",
+            StationTransportRoute.Event(agentId, stationId, routeSuffix),
             kind,
             agentId,
             messageId,

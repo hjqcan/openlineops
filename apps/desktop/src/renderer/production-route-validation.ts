@@ -8,15 +8,33 @@ import type {
   SaveProductionLineRequest,
   StationProfileResponse
 } from './contracts';
+import {
+  ROUTE_COORDINATE_MAXIMUM,
+  ROUTE_COORDINATE_MINIMUM
+} from './production-route-layout';
 
 export type ProductionDesignerProblemSeverity = 'Error' | 'Warning';
 export type ProductionDesignerProblemScope = 'Line' | 'Product' | 'Operation' | 'Transition';
+
+export const productionProblemFields = {
+  lineDefinitionId: 'line.definition-id',
+  lineDisplayName: 'line.display-name',
+  lineTopologyId: 'line.topology-id',
+  lineEntryOperationId: 'line.entry-operation-id',
+  productModelId: 'product.model-id',
+  productModelCode: 'product.model-code',
+  productIdentityInputKey: 'product.identity-input-key'
+} as const;
+
+export type ProductionDesignerProblemFieldLocator =
+  typeof productionProblemFields[keyof typeof productionProblemFields];
 
 export interface ProductionDesignerProblem {
   id: string;
   severity: ProductionDesignerProblemSeverity;
   scope: ProductionDesignerProblemScope;
   entityId: string;
+  fieldLocator: ProductionDesignerProblemFieldLocator | null;
   message: string;
 }
 
@@ -27,6 +45,8 @@ interface ValidationContext {
   stationProfiles: StationProfileResponse[];
 }
 
+const routeJudgements = ['Passed', 'Failed', 'Aborted', 'Unknown', 'NotApplicable'] as const;
+
 export function validateProductionLine(
   line: SaveProductionLineRequest,
   context: ValidationContext
@@ -36,6 +56,7 @@ export function validateProductionLine(
     scope: ProductionDesignerProblemScope,
     entityId: string,
     message: string,
+    fieldLocator: ProductionDesignerProblemFieldLocator | null = null,
     severity: ProductionDesignerProblemSeverity = 'Error'
   ): void => {
     problems.push({
@@ -43,35 +64,63 @@ export function validateProductionLine(
       severity,
       scope,
       entityId,
+      fieldLocator,
       message
     });
   };
 
-  validatePortableId(line.lineDefinitionId, 'Line ID', 'Line', line.lineDefinitionId || 'line', add);
-  validateCanonicalText(line.displayName, 'Line display name', 'Line', line.lineDefinitionId || 'line', add);
-  validateCanonicalText(line.topologyId, 'Topology reference', 'Line', line.lineDefinitionId || 'line', add);
+  validatePortableId(
+    line.lineDefinitionId,
+    'Line ID',
+    'Line',
+    line.lineDefinitionId || 'line',
+    add,
+    productionProblemFields.lineDefinitionId);
+  validateCanonicalText(
+    line.displayName,
+    'Line display name',
+    'Line',
+    line.lineDefinitionId || 'line',
+    add,
+    productionProblemFields.lineDisplayName);
+  validateCanonicalText(
+    line.topologyId,
+    'Topology reference',
+    'Line',
+    line.lineDefinitionId || 'line',
+    add,
+    productionProblemFields.lineTopologyId);
   validatePortableId(
     line.productModel.productModelId,
     'Product Model ID',
     'Product',
     line.productModel.productModelId || 'product',
-    add);
+    add,
+    productionProblemFields.productModelId);
   validateCanonicalText(
     line.productModel.modelCode,
     'Product model code',
     'Product',
     line.productModel.productModelId || 'product',
-    add);
+    add,
+    productionProblemFields.productModelCode);
   validateCanonicalText(
     line.productModel.identityInputKey,
     'Product identity input key',
     'Product',
     line.productModel.productModelId || 'product',
-    add);
+    add,
+    productionProblemFields.productIdentityInputKey);
 
   if (context.topology && context.topology.topologyId !== line.topologyId) {
-    add('Line', line.lineDefinitionId, 'The line topology reference does not match this Application topology.');
+    add(
+      'Line',
+      line.lineDefinitionId,
+      'The line topology reference does not match this Application topology.',
+      productionProblemFields.lineTopologyId);
   }
+
+  validateRouteLayout(line, add);
 
   if (line.operations.length === 0) {
     add('Line', line.lineDefinitionId, 'A production line requires at least one Operation.');
@@ -137,9 +186,14 @@ export function validateProductionLine(
     'Entry Operation reference',
     'Line',
     line.lineDefinitionId,
-    add);
+    add,
+    productionProblemFields.lineEntryOperationId);
   if (!operationById.has(line.entryOperationId)) {
-    add('Line', line.lineDefinitionId, `Entry Operation '${line.entryOperationId}' does not exist.`);
+    add(
+      'Line',
+      line.lineDefinitionId,
+      `Entry Operation '${line.entryOperationId}' does not exist.`,
+      productionProblemFields.lineEntryOperationId);
   }
 
   for (const transition of line.transitions) {
@@ -150,7 +204,113 @@ export function validateProductionLine(
   validateOutgoingShapes(line.operations, line.transitions, add);
   validateRouteGraph(line, operationById, add);
   validateParallelGroups(line.transitions, add);
+  validateOperationInputMappings(line, operationById, add);
   return problems;
+}
+
+function validateOperationInputMappings(
+  line: SaveProductionLineRequest,
+  operationById: Map<string, ProductionOperationRequest>,
+  add: AddProblem
+): void {
+  const operationIds = new Set(operationById.keys());
+  const forward = line.transitions.filter(transition => (
+    transition.kind !== 'Rework' && transition.targetOperationId !== null));
+  const incoming = new Map<string, RouteTransitionRequest[]>();
+  const outgoing = new Map<string, RouteTransitionRequest[]>();
+  for (const transition of forward) {
+    const target = transition.targetOperationId!;
+    incoming.set(target, [...(incoming.get(target) ?? []), transition]);
+    outgoing.set(
+      transition.sourceOperationId,
+      [...(outgoing.get(transition.sourceOperationId) ?? []), transition]);
+  }
+  const definiteBefore = new Map<string, Set<string>>();
+  const indegrees = new Map<string, number>();
+  for (const operationId of operationIds) {
+    definiteBefore.set(operationId, new Set());
+    indegrees.set(operationId, incoming.get(operationId)?.length ?? 0);
+  }
+  const pending = [...indegrees.entries()]
+    .filter(([, degree]) => degree === 0)
+    .map(([operationId]) => operationId);
+  while (pending.length > 0) {
+    const operationId = pending.shift()!;
+    const incomingTransitions = incoming.get(operationId) ?? [];
+    if (incomingTransitions.length > 0) {
+      const predecessorSets = incomingTransitions.map(transition => new Set([
+        ...(definiteBefore.get(transition.sourceOperationId) ?? []),
+        transition.sourceOperationId
+      ]));
+      const isAndJoin = incomingTransitions.length >= 2
+        && incomingTransitions.every(transition => transition.kind === 'ParallelJoin')
+        && new Set(incomingTransitions.map(transition => transition.parallelGroupId)).size === 1;
+      const guaranteed = new Set(predecessorSets[0]);
+      for (const predecessorSet of predecessorSets.slice(1)) {
+        if (isAndJoin) {
+          for (const candidate of predecessorSet) {
+            guaranteed.add(candidate);
+          }
+        } else {
+          for (const candidate of [...guaranteed]) {
+            if (!predecessorSet.has(candidate)) {
+              guaranteed.delete(candidate);
+            }
+          }
+        }
+      }
+
+      definiteBefore.set(operationId, guaranteed);
+    }
+    for (const transition of outgoing.get(operationId) ?? []) {
+      const target = transition.targetOperationId!;
+      const degree = (indegrees.get(target) ?? 0) - 1;
+      indegrees.set(target, degree);
+      if (degree === 0) {
+        pending.push(target);
+      }
+    }
+  }
+
+  for (const operation of line.operations) {
+    const exact = new Set<string>();
+    const insensitive = new Set<string>();
+    for (const mapping of operation.inputMappings) {
+      validateCanonicalText(
+        mapping.targetInputKey,
+        'Production Context target input key',
+        'Operation',
+        operation.operationId,
+        add);
+      validateCanonicalText(
+        mapping.sourceOutputKey,
+        'Production Context source output key',
+        'Operation',
+        operation.operationId,
+        add);
+      const insensitiveKey = mapping.targetInputKey.toLocaleLowerCase('en-US');
+      if (exact.has(mapping.targetInputKey) || insensitive.has(insensitiveKey)) {
+        add(
+          'Operation',
+          operation.operationId,
+          `Production Context target input key '${mapping.targetInputKey}' is duplicated or differs only by case.`);
+      }
+      exact.add(mapping.targetInputKey);
+      insensitive.add(insensitiveKey);
+      if (!operationById.has(mapping.sourceOperationId)) {
+        add(
+          'Operation',
+          operation.operationId,
+          `Production Context source Operation '${mapping.sourceOperationId}' does not exist.`);
+      } else if (mapping.sourceOperationId === operation.operationId
+          || !definiteBefore.get(operation.operationId)?.has(mapping.sourceOperationId)) {
+        add(
+          'Operation',
+          operation.operationId,
+          `Production Context source Operation '${mapping.sourceOperationId}' must definitely complete first; sibling-branch reads require an AND join.`);
+      }
+    }
+  }
 }
 
 function validateLineControllerAuthorization(
@@ -336,7 +496,7 @@ function validateOperationResources(
         ? (system !== undefined
             && isSystemWithinStation(system.systemId, operation.stationSystemId, topology))
           || (driver !== undefined
-            && ['Simulator', 'DeviceInstance', 'PluginCommand', 'ExternalSystem'].includes(
+            && ['Simulator', 'PluginCommand'].includes(
               driver.providerKind)
             && isSystemWithinStation(
               driver.ownerSystemId,
@@ -358,6 +518,40 @@ function validateOperationResources(
   }
 }
 
+function validateRouteLayout(
+  line: SaveProductionLineRequest,
+  add: AddProblem
+): void {
+  validateUniqueIds(
+    line.routeLayout.operationPositions.map(position => position.operationId),
+    'Line',
+    'Route layout Operation IDs',
+    add);
+  const operationIds = new Set(line.operations.map(operation => operation.operationId));
+  const positionIds = new Set(line.routeLayout.operationPositions.map(position => position.operationId));
+  for (const operation of line.operations) {
+    if (!positionIds.has(operation.operationId)) {
+      add('Operation', operation.operationId, 'Route layout is missing this Operation position.');
+    }
+  }
+  for (const position of line.routeLayout.operationPositions) {
+    if (!operationIds.has(position.operationId)) {
+      add('Line', line.lineDefinitionId, `Route layout position '${position.operationId}' has no matching Operation.`);
+    }
+    if (!Number.isInteger(position.x)
+        || !Number.isInteger(position.y)
+        || position.x < ROUTE_COORDINATE_MINIMUM
+        || position.x > ROUTE_COORDINATE_MAXIMUM
+        || position.y < ROUTE_COORDINATE_MINIMUM
+        || position.y > ROUTE_COORDINATE_MAXIMUM) {
+      add(
+        'Operation',
+        position.operationId || line.lineDefinitionId,
+        `Route coordinates must be integers from ${ROUTE_COORDINATE_MINIMUM} through ${ROUTE_COORDINATE_MAXIMUM}.`);
+    }
+  }
+}
+
 function validateTransition(
   transition: RouteTransitionRequest,
   operationById: Map<string, ProductionOperationRequest>,
@@ -368,7 +562,13 @@ function validateTransition(
   if (!operationById.has(transition.sourceOperationId)) {
     add('Transition', entityId, `Source Operation '${transition.sourceOperationId}' does not exist.`);
   }
-  if (!operationById.has(transition.targetOperationId)) {
+  const hasOperationTarget = transition.targetOperationId !== null;
+  const hasTerminalTarget = transition.terminalDisposition !== null;
+  if (hasOperationTarget === hasTerminalTarget) {
+    add('Transition', entityId, 'A Route Transition requires exactly one target Operation or terminal disposition.');
+  }
+  if (transition.targetOperationId !== null
+      && !operationById.has(transition.targetOperationId)) {
     add('Transition', entityId, `Target Operation '${transition.targetOperationId}' does not exist.`);
   }
   if (transition.sourceOperationId === transition.targetOperationId) {
@@ -417,6 +617,9 @@ function validateTransition(
   }
 
   const parallel = transition.kind === 'ParallelFork' || transition.kind === 'ParallelJoin';
+  if ((transition.kind === 'Rework' || parallel) && transition.terminalDisposition !== null) {
+    add('Transition', entityId, `${transition.kind} must target an Operation.`);
+  }
   if (parallel) {
     validatePortableId(
       transition.parallelGroupId ?? '',
@@ -435,7 +638,8 @@ function validateDuplicateSemanticTransitions(
 ): void {
   const semanticKeys = new Map<string, string>();
   for (const transition of transitions) {
-    const key = `${transition.sourceOperationId}\u0000${transition.targetOperationId}\u0000${transition.kind}`;
+    const target = transition.targetOperationId ?? `terminal:${transition.terminalDisposition ?? ''}`;
+    const key = `${transition.sourceOperationId}\u0000${target}\u0000${transition.kind}`;
     const existing = semanticKeys.get(key);
     if (existing) {
       add(
@@ -457,14 +661,20 @@ function validateOutgoingShapes(
   for (const operation of operations) {
     const outgoing = outgoingByOperation.get(operation.operationId) ?? [];
     if (outgoing.length === 0) {
+      add('Operation', operation.operationId, 'Operation requires an explicit route to an Operation or terminal disposition.');
       continue;
     }
 
     const singleForward = outgoing.length === 1
       && (outgoing[0].kind === 'Sequence' || outgoing[0].kind === 'ParallelJoin');
-    const conditional = outgoing.every(transition => (
+    const judgementRoutes = outgoing.filter(transition => (
       transition.kind === 'Judgement' || transition.kind === 'Rework'));
-    const outputConditions = outgoing.every(transition => transition.kind === 'Condition');
+    const sequenceFallbacks = outgoing.filter(transition => transition.kind === 'Sequence');
+    const conditional = judgementRoutes.length > 0
+      && judgementRoutes.length + sequenceFallbacks.length === outgoing.length;
+    const conditions = outgoing.filter(transition => transition.kind === 'Condition');
+    const outputConditions = conditions.length > 0
+      && conditions.length + sequenceFallbacks.length === outgoing.length;
     const fork = outgoing.length >= 2
       && outgoing.every(transition => transition.kind === 'ParallelFork')
       && new Set(outgoing.map(transition => transition.parallelGroupId)).size === 1;
@@ -472,25 +682,41 @@ function validateOutgoingShapes(
       add(
         'Operation',
         operation.operationId,
-        'Outgoing routes must be one Sequence/Parallel Join, unique Judgement/Rework branches, one typed Condition branch set, or one Parallel Fork group.');
+        'Outgoing routes must be one Sequence/Parallel Join, deterministic Judgement/Rework routes, typed Conditions with fallback, or one Parallel Fork group.');
       continue;
     }
 
     if (conditional) {
-      const judgements = outgoing.map(transition => transition.requiredJudgement);
-      if (new Set(judgements).size !== judgements.length) {
-        add('Operation', operation.operationId, 'Outgoing Result Judgements must be unique.');
+      const judgements = judgementRoutes.filter(transition => transition.kind === 'Judgement');
+      const reworks = judgementRoutes.filter(transition => transition.kind === 'Rework');
+      const judgementValues = judgements.map(transition => transition.requiredJudgement);
+      const reworkValues = reworks.map(transition => transition.requiredJudgement);
+      if (new Set(judgementValues).size !== judgementValues.length
+          || new Set(reworkValues).size !== reworkValues.length
+          || sequenceFallbacks.length > 1) {
+        add('Operation', operation.operationId, 'Judgement and bounded Rework routes must be deterministic.');
+      }
+      const judgementFallbacks = new Set(judgementValues);
+      if (reworks.some(transition => !judgementFallbacks.has(transition.requiredJudgement))) {
+        add('Operation', operation.operationId, 'Every bounded Rework route requires a same-judgement fallback.');
+      }
+      if (sequenceFallbacks.length === 0
+          && routeJudgements.some(judgement => !judgementFallbacks.has(judgement))) {
+        add('Operation', operation.operationId, 'Judgement routes require a Sequence fallback or one branch for every judgement.');
       }
     }
     if (outputConditions) {
-      const outputKeys = new Set(outgoing.map(transition => transition.outputKey));
-      const typedValues = outgoing.map(transition => (
+      const outputKeys = new Set(conditions.map(transition => transition.outputKey));
+      const typedValues = conditions.map(transition => (
         `${transition.expectedOutputKind ?? ''}\u0000${transition.expectedOutputValue ?? ''}`));
       if (outputKeys.size !== 1) {
         add('Operation', operation.operationId, 'Condition branches from one Operation must use one Output Key.');
       }
       if (new Set(typedValues).size !== typedValues.length) {
         add('Operation', operation.operationId, 'Condition branches must use unique typed expected values.');
+      }
+      if (sequenceFallbacks.length !== 1) {
+        add('Operation', operation.operationId, 'Condition branches require exactly one explicit Sequence fallback.');
       }
     }
   }
@@ -502,8 +728,13 @@ function validateRouteGraph(
   add: AddProblem
 ): void {
   const forward = line.transitions.filter(transition => transition.kind !== 'Rework');
-  if (forward.some(transition => transition.targetOperationId === line.entryOperationId)) {
-    add('Line', line.lineDefinitionId, 'The Entry Operation cannot have an incoming forward Route Transition.');
+  const forwardOperations = forward.filter(transition => transition.targetOperationId !== null);
+  if (forwardOperations.some(transition => transition.targetOperationId === line.entryOperationId)) {
+    add(
+      'Line',
+      line.lineDefinitionId,
+      'The Entry Operation cannot have an incoming forward Route Transition.',
+      productionProblemFields.lineEntryOperationId);
   }
 
   if (operationById.has(line.entryOperationId)) {
@@ -519,9 +750,11 @@ function validateRouteGraph(
   }
 
   const indegrees = new Map(line.operations.map(operation => [operation.operationId, 0]));
-  for (const transition of forward) {
-    if (indegrees.has(transition.targetOperationId)) {
-      indegrees.set(transition.targetOperationId, (indegrees.get(transition.targetOperationId) ?? 0) + 1);
+  for (const transition of forwardOperations) {
+    if (indegrees.has(transition.targetOperationId!)) {
+      indegrees.set(
+        transition.targetOperationId!,
+        (indegrees.get(transition.targetOperationId!) ?? 0) + 1);
     }
   }
   const queue = [...indegrees.entries()].filter(([, degree]) => degree === 0).map(([id]) => id);
@@ -532,11 +765,11 @@ function validateRouteGraph(
       continue;
     }
     visited += 1;
-    for (const transition of forward.filter(candidate => candidate.sourceOperationId === operationId)) {
-      const nextDegree = (indegrees.get(transition.targetOperationId) ?? 0) - 1;
-      indegrees.set(transition.targetOperationId, nextDegree);
+    for (const transition of forwardOperations.filter(candidate => candidate.sourceOperationId === operationId)) {
+      const nextDegree = (indegrees.get(transition.targetOperationId!) ?? 0) - 1;
+      indegrees.set(transition.targetOperationId!, nextDegree);
       if (nextDegree === 0) {
-        queue.push(transition.targetOperationId);
+        queue.push(transition.targetOperationId!);
       }
     }
   }
@@ -547,16 +780,15 @@ function validateRouteGraph(
       'The forward route contains a cycle. Every loop must be an explicitly bounded Rework transition.');
   }
 
-  const forwardSources = new Set(forward.map(transition => transition.sourceOperationId));
-  const terminals = line.operations
-    .map(operation => operation.operationId)
-    .filter(operationId => !forwardSources.has(operationId));
+  const terminals = [...new Set(forward
+    .filter(transition => transition.terminalDisposition !== null)
+    .map(transition => transition.sourceOperationId))];
   if (terminals.length === 0) {
-    add('Line', line.lineDefinitionId, 'The route requires at least one terminal Operation.');
+    add('Line', line.lineDefinitionId, 'The route requires at least one explicit terminal disposition.');
   } else {
-    const reverse = forward.map(transition => ({
+    const reverse = forwardOperations.map(transition => ({
       ...transition,
-      sourceOperationId: transition.targetOperationId,
+      sourceOperationId: transition.targetOperationId!,
       targetOperationId: transition.sourceOperationId
     }));
     const completable = new Set<string>();
@@ -573,7 +805,8 @@ function validateRouteGraph(
   }
 
   for (const rework of line.transitions.filter(transition => transition.kind === 'Rework')) {
-    if (!traverse(rework.targetOperationId, forward).has(rework.sourceOperationId)) {
+    if (rework.targetOperationId !== null
+        && !traverse(rework.targetOperationId, forwardOperations).has(rework.sourceOperationId)) {
       add(
         'Transition',
         rework.transitionId,
@@ -586,6 +819,8 @@ function validateParallelGroups(
   transitions: RouteTransitionRequest[],
   add: AddProblem
 ): void {
+  const forwardOperations = transitions.filter(transition => (
+    transition.kind !== 'Rework' && transition.targetOperationId !== null));
   const groups = groupBy(
     transitions.filter(transition => transition.parallelGroupId !== null),
     transition => transition.parallelGroupId ?? '');
@@ -611,6 +846,27 @@ function validateParallelGroups(
         'Transition',
         group[0].transitionId,
         `Parallel Group '${groupId}' must use distinct fork and join Operations.`);
+    }
+    const joinTarget = joins[0].targetOperationId;
+    if (joinTarget !== null) {
+      for (const fork of forks) {
+        if (fork.targetOperationId === null) {
+          continue;
+        }
+        const branch = traverseUntil(
+          fork.targetOperationId,
+          joinTarget,
+          forwardOperations);
+        const terminalSource = [...branch].find(operationId => transitions.some(transition => (
+          transition.sourceOperationId === operationId
+          && transition.terminalDisposition !== null)));
+        if (terminalSource) {
+          add(
+            'Transition',
+            fork.transitionId,
+            `Parallel Group '${groupId}' branch can reach a terminal disposition before its join.`);
+        }
+      }
     }
   }
 }
@@ -647,13 +903,15 @@ function validatePortableId(
   label: string,
   scope: ProductionDesignerProblemScope,
   entityId: string,
-  add: AddProblem
+  add: AddProblem,
+  fieldLocator: ProductionDesignerProblemFieldLocator | null = null
 ): void {
   if (!isPortableId(value)) {
     add(
       scope,
       entityId,
-      `${label} must be a portable segment of at most 128 letters, digits, '.', '-' or '_' characters.`);
+      `${label} must be a portable segment of at most 128 letters, digits, '.', '-' or '_' characters.`,
+      fieldLocator);
   }
 }
 
@@ -662,10 +920,15 @@ function validateCanonicalText(
   label: string,
   scope: ProductionDesignerProblemScope,
   entityId: string,
-  add: AddProblem
+  add: AddProblem,
+  fieldLocator: ProductionDesignerProblemFieldLocator | null = null
 ): void {
   if (!isCanonicalText(value)) {
-    add(scope, entityId, `${label} must be non-empty without leading or trailing whitespace.`);
+    add(
+      scope,
+      entityId,
+      `${label} must be non-empty without leading or trailing whitespace.`,
+      fieldLocator);
   }
 }
 
@@ -685,7 +948,11 @@ function isPortableId(value: string): boolean {
     && !/^(COM|LPT)[1-9]$/.test(base);
 }
 
-function isCanonicalContextValue(kind: string, value: string): boolean {
+const int64Minimum = -9223372036854775808n;
+const int64Maximum = 9223372036854775807n;
+const decimalCoefficientMaximum = 79228162514264337593543950335n;
+
+export function isCanonicalContextValue(kind: string, value: string): boolean {
   if (!isCanonicalText(value)) {
     return false;
   }
@@ -696,15 +963,41 @@ function isCanonicalContextValue(kind: string, value: string): boolean {
       return value === 'true' || value === 'false';
     case 'WholeNumber':
       try {
-        return BigInt(value).toString() === value;
+        const integer = BigInt(value);
+        return integer.toString() === value
+          && integer >= int64Minimum
+          && integer <= int64Maximum;
       } catch {
         return false;
       }
-    case 'FixedPoint':
-      return /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value);
-    case 'DateTimeUtc':
-      return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}\+00:00$/.test(value)
-        && !Number.isNaN(Date.parse(`${value.slice(0, 23)}Z`));
+    case 'FixedPoint': {
+      const match = /^(-?)(0|[1-9]\d*)(?:\.(\d*[1-9]))?$/.exec(value);
+      if (!match) {
+        return false;
+      }
+      const fraction = match[3] ?? '';
+      const coefficient = BigInt(`${match[2]}${fraction}`);
+      return fraction.length <= 28
+        && coefficient <= decimalCoefficientMaximum
+        && !(match[1] === '-' && coefficient === 0n);
+    }
+    case 'DateTimeUtc': {
+      const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{7})\+00:00$/.exec(value);
+      if (!match) {
+        return false;
+      }
+      const [year, month, day, hour, minute, second] = match
+        .slice(1, 7)
+        .map(Number);
+      const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+      const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      return year >= 1
+        && month >= 1 && month <= 12
+        && day >= 1 && day <= daysInMonth[month - 1]
+        && hour <= 23
+        && minute <= 59
+        && second <= 59;
+    }
     default:
       return false;
   }
@@ -724,7 +1017,32 @@ function traverse(
     }
     reachable.add(operationId);
     for (const transition of outgoing.get(operationId) ?? []) {
-      pending.push(transition.targetOperationId);
+      if (transition.targetOperationId !== null) {
+        pending.push(transition.targetOperationId);
+      }
+    }
+  }
+  return reachable;
+}
+
+function traverseUntil(
+  start: string,
+  stop: string,
+  transitions: Array<Pick<RouteTransitionRequest, 'sourceOperationId' | 'targetOperationId'>>
+): Set<string> {
+  const outgoing = groupBy(transitions, transition => transition.sourceOperationId);
+  const reachable = new Set<string>();
+  const pending = [start];
+  while (pending.length > 0) {
+    const operationId = pending.pop();
+    if (!operationId || operationId === stop || reachable.has(operationId)) {
+      continue;
+    }
+    reachable.add(operationId);
+    for (const transition of outgoing.get(operationId) ?? []) {
+      if (transition.targetOperationId !== null) {
+        pending.push(transition.targetOperationId);
+      }
     }
   }
   return reachable;
@@ -748,5 +1066,6 @@ type AddProblem = (
   scope: ProductionDesignerProblemScope,
   entityId: string,
   message: string,
+  fieldLocator?: ProductionDesignerProblemFieldLocator | null,
   severity?: ProductionDesignerProblemSeverity
 ) => void;

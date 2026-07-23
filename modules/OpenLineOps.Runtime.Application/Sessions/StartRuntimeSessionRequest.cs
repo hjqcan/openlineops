@@ -1,4 +1,5 @@
 using OpenLineOps.Runtime.Application.Processes;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Sessions;
 
@@ -12,6 +13,7 @@ public sealed record StartRuntimeSessionRequest
         ConfigurationSnapshotId configurationSnapshotId,
         RecipeSnapshotId recipeSnapshotId,
         ExecutableRuntimeProcess process,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
         RuntimeSessionTraceMetadata traceMetadata)
     {
         if (sessionId.Value == Guid.Empty)
@@ -25,6 +27,9 @@ public sealed record StartRuntimeSessionRequest
             ?? throw new ArgumentNullException(nameof(configurationSnapshotId));
         RecipeSnapshotId = recipeSnapshotId ?? throw new ArgumentNullException(nameof(recipeSnapshotId));
         Process = process ?? throw new ArgumentNullException(nameof(process));
+        ArgumentNullException.ThrowIfNull(productionInputs);
+        ProductionInputs = ProductionContextDocument.Read(
+            ProductionContextDocument.Write(productionInputs));
         TraceMetadata = traceMetadata ?? throw new ArgumentNullException(nameof(traceMetadata));
     }
 
@@ -37,6 +42,8 @@ public sealed record StartRuntimeSessionRequest
     public RecipeSnapshotId RecipeSnapshotId { get; }
 
     public ExecutableRuntimeProcess Process { get; }
+
+    public IReadOnlyDictionary<string, ProductionContextValue> ProductionInputs { get; }
 
     public RuntimeSessionTraceMetadata TraceMetadata { get; }
 }

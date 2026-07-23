@@ -77,15 +77,13 @@ public sealed class ExternalProgramResourceService : IExternalProgramResourceSer
         }
     }
 
-    public async Task<Result<ExternalProgramResource>> SaveAsync(
+    public async Task<Result<ExternalProgramResource>> SaveDefinitionAsync(
         string projectId,
         string applicationId,
         SaveExternalProgramResourceRequest request,
-        IReadOnlyCollection<ExternalProgramFileUpload> uploads,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        ArgumentNullException.ThrowIfNull(uploads);
         var scope = await ResolveScopeAsync(projectId, applicationId, cancellationToken)
             .ConfigureAwait(false);
         if (scope.IsFailure)
@@ -96,11 +94,9 @@ public sealed class ExternalProgramResourceService : IExternalProgramResourceSer
         try
         {
             ExternalProgramResourceValidator.ValidateDefinition(request);
-            ValidateUploads(uploads);
-            var resource = await _repository.SaveAsync(
+            var resource = await _repository.SaveDefinitionAsync(
                     scope.Value,
                     request,
-                    uploads,
                     _clock.UtcNow,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -112,14 +108,15 @@ public sealed class ExternalProgramResourceService : IExternalProgramResourceSer
         }
     }
 
-    public async Task<Result<ExternalProgramResource>> ImportFileAsync(
+    public async Task<Result<ExternalProgramResource>> ImportDirectoryAsync(
         string projectId,
         string applicationId,
-        string resourceId,
-        ExternalProgramFileUpload upload,
+        SaveExternalProgramResourceRequest request,
+        IReadOnlyCollection<ExternalProgramFileUpload> files,
         CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(upload);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(files);
         var scope = await ResolveScopeAsync(projectId, applicationId, cancellationToken)
             .ConfigureAwait(false);
         if (scope.IsFailure)
@@ -129,23 +126,18 @@ public sealed class ExternalProgramResourceService : IExternalProgramResourceSer
 
         try
         {
-            ExternalProgramResourceContract.PortableId(resourceId, nameof(resourceId));
-            ExternalProgramResourceContract.CanonicalRelativePath(
-                upload.ResourceRelativePath,
-                nameof(upload.ResourceRelativePath),
-                ExternalProgramResourceContract.FilesDirectoryName);
-            ValidateUploads([upload]);
-            var resource = await _repository.GetAsync(scope.Value, resourceId, cancellationToken)
-                .ConfigureAwait(false);
-            if (resource is null)
+            ExternalProgramResourceValidator.ValidateDefinition(request);
+            if (request.LaunchKind != ExternalProgramLaunchKind.ApplicationExecutable)
             {
-                return Result.Failure<ExternalProgramResource>(NotFound(resourceId));
+                throw new ArgumentException(
+                    "External program directory imports require ApplicationExecutable launch kind.",
+                    nameof(request));
             }
-
-            return Result.Success(await _repository.ImportFileAsync(
+            ValidateUploads(files);
+            return Result.Success(await _repository.ImportDirectoryAsync(
                     scope.Value,
-                    resourceId,
-                    upload,
+                    request,
+                    files,
                     _clock.UtcNow,
                     cancellationToken)
                 .ConfigureAwait(false));
@@ -218,6 +210,42 @@ public sealed class ExternalProgramResourceService : IExternalProgramResourceSer
             .ConfigureAwait(false);
     }
 
+    public async Task<Result<ExternalProgramProtocolTrialResult>> TrialDefinitionAsync(
+        string projectId,
+        string applicationId,
+        SaveExternalProgramResourceRequest definition,
+        ExternalProgramProtocolTrialRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(request.Inputs);
+        var scope = await ResolveScopeAsync(projectId, applicationId, cancellationToken)
+            .ConfigureAwait(false);
+        if (scope.IsFailure)
+        {
+            return Result.Failure<ExternalProgramProtocolTrialResult>(scope.Error);
+        }
+
+        if (definition.LaunchKind != ExternalProgramLaunchKind.Provider)
+        {
+            return Result.Failure<ExternalProgramProtocolTrialResult>(ApplicationError.Validation(
+                "Projects.ExternalProgramDefinitionTrialProviderRequired",
+                "An unsaved protocol trial is only available for Provider definitions without executable files."));
+        }
+
+        try
+        {
+            var resource = ExternalProgramResourceFactory.Create(definition, [], _clock.UtcNow);
+            return await _trialExecutor.ExecuteAsync(scope.Value, resource, request, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (IsResourceException(exception))
+        {
+            return Result.Failure<ExternalProgramProtocolTrialResult>(InvalidResource(exception));
+        }
+    }
+
     private async ValueTask<ProjectApplicationWorkspaceScope> ResolveScopeValueAsync(
         string projectId,
         string applicationId,
@@ -229,30 +257,35 @@ public sealed class ExternalProgramResourceService : IExternalProgramResourceSer
 
     private static void ValidateUploads(IReadOnlyCollection<ExternalProgramFileUpload> uploads)
     {
-        const int maximumFileCount = 256;
-        const long maximumFileBytes = 512L * 1024 * 1024;
-        const long maximumTotalBytes = 2L * 1024 * 1024 * 1024;
-        if (uploads.Count > maximumFileCount
+        if (uploads.Count is 0 or > ExternalProgramResourceContract.MaximumFrozenFileCount
             || uploads.Any(upload => upload is null
                 || upload.Content is null
                 || !upload.Content.CanRead
                 || upload.SizeBytes < 0
-                || upload.SizeBytes > maximumFileBytes
+                || upload.SizeBytes > ExternalProgramResourceContract.MaximumFrozenFileBytes
                 || !ExternalProgramResourceContract.IsSha256(upload.ExpectedSha256)))
         {
             throw new ArgumentException("External program upload count or size exceeds the supported limit.");
         }
 
-        var paths = new HashSet<string>(StringComparer.Ordinal);
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         long totalBytes = 0;
         foreach (var upload in uploads)
         {
-            if (totalBytes > maximumTotalBytes - upload.SizeBytes)
+            try
             {
-                throw new ArgumentException("External program upload total size exceeds the supported limit.");
+                totalBytes = ExternalProgramResourceContract.AccumulateFrozenFileBytes(
+                    paths.Count,
+                    totalBytes,
+                    upload.SizeBytes);
             }
-
-            totalBytes += upload.SizeBytes;
+            catch (InvalidDataException exception)
+            {
+                throw new ArgumentException(
+                    "External program upload total size exceeds the supported limit.",
+                    nameof(uploads),
+                    exception);
+            }
             var path = ExternalProgramResourceContract.CanonicalRelativePath(
                 upload.ResourceRelativePath,
                 nameof(upload.ResourceRelativePath),

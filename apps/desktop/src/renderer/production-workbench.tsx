@@ -27,6 +27,7 @@ import type {
   ProductionLineResponse,
   ProductionLineSummaryResponse,
   ProductionOperationRequest,
+  ProductionTerminalDisposition,
   RouteJudgement,
   RouteTransitionKind,
   RouteTransitionRequest,
@@ -50,13 +51,30 @@ import {
   createAutoRouteLayout,
   ProductionRouteGraph,
   type DesignerSelection,
-  type GraphPoint
 } from './production-route-graph';
 import {
+  createProductionRouteLayout,
+  moveOperationInRouteLayout,
+  removeOperationFromRouteLayout,
+  renameOperationInRouteLayout,
+  routeLayoutToGraphPoints
+} from './production-route-layout';
+import {
+  focusProductionProblem as focusProductionProblemTarget,
+  focusProductionProblemLocation,
+  parseProductionProblemLocation,
+  serializeProductionProblemLocation
+} from './production-problem-location';
+import {
+  productionProblemFields,
   validateProductionLine,
   type ProductionDesignerProblem
 } from './production-route-validation';
 import { useEditorDocument } from './editor-workspace';
+import {
+  DraftTransitionDialog,
+  useDraftTransitionGuard
+} from './draft-transition-guard';
 import {
   readEditorConflictRevision,
   type EditorDocumentConflict,
@@ -100,6 +118,12 @@ const productionContextValueKinds: ProductionContextValueKind[] = [
   'FixedPoint',
   'DateTimeUtc'
 ];
+const terminalDispositions: ProductionTerminalDisposition[] = [
+  'Completed',
+  'Nonconforming',
+  'Held',
+  'Scrapped'
+];
 
 export function ProductionWorkbench({
   activeWorkspace,
@@ -115,7 +139,6 @@ export function ProductionWorkbench({
   const [configurationSnapshots, setConfigurationSnapshots] = useState<ConfigurationSnapshotResponse[]>([]);
   const [stationProfiles, setStationProfiles] = useState<StationProfileResponse[]>([]);
   const [draft, setDraft] = useState<ProductionLineDraft>(() => createEmptyDraft(null, [], [], []));
-  const [nodePositions, setNodePositions] = useState<Record<string, GraphPoint>>({});
   const [selection, setSelection] = useState<DesignerSelection>(null);
   const [busy, setBusy] = useState(false);
   const [conflict, setConflict] = useState<EditorDocumentConflict | null>(null);
@@ -147,6 +170,9 @@ export function ProductionWorkbench({
       ?? null,
     [activeApplication?.applicationId, activeWorkspace?.project.snapshots, draft.lineDefinitionId]);
   const request = useMemo(() => toRequest(draft), [draft]);
+  const nodePositions = useMemo(
+    () => routeLayoutToGraphPoints(draft.routeLayout),
+    [draft.routeLayout]);
   const problems = useMemo(
     () => validateProductionLine(request, {
       topology,
@@ -209,7 +235,6 @@ export function ProductionWorkbench({
   useEffect(() => {
     const next = createEmptyDraft(null, [], [], []);
     setDraft(next);
-    setNodePositions({});
     setSelection(null);
   }, [scope?.applicationId]);
 
@@ -222,7 +247,6 @@ export function ProductionWorkbench({
         return current;
       }
       const next = createEmptyDraft(topology, publishedFlows, configurationSnapshots, stationProfiles);
-      setNodePositions(createAutoRouteLayout(next.operations, next.transitions, topology).positions);
       setSelection({ kind: 'operation', id: next.entryOperationId });
       return next;
     });
@@ -246,9 +270,13 @@ export function ProductionWorkbench({
   }, [draft.operations, draft.transitions, selection]);
 
   const createNew = useCallback(() => {
-    const next = createEmptyDraft(topology, publishedFlows, configurationSnapshots, stationProfiles);
+    const next = createEmptyDraft(
+      topology,
+      publishedFlows,
+      configurationSnapshots,
+      stationProfiles,
+      true);
     setDraft(next);
-    setNodePositions(createAutoRouteLayout(next.operations, next.transitions, topology).positions);
     setSelection({ kind: 'operation', id: next.entryOperationId });
     setConflict(null);
     onMessage('New production line route created');
@@ -262,17 +290,16 @@ export function ProductionWorkbench({
     try {
       const response = await getProductionLine(line.lineDefinitionId, scope);
       if (!response.ok || !response.body) {
-        onMessage(`Production line load failed: ${response.status} ${response.text}`);
-        return;
+        throw new Error(`${response.status} ${response.text}`);
       }
       const next = fromResponse(response.body);
       setDraft(next);
-      setNodePositions(createAutoRouteLayout(next.operations, next.transitions, topology).positions);
       setSelection({ kind: 'operation', id: next.entryOperationId });
       setConflict(null);
       onMessage(`Production line opened ${response.body.lineDefinitionId}`);
     } catch (error) {
       onMessage(`Production line load failed: ${String(error)}`);
+      throw error;
     } finally {
       setBusy(false);
     }
@@ -282,7 +309,6 @@ export function ProductionWorkbench({
     if (!scope || !draft.persisted) {
       const next = createEmptyDraft(topology, publishedFlows, configurationSnapshots, stationProfiles);
       setDraft(next);
-      setNodePositions(createAutoRouteLayout(next.operations, next.transitions, topology).positions);
       setSelection({ kind: 'operation', id: next.entryOperationId });
       return;
     }
@@ -293,9 +319,14 @@ export function ProductionWorkbench({
     }
     const next = fromResponse(response.body);
     setDraft(next);
-    setNodePositions(createAutoRouteLayout(next.operations, next.transitions, topology).positions);
     setSelection({ kind: 'operation', id: next.entryOperationId });
   }, [configurationSnapshots, draft.lineDefinitionId, draft.persisted, publishedFlows, scope, stationProfiles, topology]);
+
+  const refreshCurrentLine = useCallback(async () => {
+    await refresh();
+    await reloadLine();
+    onMessage('Production line resources refreshed');
+  }, [onMessage, refresh, reloadLine]);
 
   const save = useCallback(async (force = false) => {
     if (!scope || !isBackendHealthy) {
@@ -340,7 +371,9 @@ export function ProductionWorkbench({
       }
       setDraft(fromResponse(response.body));
       setConflict(null);
-      await refresh();
+      await refresh().catch(error => {
+        onMessage(`Production line list refresh failed after save: ${String(error)}`);
+      });
       onMessage(`Production line saved ${response.body.lineDefinitionId}`);
     } catch (error) {
       onMessage(`Production line save failed: ${String(error)}`);
@@ -415,11 +448,15 @@ export function ProductionWorkbench({
       stationSystemId,
       flowDefinitionId,
       configurationSnapshotId,
-      resources: [createStationResource(operationId, stationSystemId)]
+      resources: [createStationResource(operationId, stationSystemId)],
+      inputMappings: []
     };
     const candidateSource = selectedOperation ?? draft.operations[draft.operations.length - 1];
     const canAutoConnect = candidateSource
-      && !draft.transitions.some(transition => transition.sourceOperationId === candidateSource.operationId);
+      && !draft.transitions.some(transition => (
+        transition.sourceOperationId === candidateSource.operationId
+        && transition.kind !== 'Rework'
+        && transition.terminalDisposition === null));
     const transition: RouteTransitionRequest | null = canAutoConnect
       ? {
         transitionId: nextPortableId(
@@ -427,6 +464,7 @@ export function ProductionWorkbench({
           draft.transitions.map(candidate => candidate.transitionId)),
         sourceOperationId: candidateSource.operationId,
         targetOperationId: operationId,
+        terminalDisposition: null,
         kind: 'Sequence',
         requiredJudgement: null,
         maxTraversals: null,
@@ -436,16 +474,45 @@ export function ProductionWorkbench({
         expectedOutputValue: null
       }
       : null;
+    const terminalTransition: RouteTransitionRequest = {
+      transitionId: nextPortableId(
+        'route-terminal',
+        [...draft.transitions, ...(transition ? [transition] : [])]
+          .map(candidate => candidate.transitionId)),
+      sourceOperationId: operationId,
+      targetOperationId: null,
+      terminalDisposition: 'Completed',
+      kind: 'Sequence',
+      requiredJudgement: null,
+      maxTraversals: null,
+      parallelGroupId: null,
+      outputKey: null,
+      expectedOutputKind: null,
+      expectedOutputValue: null
+    };
     const nextOperations = [...draft.operations, operation];
-    const nextTransitions = transition ? [...draft.transitions, transition] : draft.transitions;
+    const priorTransitions = canAutoConnect && candidateSource
+      ? draft.transitions.filter(candidate => !(
+        candidate.sourceOperationId === candidateSource.operationId
+        && candidate.terminalDisposition !== null))
+      : draft.transitions;
+    const nextTransitions = [
+      ...priorTransitions,
+      ...(transition ? [transition] : []),
+      terminalTransition
+    ];
     mutateDraft(current => ({
       ...current,
       entryOperationId: current.operations.length === 0 ? operationId : current.entryOperationId,
       operations: nextOperations,
-      transitions: nextTransitions
+      transitions: nextTransitions,
+      routeLayout: createProductionRouteLayout(
+        nextOperations,
+        {
+          ...createAutoRouteLayout(nextOperations, nextTransitions, topology).positions,
+          ...routeLayoutToGraphPoints(current.routeLayout)
+        })
     }));
-    const auto = createAutoRouteLayout(nextOperations, nextTransitions, topology).positions;
-    setNodePositions(current => ({ ...auto, ...current, [operationId]: auto[operationId] }));
     setSelection({ kind: 'operation', id: operationId });
   }, [configurationSnapshots, draft.operations, draft.transitions, mutateDraft, publishedFlows, selection, stationProfiles, stationSystems, topology]);
 
@@ -463,6 +530,7 @@ export function ProductionWorkbench({
       transitionId: nextPortableId('route', draft.transitions.map(candidate => candidate.transitionId)),
       sourceOperationId,
       targetOperationId,
+      terminalDisposition: null,
       kind: 'Sequence',
       requiredJudgement: null,
       maxTraversals: null,
@@ -479,7 +547,15 @@ export function ProductionWorkbench({
     mutateDraft(current => ({
       ...current,
       entryOperationId: current.entryOperationId === originalId ? next.operationId : current.entryOperationId,
-      operations: current.operations.map(operation => operation.operationId === originalId ? next : operation),
+      operations: current.operations.map(operation => {
+        const candidate = operation.operationId === originalId ? next : operation;
+        return {
+          ...candidate,
+          inputMappings: candidate.inputMappings.map(mapping => mapping.sourceOperationId === originalId
+            ? { ...mapping, sourceOperationId: next.operationId }
+            : mapping)
+        };
+      }),
       lineControllerAuthorizations: current.operations.find(operation =>
         operation.operationId === originalId)?.stationSystemId !== next.stationSystemId
         ? current.lineControllerAuthorizations.filter(authorization =>
@@ -496,21 +572,24 @@ export function ProductionWorkbench({
         targetOperationId: transition.targetOperationId === originalId
           ? next.operationId
           : transition.targetOperationId
-      }))
+      })),
+      routeLayout: originalId === next.operationId
+        ? current.routeLayout
+        : renameOperationInRouteLayout(current.routeLayout, originalId, next.operationId)
     }));
     if (originalId !== next.operationId) {
-      setNodePositions(current => {
-        const renamed = { ...current, [next.operationId]: current[originalId] ?? { x: 40, y: 40 } };
-        delete renamed[originalId];
-        return renamed;
-      });
       setSelection({ kind: 'operation', id: next.operationId });
     }
   }, [mutateDraft]);
 
   const removeOperation = useCallback((operationId: string) => {
     mutateDraft(current => {
-      const operations = current.operations.filter(operation => operation.operationId !== operationId);
+      const operations = current.operations
+        .filter(operation => operation.operationId !== operationId)
+        .map(operation => ({
+          ...operation,
+          inputMappings: operation.inputMappings.filter(mapping => mapping.sourceOperationId !== operationId)
+        }));
       return {
         ...current,
         operations,
@@ -518,15 +597,11 @@ export function ProductionWorkbench({
           authorization => authorization.operationId !== operationId),
         transitions: current.transitions.filter(transition => (
           transition.sourceOperationId !== operationId && transition.targetOperationId !== operationId)),
+        routeLayout: removeOperationFromRouteLayout(current.routeLayout, operationId),
         entryOperationId: current.entryOperationId === operationId
           ? operations[0]?.operationId ?? ''
           : current.entryOperationId
       };
-    });
-    setNodePositions(current => {
-      const next = { ...current };
-      delete next[operationId];
-      return next;
     });
     setSelection(null);
   }, [mutateDraft]);
@@ -550,9 +625,14 @@ export function ProductionWorkbench({
   }, [mutateDraft]);
 
   const autoArrange = useCallback(() => {
-    setNodePositions(createAutoRouteLayout(draft.operations, draft.transitions, topology).positions);
+    mutateDraft(current => ({
+      ...current,
+      routeLayout: createProductionRouteLayout(
+        current.operations,
+        createAutoRouteLayout(current.operations, current.transitions, topology).positions)
+    }));
     onMessage('Route graph arranged by Station and forward order');
-  }, [draft.operations, draft.transitions, onMessage, topology]);
+  }, [mutateDraft, onMessage, topology]);
 
   const selectedOperation = selection?.kind === 'operation'
     ? draft.operations.find(operation => operation.operationId === selection.id) ?? null
@@ -565,20 +645,32 @@ export function ProductionWorkbench({
     id: problem.id,
     severity: problem.severity,
     message: problem.message,
-    targetId: problem.entityId
+    targetId: serializeProductionProblemLocation(problem)
   })), [problems]);
   useEditorDocument({
     dirty: draft.dirty,
+    editRevision: draft,
     canSave: isBackendHealthy && errorCount === 0,
     save: () => save(),
     revert: reloadLine,
     focus: targetId => {
-      const problem = problems.find(candidate => candidate.entityId === targetId);
-      if (problem) focusProblem(problem, setSelection);
+      const location = parseProductionProblemLocation(targetId);
+      if (location) {
+        focusProductionProblemLocation(location, setSelection);
+      }
     },
     problems: editorProblems,
     conflict
   });
+  const draftTransitionGuard = useDraftTransitionGuard({
+    dirty: draft.dirty,
+    canSave: isBackendHealthy && !busy && errorCount === 0,
+    save: () => save(),
+    onError: onMessage
+  });
+  const currentDraftLabel = draft.displayName.trim()
+    || draft.lineDefinitionId.trim()
+    || 'Untitled Production Line';
 
   if (!activeWorkspace || !activeApplication) {
     return (
@@ -600,13 +692,42 @@ export function ProductionWorkbench({
           </span>
         </div>
         <div className="production-command-actions">
-          <span className={draft.dirty ? 'production-dirty-badge dirty' : 'production-dirty-badge'}>
-            {draft.dirty ? 'Unsaved' : 'Saved'}
+          <span
+            className={draft.dirty ? 'production-dirty-badge dirty' : 'production-dirty-badge'}
+            data-testid="production-dirty-state"
+          >
+            {draft.dirty ? 'Unsaved' : draft.persisted ? 'Saved' : 'New'}
           </span>
-          <button type="button" className="button ghost" onClick={() => void refresh()} disabled={busy}>
+          <button
+            type="button"
+            className="button ghost"
+            onClick={() => draftTransitionGuard.request({
+              id: 'production:refresh',
+              title: 'Save changes before refreshing the Line?',
+              detail: 'Refresh reloads the current Line and its Application resources from disk.',
+              currentDocumentLabel: currentDraftLabel,
+              targetLabel: 'the latest Line resources',
+              proceed: choice => choice === 'Save' ? refresh() : refreshCurrentLine()
+            })}
+            disabled={busy || draftTransitionGuard.busy}
+            data-testid="refresh-production-line"
+          >
             <RefreshCw size={14} /> Refresh
           </button>
-          <button type="button" className="button" onClick={createNew} disabled={busy} data-testid="new-production-line">
+          <button
+            type="button"
+            className="button"
+            onClick={() => draftTransitionGuard.request({
+              id: 'production:new',
+              title: 'Save changes before creating a Line?',
+              detail: 'The current production route has unsaved changes. Save them, discard them, or cancel and keep editing.',
+              currentDocumentLabel: currentDraftLabel,
+              targetLabel: 'a new Production Line',
+              proceed: createNew
+            })}
+            disabled={busy || draftTransitionGuard.busy}
+            data-testid="new-production-line"
+          >
             <Plus size={14} /> New Line
           </button>
           <button
@@ -662,7 +783,15 @@ export function ProductionWorkbench({
               type="button"
               key={line.lineDefinitionId}
               className={draft.persisted && draft.lineDefinitionId === line.lineDefinitionId ? 'active' : ''}
-              onClick={() => void openLine(line)}
+              disabled={busy || draftTransitionGuard.busy}
+              onClick={() => draftTransitionGuard.request({
+                id: `production:open:${line.lineDefinitionId}`,
+                title: 'Save changes before opening another Line?',
+                detail: 'Opening another production route replaces the current editor draft.',
+                currentDocumentLabel: currentDraftLabel,
+                targetLabel: line.displayName || line.lineDefinitionId,
+                proceed: () => openLine(line)
+              })}
               data-testid={`production-line-${line.lineDefinitionId}`}
             >
               <Workflow size={15} />
@@ -691,9 +820,10 @@ export function ProductionWorkbench({
               <Field label="Line ID">
                 <input
                   value={draft.lineDefinitionId}
-                  disabled={draft.persisted}
+                  readOnly={draft.persisted}
                   onChange={event => mutateDraft(current => ({ ...current, lineDefinitionId: event.target.value }))}
                   data-testid="production-line-id"
+                  data-production-problem-field={productionProblemFields.lineDefinitionId}
                 />
               </Field>
               <Field label="Display Name">
@@ -701,10 +831,22 @@ export function ProductionWorkbench({
                   value={draft.displayName}
                   onChange={event => mutateDraft(current => ({ ...current, displayName: event.target.value }))}
                   data-testid="production-line-name"
+                  data-production-problem-field={productionProblemFields.lineDisplayName}
                 />
               </Field>
               <Field label="Topology">
-                <input value={draft.topologyId} readOnly />
+                <input
+                  value={draft.topologyId}
+                  readOnly
+                  data-production-problem-field={productionProblemFields.lineTopologyId}
+                />
+              </Field>
+              <Field label="Entry Operation">
+                <input
+                  value={draft.entryOperationId}
+                  readOnly
+                  data-production-problem-field={productionProblemFields.lineEntryOperationId}
+                />
               </Field>
               <Field label="Product Model ID">
                 <input
@@ -714,6 +856,7 @@ export function ProductionWorkbench({
                     productModel: { ...current.productModel, productModelId: event.target.value }
                   }))}
                   data-testid="production-product-model-id"
+                  data-production-problem-field={productionProblemFields.productModelId}
                 />
               </Field>
               <Field label="Model Code">
@@ -724,6 +867,7 @@ export function ProductionWorkbench({
                     productModel: { ...current.productModel, modelCode: event.target.value }
                   }))}
                   data-testid="production-product-model-code"
+                  data-production-problem-field={productionProblemFields.productModelCode}
                 />
               </Field>
               <Field label="Identity Input Key">
@@ -733,6 +877,7 @@ export function ProductionWorkbench({
                     ...current,
                     productModel: { ...current.productModel, identityInputKey: event.target.value }
                   }))}
+                  data-production-problem-field={productionProblemFields.productIdentityInputKey}
                 />
               </Field>
             </div>
@@ -768,7 +913,12 @@ export function ProductionWorkbench({
                     <button type="button" className="button ghost" onClick={addTransition} data-testid="add-route-transition">
                       <Link2 size={14} /> Transition
                     </button>
-                    <button type="button" className="button ghost" onClick={autoArrange}>
+                    <button
+                      type="button"
+                      className="button ghost"
+                      onClick={autoArrange}
+                      data-testid="auto-arrange-production-route"
+                    >
                       <RotateCcw size={14} /> Auto arrange
                     </button>
                   </div>
@@ -785,9 +935,12 @@ export function ProductionWorkbench({
                   operationProblemIds={operationProblemIds}
                   transitionProblemIds={transitionProblemIds}
                   onSelect={setSelection}
-                  onMove={(operationId, position) => setNodePositions(current => ({
+                  onMove={(operationId, position) => mutateDraft(current => ({
                     ...current,
-                    [operationId]: position
+                    routeLayout: moveOperationInRouteLayout(
+                      current.routeLayout,
+                      operationId,
+                      position)
                   }))}
                 />
               </div>
@@ -796,6 +949,7 @@ export function ProductionWorkbench({
                 {selectedOperation ? (
                   <OperationInspector
                     operation={selectedOperation}
+                    operations={draft.operations}
                     operationIndex={draft.operations.findIndex(operation => operation.operationId === selectedOperation.operationId)}
                     entryOperationId={draft.entryOperationId}
                     transitions={draft.transitions}
@@ -819,11 +973,27 @@ export function ProductionWorkbench({
                       ...current,
                       entryOperationId: selectedOperation.operationId
                     }))}
-                    onMarkTerminal={() => mutateDraft(current => ({
+                    onMarkTerminal={terminalDisposition => mutateDraft(current => ({
                       ...current,
-                      transitions: current.transitions.filter(transition => !(
-                        transition.sourceOperationId === selectedOperation.operationId
-                        && transition.kind !== 'Rework'))
+                      transitions: [
+                        ...current.transitions.filter(transition =>
+                          transition.sourceOperationId !== selectedOperation.operationId),
+                        {
+                          transitionId: nextPortableId(
+                            'route-terminal',
+                            current.transitions.map(transition => transition.transitionId)),
+                          sourceOperationId: selectedOperation.operationId,
+                          targetOperationId: null,
+                          terminalDisposition,
+                          kind: 'Sequence',
+                          requiredJudgement: null,
+                          maxTraversals: null,
+                          parallelGroupId: null,
+                          outputKey: null,
+                          expectedOutputKind: null,
+                          expectedOutputValue: null
+                        }
+                      ]
                     }))}
                     onRemove={() => removeOperation(selectedOperation.operationId)}
                   />
@@ -849,12 +1019,14 @@ export function ProductionWorkbench({
           </section>
         </main>
       </div>
+      <DraftTransitionDialog controller={draftTransitionGuard} testIdPrefix="production-draft-transition" />
     </section>
   );
 }
 
 function OperationInspector({
   operation,
+  operations,
   operationIndex,
   entryOperationId,
   transitions,
@@ -871,6 +1043,7 @@ function OperationInspector({
   onRemove
 }: {
   operation: ProductionOperationRequest;
+  operations: ProductionOperationRequest[];
   operationIndex: number;
   entryOperationId: string;
   transitions: RouteTransitionRequest[];
@@ -883,7 +1056,7 @@ function OperationInspector({
   onLineControllerAuthorizationsChange(authorizations: LineControllerAuthorization[]): void;
   onChange(next: ProductionOperationRequest): void;
   onMakeEntry(): void;
-  onMarkTerminal(): void;
+  onMarkTerminal(disposition: ProductionTerminalDisposition): void;
   onRemove(): void;
 }): React.ReactElement {
   const matchingConfigurations = findMatchingConfigurationSnapshots(
@@ -894,6 +1067,12 @@ function OperationInspector({
     stationProfiles);
   const forwardTransitions = transitions.filter(transition => (
     transition.sourceOperationId === operation.operationId && transition.kind !== 'Rework'));
+  const explicitTerminals = forwardTransitions.filter(transition => transition.terminalDisposition !== null);
+  const explicitTerminalDispositions = terminalDispositions.filter(disposition =>
+    explicitTerminals.some(transition => transition.terminalDisposition === disposition));
+  const terminalReplacement = explicitTerminalDispositions.length === 1
+    ? explicitTerminalDispositions[0]
+    : 'Completed';
   const updateBinding = (changes: Partial<Pick<ProductionOperationRequest, 'stationSystemId' | 'flowDefinitionId'>>): void => {
     const next = { ...operation, ...changes };
     if (changes.stationSystemId !== undefined
@@ -970,6 +1149,11 @@ function OperationInspector({
         topology={topology}
         onChange={resources => onChange({ ...operation, resources })}
       />
+      <OperationInputMappingsEditor
+        operation={operation}
+        operations={operations}
+        onChange={inputMappings => onChange({ ...operation, inputMappings })}
+      />
       <LineControllerAuthorizationEditor
         operation={operation}
         topology={topology}
@@ -978,14 +1162,35 @@ function OperationInspector({
       />
       <div className="production-disposition-card">
         <span>ROUTE DISPOSITION</span>
-        <strong>{forwardTransitions.length === 0 ? 'Completed (terminal)' : 'In process'}</strong>
+        <strong>
+          {explicitTerminalDispositions.length === 0
+            ? 'In process'
+            : explicitTerminalDispositions.length === 1
+              ? `${explicitTerminalDispositions[0]} (terminal)`
+              : `${explicitTerminalDispositions.join(' / ')} (conditional terminals)`}
+        </strong>
         <small>
-          {forwardTransitions.length === 0
-            ? 'No forward route leaves this Operation; the product completes here.'
+          {explicitTerminalDispositions.length > 0
+            ? `${explicitTerminals.length} explicit conditional route edge${explicitTerminals.length === 1 ? '' : 's'} determine the product disposition.`
             : `${forwardTransitions.length} forward Route Transition${forwardTransitions.length === 1 ? '' : 's'} continue execution.`}
         </small>
-        <button type="button" className="button ghost" onClick={onMarkTerminal} disabled={forwardTransitions.length === 0}>
-          Mark terminal
+        <label>
+          <span>Replace all outgoing routes with terminal</span>
+          <select
+            value={terminalReplacement}
+            onChange={event => onMarkTerminal(event.target.value as ProductionTerminalDisposition)}
+          >
+            {terminalDispositions.map(disposition => (
+              <option key={disposition} value={disposition}>{disposition}</option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          className="button ghost"
+          onClick={() => onMarkTerminal(terminalReplacement)}
+        >
+          {forwardTransitions.length > 0 ? 'Replace routes with terminal' : 'Mark terminal'}
         </button>
       </div>
       <div className="production-reference-note">
@@ -1000,6 +1205,107 @@ function OperationInspector({
           <Trash2 size={13} /> Remove
         </button>
       </footer>
+    </section>
+  );
+}
+
+function OperationInputMappingsEditor({
+  operation,
+  operations,
+  onChange
+}: {
+  operation: ProductionOperationRequest;
+  operations: ProductionOperationRequest[];
+  onChange(inputMappings: ProductionOperationRequest['inputMappings']): void;
+}): React.ReactElement {
+  const sources = operations.filter(candidate => candidate.operationId !== operation.operationId);
+  const addMapping = (): void => {
+    const source = sources[0];
+    onChange([
+      ...operation.inputMappings,
+      {
+        targetInputKey: nextPortableId(
+          'input',
+          operation.inputMappings.map(mapping => mapping.targetInputKey)),
+        sourceOperationId: source?.operationId ?? '',
+        sourceOutputKey: 'result',
+        expectedValueKind: 'Text'
+      }
+    ]);
+  };
+  return (
+    <section className="production-resource-editor" data-testid="operation-input-mapping-editor">
+      <header>
+        <span><small>PRODUCTION CONTEXT</small><strong>Explicit operation inputs</strong></span>
+        <button type="button" className="button ghost" onClick={addMapping} disabled={sources.length === 0}>
+          <Plus size={13} /> Input
+        </button>
+      </header>
+      {operation.inputMappings.length === 0 ? (
+        <p className="production-resource-empty">
+          This Operation consumes no output from an earlier Operation.
+        </p>
+      ) : (
+        <div className="production-resource-list">
+          {operation.inputMappings.map((mapping, index) => (
+            <article key={`${mapping.targetInputKey}:${index}`}>
+              <label>
+                <span>Target input key</span>
+                <input
+                  value={mapping.targetInputKey}
+                  onChange={event => onChange(operation.inputMappings.map((candidate, candidateIndex) => (
+                    candidateIndex === index ? { ...candidate, targetInputKey: event.target.value } : candidate)))}
+                />
+              </label>
+              <label>
+                <span>Source Operation</span>
+                <select
+                  value={mapping.sourceOperationId}
+                  onChange={event => onChange(operation.inputMappings.map((candidate, candidateIndex) => (
+                    candidateIndex === index ? { ...candidate, sourceOperationId: event.target.value } : candidate)))}
+                >
+                  <option value="">Select predecessor</option>
+                  {sources.map(source => (
+                    <option key={source.operationId} value={source.operationId}>{source.displayName}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Source output key</span>
+                <input
+                  value={mapping.sourceOutputKey}
+                  onChange={event => onChange(operation.inputMappings.map((candidate, candidateIndex) => (
+                    candidateIndex === index ? { ...candidate, sourceOutputKey: event.target.value } : candidate)))}
+                />
+              </label>
+              <label>
+                <span>Expected kind</span>
+                <select
+                  value={mapping.expectedValueKind}
+                  onChange={event => onChange(operation.inputMappings.map((candidate, candidateIndex) => (
+                    candidateIndex === index
+                      ? { ...candidate, expectedValueKind: event.target.value as ProductionContextValueKind }
+                      : candidate)))}
+                >
+                  <option value="Text">Text</option>
+                  <option value="Boolean">Boolean</option>
+                  <option value="WholeNumber">Whole number</option>
+                  <option value="FixedPoint">Fixed point</option>
+                  <option value="DateTimeUtc">UTC date/time</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                className="button danger"
+                aria-label={`Remove input ${mapping.targetInputKey}`}
+                onClick={() => onChange(operation.inputMappings.filter((_, candidateIndex) => candidateIndex !== index))}
+              >
+                <Trash2 size={13} />
+              </button>
+            </article>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -1195,7 +1501,7 @@ function operationResourceTargets(
         .map(system => ({ id: system.systemId, label: system.displayName, kind: 'System' })),
       ...topology.driverBindings
         .filter(binding => systemWithinStation(binding.ownerSystemId, stationSystemId, topology)
-          && ['Simulator', 'DeviceInstance', 'PluginCommand', 'ExternalSystem'].includes(
+          && ['Simulator', 'PluginCommand'].includes(
             binding.providerKind))
         .map(binding => ({ id: binding.bindingId, label: binding.providerKey, kind: binding.providerKind }))
     ];
@@ -1234,7 +1540,7 @@ function LineControllerAuthorizationEditor({
   const controllerBindings = (topology?.driverBindings ?? []).filter(binding => (
     controllerResourceIds.has(binding.bindingId)
     && systemWithinStation(binding.ownerSystemId, operation.stationSystemId, topology)
-    && ['Simulator', 'DeviceInstance', 'PluginCommand', 'ExternalSystem'].includes(
+    && ['Simulator', 'PluginCommand'].includes(
       binding.providerKind)));
   const remoteStations = (topology?.systems ?? []).filter(system => (
     system.kind === 'Station' && system.systemId !== operation.stationSystemId));
@@ -1492,30 +1798,95 @@ function TransitionInspector({
         <Field label="Source Operation">
           <select
             value={transition.sourceOperationId}
-            onChange={event => onChange({ ...transition, sourceOperationId: event.target.value })}
+            onChange={event => {
+              const sourceOperationId = event.target.value;
+              onChange({
+                ...transition,
+                sourceOperationId,
+                targetOperationId: transition.targetOperationId === sourceOperationId
+                  ? operations.find(operation => operation.operationId !== sourceOperationId)?.operationId ?? null
+                  : transition.targetOperationId
+              });
+            }}
           >
             {operations.map(operation => (
               <option key={operation.operationId} value={operation.operationId}>{operation.displayName}</option>
             ))}
           </select>
         </Field>
+        <Field label="Target type">
+          <select
+            value={transition.terminalDisposition === null ? 'Operation' : 'Terminal'}
+            disabled={transition.kind === 'Rework'
+              || transition.kind === 'ParallelFork'
+              || transition.kind === 'ParallelJoin'}
+            onChange={event => onChange(event.target.value === 'Terminal'
+              ? {
+                ...transition,
+                targetOperationId: null,
+                terminalDisposition: 'Completed'
+              }
+              : {
+                ...transition,
+                targetOperationId: operations.find(operation => (
+                  operation.operationId !== transition.sourceOperationId))?.operationId ?? null,
+                terminalDisposition: null
+              })}
+          >
+            <option value="Operation">Operation</option>
+            <option value="Terminal">Terminal disposition</option>
+          </select>
+        </Field>
+        {transition.terminalDisposition === null ? (
         <Field label="Target Operation">
           <select
-            value={transition.targetOperationId}
-            onChange={event => onChange({ ...transition, targetOperationId: event.target.value })}
+            value={transition.targetOperationId ?? ''}
+            onChange={event => onChange({
+              ...transition,
+              targetOperationId: event.target.value,
+              terminalDisposition: null
+            })}
           >
-            {operations.map(operation => (
+            {operations.filter(operation => (
+              operation.operationId !== transition.sourceOperationId)).map(operation => (
               <option key={operation.operationId} value={operation.operationId}>{operation.displayName}</option>
             ))}
           </select>
         </Field>
+        ) : (
+        <Field label="Terminal disposition">
+          <select
+            value={transition.terminalDisposition}
+            onChange={event => onChange({
+              ...transition,
+              targetOperationId: null,
+              terminalDisposition: event.target.value as ProductionTerminalDisposition
+            })}
+          >
+            {terminalDispositions.map(disposition => (
+              <option key={disposition} value={disposition}>{disposition}</option>
+            ))}
+          </select>
+        </Field>
+        )}
         <Field label="Transition Kind">
           <select
             value={transition.kind}
             data-testid="route-transition-kind"
-            onChange={event => onChange(normalizeTransitionKind(
-              transition,
-              event.target.value as RouteTransitionKind))}
+            onChange={event => {
+              const kind = event.target.value as RouteTransitionKind;
+              const normalized = normalizeTransitionKind(transition, kind);
+              onChange(kind === 'Rework' || kind === 'ParallelFork' || kind === 'ParallelJoin'
+                ? {
+                  ...normalized,
+                  targetOperationId: normalized.targetOperationId
+                    ?? operations.find(operation => (
+                      operation.operationId !== normalized.sourceOperationId))?.operationId
+                    ?? null,
+                  terminalDisposition: null
+                }
+                : normalized);
+            }}
           >
             {transitionKinds.map(kind => <option key={kind} value={kind}>{transitionKindLabel(kind)}</option>)}
           </select>
@@ -1660,7 +2031,8 @@ function createEmptyDraft(
   topology: AutomationTopologyResponse | null,
   publishedFlows: ProcessDefinitionSummary[],
   configurationSnapshots: ConfigurationSnapshotResponse[],
-  stationProfiles: StationProfileResponse[]
+  stationProfiles: StationProfileResponse[],
+  dirty = false
 ): ProductionLineDraft {
   const seed = Date.now().toString(36);
   const station = topology?.systems.find(system => system.kind === 'Station');
@@ -1677,11 +2049,14 @@ function createEmptyDraft(
     stationSystemId: station?.systemId ?? '',
     flowDefinitionId,
     configurationSnapshotId,
-    resources: [createStationResource('operation-1', station?.systemId ?? '')]
+    resources: [createStationResource('operation-1', station?.systemId ?? '')],
+    inputMappings: []
   };
+  const operations = [operation];
+  const transitions: RouteTransitionRequest[] = [];
   return {
     persisted: false,
-    dirty: true,
+    dirty,
     revision: '',
     lineDefinitionId: `line-${seed}`,
     displayName: 'New Production Line',
@@ -1692,9 +2067,12 @@ function createEmptyDraft(
       identityInputKey: 'serialNumber'
     },
     entryOperationId: operation.operationId,
-    operations: [operation],
-    transitions: [],
-    lineControllerAuthorizations: []
+    operations,
+    transitions,
+    lineControllerAuthorizations: [],
+    routeLayout: createProductionRouteLayout(
+      operations,
+      createAutoRouteLayout(operations, transitions, topology).positions)
   };
 }
 
@@ -1710,11 +2088,15 @@ function fromResponse(response: ProductionLineResponse): ProductionLineDraft {
     entryOperationId: response.entryOperationId,
     operations: response.operations.map(operation => ({
       ...operation,
-      resources: operation.resources.map(resource => ({ ...resource }))
+      resources: operation.resources.map(resource => ({ ...resource })),
+      inputMappings: operation.inputMappings.map(mapping => ({ ...mapping }))
     })),
     transitions: response.transitions.map(transition => ({ ...transition })),
     lineControllerAuthorizations: response.lineControllerAuthorizations.map(
-      authorization => ({ ...authorization }))
+      authorization => ({ ...authorization })),
+    routeLayout: {
+      operationPositions: response.routeLayout.operationPositions.map(position => ({ ...position }))
+    }
   };
 }
 
@@ -1727,11 +2109,15 @@ function toRequest(draft: ProductionLineDraft): SaveProductionLineRequest {
     entryOperationId: draft.entryOperationId,
     operations: draft.operations.map(operation => ({
       ...operation,
-      resources: operation.resources.map(resource => ({ ...resource }))
+      resources: operation.resources.map(resource => ({ ...resource })),
+      inputMappings: operation.inputMappings.map(mapping => ({ ...mapping }))
     })),
     transitions: draft.transitions.map(transition => ({ ...transition })),
     lineControllerAuthorizations: draft.lineControllerAuthorizations.map(
-      authorization => ({ ...authorization }))
+      authorization => ({ ...authorization })),
+    routeLayout: {
+      operationPositions: draft.routeLayout.operationPositions.map(position => ({ ...position }))
+    }
   };
 }
 
@@ -1789,6 +2175,8 @@ function normalizeTransitionKind(
     return {
       ...transition,
       kind,
+      targetOperationId: transition.targetOperationId,
+      terminalDisposition: null,
       requiredJudgement: transition.requiredJudgement ?? 'Failed',
       maxTraversals: transition.maxTraversals ?? 1,
       parallelGroupId: null,
@@ -1801,6 +2189,8 @@ function normalizeTransitionKind(
     return {
       ...transition,
       kind,
+      targetOperationId: transition.targetOperationId,
+      terminalDisposition: null,
       requiredJudgement: null,
       maxTraversals: null,
       parallelGroupId: transition.parallelGroupId ?? 'parallel-1',
@@ -1844,7 +2234,7 @@ function conditionValuePlaceholder(kind: ProductionContextValueKind | null): str
   switch (kind) {
     case 'Boolean': return 'true or false';
     case 'WholeNumber': return '-12';
-    case 'FixedPoint': return '12.50';
+    case 'FixedPoint': return '12.5';
     case 'DateTimeUtc': return '2026-07-11T08:00:00.0000000+00:00';
     default: return 'exact text';
   }
@@ -1854,13 +2244,7 @@ function focusProblem(
   problem: ProductionDesignerProblem,
   setSelection: React.Dispatch<React.SetStateAction<DesignerSelection>>
 ): void {
-  if (problem.scope === 'Operation') {
-    setSelection({ kind: 'operation', id: problem.entityId });
-  } else if (problem.scope === 'Transition') {
-    setSelection({ kind: 'transition', id: problem.entityId });
-  } else {
-    setSelection(null);
-  }
+  focusProductionProblemTarget(problem, setSelection);
 }
 
 function nextPortableId(prefix: string, existingIds: string[]): string {

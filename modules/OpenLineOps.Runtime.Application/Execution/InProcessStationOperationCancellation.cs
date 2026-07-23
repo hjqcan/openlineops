@@ -77,6 +77,10 @@ public sealed class InProcessStationOperationRegistry
             (_execution ?? throw new ObjectDisposedException(nameof(ExecutionLease)))
             .CancellationToken;
 
+        public bool CancelRequested =>
+            (_execution ?? throw new ObjectDisposedException(nameof(ExecutionLease)))
+            .CancelRequested;
+
         public void Dispose()
         {
             var execution = Interlocked.Exchange(ref _execution, null);
@@ -95,6 +99,8 @@ public sealed class InProcessStationOperationRegistry
         private int _cancelRequested;
 
         public CancellationToken CancellationToken => _cancellation.Token;
+
+        public bool CancelRequested => Volatile.Read(ref _cancelRequested) != 0;
 
         public bool RequestCancel()
         {

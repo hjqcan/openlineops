@@ -165,8 +165,7 @@ public static class OperationResourceTopologyValidator
                 authorization.ControllerSystemId,
                 operation.StationSystemId,
                 topology)
-            || controllerBinding.ProviderKind is not (
-                "Simulator" or "DeviceInstance" or "PluginCommand" or "ExternalSystem"))
+            || controllerBinding.ProviderKind is not ("Simulator" or "PluginCommand"))
         {
             return Failure(
                 "LineControllerProviderInvalid",
@@ -331,8 +330,7 @@ public static class OperationResourceTopologyValidator
             resource.TopologyTargetId,
             StringComparison.Ordinal));
         if (binding is null
-            || binding.ProviderKind is not (
-                "Simulator" or "DeviceInstance" or "PluginCommand" or "ExternalSystem")
+            || binding.ProviderKind is not ("Simulator" or "PluginCommand")
             || !topology.Systems.Any(candidate =>
                 string.Equals(candidate.SystemId, binding.OwnerSystemId, StringComparison.Ordinal)
                 && IsWithinStation(candidate.SystemId, operation.StationSystemId, topology)))
@@ -480,7 +478,7 @@ public static class OperationResourceTopologyValidator
                     && IsWithinStation(system.SystemId, operation.StationSystemId, topology)))
             .ToArray();
         if (bindings.Length == 0
-            || bindings.All(binding => binding.ProviderKind is not "DeviceInstance" and not "PluginCommand"))
+            || bindings.All(binding => binding.ProviderKind is not "PluginCommand"))
         {
             return true;
         }

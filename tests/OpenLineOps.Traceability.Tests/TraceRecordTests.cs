@@ -56,7 +56,7 @@ public sealed class TraceRecordTests
             "station-a",
             "capability.inspect",
             "Inspect",
-            TraceCommandStatus.Completed,
+            ExecutionStatus.Completed,
             ResultJudgement.Failed,
             TraceTestData.BaseTimeUtc,
             TraceTestData.BaseTimeUtc.AddMinutes(1),
@@ -66,8 +66,32 @@ public sealed class TraceRecordTests
             "ok",
             null);
 
-        Assert.Equal(TraceCommandStatus.Completed, command.Status);
+        Assert.Equal(ExecutionStatus.Completed, command.ExecutionStatus);
         Assert.Equal(ResultJudgement.Failed, command.ResultJudgement);
+    }
+
+    [Fact]
+    public void CommandCancellationRequiresAbortedJudgement()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => new TraceCommandRecord(
+            new RuntimeCommandId(Guid.NewGuid()),
+            Guid.NewGuid(),
+            "action.cancel",
+            TraceTargetKind.System,
+            "station-a",
+            "capability.inspect",
+            "Inspect",
+            ExecutionStatus.Canceled,
+            ResultJudgement.Unknown,
+            TraceTestData.BaseTimeUtc,
+            TraceTestData.BaseTimeUtc.AddMinutes(1),
+            TraceTestData.BaseTimeUtc.AddSeconds(1),
+            TraceTestData.BaseTimeUtc.AddSeconds(2),
+            TraceTestData.BaseTimeUtc.AddSeconds(3),
+            null,
+            "Canceled by operator."));
+
+        Assert.Equal("resultJudgement", exception.ParamName);
     }
 
     [Fact]

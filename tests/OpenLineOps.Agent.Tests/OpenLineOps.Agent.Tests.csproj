@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="RabbitMQ.Client" />
     <PackageReference Include="xunit" />
@@ -31,11 +32,91 @@
     <ProjectReference Include="..\..\modules\OpenLineOps.Processes.Application\OpenLineOps.Processes.Application.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Agent.Contracts\OpenLineOps.Agent.Contracts.csproj" />
     <ProjectReference Include="..\OpenLineOps.StationRuntime.TestHelper\OpenLineOps.StationRuntime.TestHelper.csproj" />
+    <ProjectReference Include="..\OpenLineOps.WindowsServiceToken.TestRelay\OpenLineOps.WindowsServiceToken.TestRelay.csproj"
+                      ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\..\src\OpenLineOps.StationRuntime\OpenLineOps.StationRuntime.csproj"
                       ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\src\OpenLineOps.PluginHost\OpenLineOps.PluginHost.csproj"
+                      ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\samples\plugins\OpenLineOps.SamplePlugins.LoopbackDevice\OpenLineOps.SamplePlugins.LoopbackDevice.csproj"
+                      ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\src\OpenLineOps.ScriptWorker\OpenLineOps.ScriptWorker.csproj" />
+    <ProjectReference Include="..\..\src\OpenLineOps.LeastPrivilegeLauncher\OpenLineOps.LeastPrivilegeLauncher.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.Agent\OpenLineOps.Agent.csproj" />
+    <ProjectReference Include="..\..\src\OpenLineOps.Api\OpenLineOps.Api.csproj"
+                      Aliases="OpenLineOpsApi" />
     <ProjectReference Include="..\..\tools\OpenLineOps.VendorTestHelper\OpenLineOps.VendorTestHelper.csproj"
                       ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <Target Name="StageLeastPrivilegeLauncherTestBundle"
+          AfterTargets="Build"
+          Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <PropertyGroup>
+      <_LauncherOutputDir>$(MSBuildProjectDirectory)\..\..\src\OpenLineOps.LeastPrivilegeLauncher\bin\$(Configuration)\$(TargetFramework)\</_LauncherOutputDir>
+      <_ScriptWorkerOutputDir>$(MSBuildProjectDirectory)\..\..\src\OpenLineOps.ScriptWorker\bin\$(Configuration)\$(TargetFramework)\</_ScriptWorkerOutputDir>
+      <_LauncherTestBundleDir>$(TargetDir)least-privilege-launcher-bundle\</_LauncherTestBundleDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.ContentProtection.dll" />
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.ProcessIsolation.dll" />
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.LeastPrivilegeLauncher.dll" />
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.LeastPrivilegeLauncher.exe" />
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.LeastPrivilegeLauncher.deps.json" />
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.LeastPrivilegeLauncher.runtimeconfig.json" />
+      <_LauncherTestBundleRootFile Include="$(_ScriptWorkerOutputDir)*.dll"
+                                   Exclude="$(_ScriptWorkerOutputDir)OpenLineOps.ContentProtection.dll;$(_ScriptWorkerOutputDir)OpenLineOps.ProcessIsolation.dll;$(_ScriptWorkerOutputDir)OpenLineOps.LeastPrivilegeLauncher.dll" />
+      <_LauncherTestBundleRootFile Include="$(_ScriptWorkerOutputDir)OpenLineOps.ScriptWorker.exe" />
+      <_LauncherTestBundleRootFile Include="$(_ScriptWorkerOutputDir)OpenLineOps.ScriptWorker.deps.json" />
+      <_LauncherTestBundleRootFile Include="$(_ScriptWorkerOutputDir)OpenLineOps.ScriptWorker.runtimeconfig.json" />
+      <_LauncherTestBundleResource Include="$(_ScriptWorkerOutputDir)**\*.resources.dll" />
+      <_LauncherTestBundleWinX64 Include="$(_ScriptWorkerOutputDir)runtimes\win-x64\**\*" />
+      <_LauncherTestBundleWinX86 Include="$(_ScriptWorkerOutputDir)runtimes\win-x86\**\*" />
+      <_LauncherTestBundleWinArm64 Include="$(_ScriptWorkerOutputDir)runtimes\win-arm64\**\*" />
+    </ItemGroup>
+    <RemoveDir Directories="$(_LauncherTestBundleDir)" />
+    <MakeDir Directories="$(_LauncherTestBundleDir)" />
+    <Copy SourceFiles="@(_LauncherTestBundleRootFile)"
+          DestinationFolder="$(_LauncherTestBundleDir)"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_LauncherTestBundleResource)"
+          DestinationFiles="@(_LauncherTestBundleResource->'$(_LauncherTestBundleDir)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_LauncherTestBundleWinX64)"
+          DestinationFiles="@(_LauncherTestBundleWinX64->'$(_LauncherTestBundleDir)runtimes\win-x64\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_LauncherTestBundleWinX86)"
+          DestinationFiles="@(_LauncherTestBundleWinX86->'$(_LauncherTestBundleDir)runtimes\win-x86\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_LauncherTestBundleWinArm64)"
+          DestinationFiles="@(_LauncherTestBundleWinArm64->'$(_LauncherTestBundleDir)runtimes\win-arm64\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <ItemGroup>
+      <FileWrites Include="$(_LauncherTestBundleDir)**\*" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="StageWindowsServiceTokenTestRelayBundle"
+          AfterTargets="Build"
+          Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <PropertyGroup>
+      <_ServiceTokenTestRelayOutputDir>$(MSBuildProjectDirectory)\..\OpenLineOps.WindowsServiceToken.TestRelay\bin\$(Configuration)\$(TargetFramework)\win-x64\</_ServiceTokenTestRelayOutputDir>
+      <_ServiceTokenTestRelayBundleDir>$(TargetDir)windows-service-token-test-relay\</_ServiceTokenTestRelayBundleDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <_ServiceTokenTestRelayFile Include="$(_ServiceTokenTestRelayOutputDir)**\*"
+                                  Exclude="$(_ServiceTokenTestRelayOutputDir)**\*.pdb" />
+    </ItemGroup>
+    <Error Condition="!Exists('$(_ServiceTokenTestRelayOutputDir)OpenLineOps.WindowsServiceToken.TestRelay.exe')"
+           Text="The Windows service-token Test Relay was not built before Agent test staging." />
+    <RemoveDir Directories="$(_ServiceTokenTestRelayBundleDir)" />
+    <MakeDir Directories="$(_ServiceTokenTestRelayBundleDir)" />
+    <Copy SourceFiles="@(_ServiceTokenTestRelayFile)"
+          DestinationFiles="@(_ServiceTokenTestRelayFile->'$(_ServiceTokenTestRelayBundleDir)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+    <ItemGroup>
+      <FileWrites Include="$(_ServiceTokenTestRelayBundleDir)**\*" />
+    </ItemGroup>
+  </Target>
 
 </Project>

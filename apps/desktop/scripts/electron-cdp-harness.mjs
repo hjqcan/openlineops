@@ -53,11 +53,10 @@ export async function stopProcess(child, timeoutMilliseconds = 8_000) {
 }
 
 export class ElectronCdpHarness {
-  constructor({ executablePath, workingDirectory, userDataDirectory, apiBaseUrl, environment, logs }) {
+  constructor({ executablePath, workingDirectory, userDataDirectory, environment, logs }) {
     this.executablePath = executablePath;
     this.workingDirectory = workingDirectory;
     this.userDataDirectory = userDataDirectory;
-    this.apiBaseUrl = apiBaseUrl;
     this.environment = environment;
     this.logs = logs;
     this.process = null;
@@ -67,25 +66,34 @@ export class ElectronCdpHarness {
 
   async start() {
     this.cdpPort = await getFreePort();
+    const launchArguments = [
+      `--remote-debugging-port=${this.cdpPort}`,
+      '--remote-debugging-address=127.0.0.1',
+      '--disable-gpu'
+    ];
+    if (this.userDataDirectory !== null && this.userDataDirectory !== undefined) {
+      launchArguments.push(`--user-data-dir=${this.userDataDirectory}`);
+    }
     this.process = spawnCaptured(
       this.executablePath,
-      [
-        `--remote-debugging-port=${this.cdpPort}`,
-        '--disable-gpu',
-        `--user-data-dir=${this.userDataDirectory}`
-      ],
+      launchArguments,
       {
         cwd: this.workingDirectory,
         env: {
           ...process.env,
-          ...this.environment,
-          OPENLINEOPS_API_BASE_URL: this.apiBaseUrl
+          ...this.environment
         }
       },
       'OpenLineOps',
       this.logs);
 
-    const target = await waitForTarget(this.cdpPort, 45_000);
+    const target = await waitForTarget(
+      this.cdpPort,
+      90_000,
+      () => ({
+        exitCode: this.process?.exitCode ?? null,
+        recentProcessLogs: this.logs.slice(-40)
+      }));
     this.cdp = await CdpClient.connect(target.webSocketDebuggerUrl);
     await this.cdp.send('Runtime.enable');
     await this.cdp.send('Page.enable');
@@ -164,6 +172,9 @@ export class ElectronCdpHarness {
       if (!(element instanceof HTMLElement || element instanceof SVGElement)) {
         throw new Error('Missing element ${escapeForJavaScript(testId)}');
       }
+      if (element instanceof HTMLButtonElement && element.disabled) {
+        throw new Error('Disabled button ${escapeForJavaScript(testId)}');
+      }
       if (element instanceof HTMLElement) element.click();
       else element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
       return true;
@@ -201,12 +212,6 @@ export class ElectronCdpHarness {
       `window.openlineopsDesktop.apiRequest(${JSON.stringify(pathname)}, ${JSON.stringify(options)})`);
   }
 
-  async uploadExternalProgram(pathname, definition, files, headers = {}) {
-    return this.evaluate(
-      `window.openlineopsDesktop.uploadExternalProgram(`
-      + `${JSON.stringify(pathname)}, ${JSON.stringify(definition)}, ${JSON.stringify(files)}, ${JSON.stringify(headers)})`);
-  }
-
   async screenshot(filePath) {
     if (!this.cdp) throw new Error('Electron CDP is not connected.');
     const result = await this.cdp.send('Page.captureScreenshot', {
@@ -224,7 +229,7 @@ function escapeForJavaScript(value) {
   return value.replaceAll('\\', '\\\\').replaceAll("'", "\\'");
 }
 
-async function waitForTarget(port, timeoutMilliseconds) {
+async function waitForTarget(port, timeoutMilliseconds, diagnostics = () => null) {
   const deadline = Date.now() + timeoutMilliseconds;
   while (Date.now() < deadline) {
     try {
@@ -237,9 +242,15 @@ async function waitForTarget(port, timeoutMilliseconds) {
     } catch {
       // Electron is still starting.
     }
+    const state = diagnostics();
+    if (state?.exitCode !== null && state?.exitCode !== undefined) {
+      throw new Error(
+        `Packaged Electron exited before exposing CDP on port ${port}. Diagnostics: ${JSON.stringify(state)}`);
+    }
     await delay(250);
   }
-  throw new Error(`Timed out waiting for packaged Electron CDP on port ${port}.`);
+  throw new Error(
+    `Timed out waiting for packaged Electron CDP on port ${port}. Diagnostics: ${JSON.stringify(diagnostics())}`);
 }
 
 class CdpClient {

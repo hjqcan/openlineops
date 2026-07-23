@@ -1,11 +1,18 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Projects.Application.ProjectWorkspaces;
 
 namespace OpenLineOps.Projects.Infrastructure.ProjectWorkspaces;
 
-public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjectManifestStore
+public sealed class FileSystemAutomationProjectManifestStore :
+    IAutomationProjectManifestStore,
+    IProjectApplicationPluginPackageReferenceStore
 {
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ApplicationFileGates =
+        new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -116,6 +123,26 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             EnsureProjectPathHasNoReparsePoints(projectRoot, application.ProjectFilePath);
             CreateApplicationDirectories(Path.GetDirectoryName(applicationFilePath)!);
 
+            await using var applicationLease = await AcquireApplicationFileLeaseAsync(
+                    applicationFilePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var pluginPackageReferences = application.PluginPackageReferences;
+            if (File.Exists(applicationFilePath))
+            {
+                var existing = await ReadAsync<AutomationApplicationProjectFile>(
+                        applicationFilePath,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                ValidateApplicationFile(
+                    new AutomationProjectApplicationReference(
+                        application.ApplicationId,
+                        application.ProjectFilePath),
+                    existing,
+                    applicationFilePath);
+                pluginPackageReferences = existing.PluginPackageReferences;
+            }
+
             var applicationFile = new AutomationApplicationProjectFile(
                 AutomationApplicationProjectFile.CurrentSchemaVersion,
                 AutomationApplicationProjectFile.CurrentFormatVersion,
@@ -125,7 +152,9 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                 application.DisplayName,
                 AutomationApplicationProjectFile.CurrentResourceLayoutVersion,
                 application.TopologyId,
-                application.ProcessDefinitionIds);
+                application.ProcessDefinitionIds,
+                ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(
+                    pluginPackageReferences));
 
             await WriteAtomicallyAsync(applicationFilePath, applicationFile, cancellationToken)
                 .ConfigureAwait(false);
@@ -207,7 +236,9 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             applicationFile.DisplayName,
             applicationFile.TopologyId,
             NormalizeStrings(applicationFile.ProcessDefinitionIds),
-            relativePath);
+            relativePath,
+            ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(
+                applicationFile.PluginPackageReferences));
     }
 
     private static async ValueTask<AutomationProjectManifest> LoadCurrentAsync(
@@ -253,7 +284,9 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                 applicationFile.DisplayName,
                 applicationFile.TopologyId,
                 NormalizeStrings(applicationFile.ProcessDefinitionIds),
-                reference.ProjectFile));
+                reference.ProjectFile,
+                ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(
+                    applicationFile.PluginPackageReferences)));
         }
 
         var snapshots = projectFile.Snapshots
@@ -305,10 +338,18 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                         $"Application {application.ApplicationId} must contain process definition ids.");
                 }
 
+                if (application.PluginPackageReferences is null)
+                {
+                    throw new InvalidDataException(
+                        $"Application {application.ApplicationId} must contain pluginPackageReferences.");
+                }
+
                 return application with
                 {
                     ProjectFilePath = projectFilePath,
-                    ProcessDefinitionIds = NormalizeStrings(application.ProcessDefinitionIds)
+                    ProcessDefinitionIds = NormalizeStrings(application.ProcessDefinitionIds),
+                    PluginPackageReferences = ProjectApplicationPluginPackageReferenceContract
+                        .ValidateAndOrder(application.PluginPackageReferences)
                 };
             })
             .OrderBy(application => application.ApplicationId, StringComparer.Ordinal)
@@ -430,10 +471,83 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                 $"Application project file '{applicationFilePath}' must contain processDefinitionIds.");
         }
 
+        if (applicationFile.PluginPackageReferences is null)
+        {
+            throw new InvalidDataException(
+                $"Application project file '{applicationFilePath}' must contain pluginPackageReferences.");
+        }
+
         EnsureUnique(
             applicationFile.ProcessDefinitionIds,
             $"Application {applicationFile.ApplicationId} process definition ids",
             StringComparer.Ordinal);
+        _ = ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(
+            applicationFile.PluginPackageReferences);
+    }
+
+    public async ValueTask<IReadOnlyCollection<ProjectApplicationPluginPackageReference>> ReadAsync(
+        ProjectApplicationWorkspaceScope scope,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        cancellationToken.ThrowIfCancellationRequested();
+        await using var lease = await AcquireApplicationFileLeaseAsync(
+                scope.ApplicationProjectFilePath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var applicationFile = await ReadApplicationFileAsync(scope, cancellationToken)
+            .ConfigureAwait(false);
+        return ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(
+            applicationFile.PluginPackageReferences);
+    }
+
+    public async ValueTask ReplaceAsync(
+        ProjectApplicationWorkspaceScope scope,
+        IReadOnlyCollection<ProjectApplicationPluginPackageReference> references,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(references);
+        cancellationToken.ThrowIfCancellationRequested();
+        var normalized = ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(references);
+        await using var lease = await AcquireApplicationFileLeaseAsync(
+                scope.ApplicationProjectFilePath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var applicationFile = await ReadApplicationFileAsync(scope, cancellationToken)
+            .ConfigureAwait(false);
+        await WriteAtomicallyAsync(
+                scope.ApplicationProjectFilePath,
+                applicationFile with { PluginPackageReferences = normalized },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async ValueTask<AutomationApplicationProjectFile> ReadApplicationFileAsync(
+        ProjectApplicationWorkspaceScope scope,
+        CancellationToken cancellationToken)
+    {
+        if (!File.Exists(scope.ApplicationProjectFilePath))
+        {
+            throw new FileNotFoundException(
+                $"Application project file '{scope.ApplicationProjectFilePath}' does not exist.",
+                scope.ApplicationProjectFilePath);
+        }
+
+        EnsureProjectPathHasNoReparsePoints(
+            scope.ProjectPath,
+            scope.ApplicationProjectRelativePath);
+        var applicationFile = await ReadAsync<AutomationApplicationProjectFile>(
+                scope.ApplicationProjectFilePath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        ValidateApplicationFile(
+            new AutomationProjectApplicationReference(
+                scope.ApplicationId,
+                scope.ApplicationProjectRelativePath),
+            applicationFile,
+            scope.ApplicationProjectFilePath);
+        return applicationFile;
     }
 
     private static void ValidateSnapshotFile(
@@ -657,6 +771,30 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         Directory.CreateDirectory(Path.Combine(applicationRoot, "flows"));
         Directory.CreateDirectory(Path.Combine(applicationRoot, "blocks", "custom"));
         Directory.CreateDirectory(Path.Combine(applicationRoot, "configuration"));
+        Directory.CreateDirectory(Path.Combine(
+            applicationRoot,
+            ProjectApplicationPluginPackageReferenceContract.PluginsDirectoryName));
+    }
+
+    private static async ValueTask<ApplicationFileLease> AcquireApplicationFileLeaseAsync(
+        string applicationFilePath,
+        CancellationToken cancellationToken)
+    {
+        var fullPath = Path.GetFullPath(applicationFilePath);
+        var gate = ApplicationFileGates.GetOrAdd(fullPath, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return new ApplicationFileLease(gate);
+    }
+
+    private sealed class ApplicationFileLease(SemaphoreSlim gate) : IAsyncDisposable
+    {
+        private SemaphoreSlim? _gate = gate;
+
+        public ValueTask DisposeAsync()
+        {
+            Interlocked.Exchange(ref _gate, null)?.Release();
+            return ValueTask.CompletedTask;
+        }
     }
 
     private static void EnsureProjectPathHasNoReparsePoints(

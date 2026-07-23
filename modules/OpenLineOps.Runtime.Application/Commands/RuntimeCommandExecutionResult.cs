@@ -81,7 +81,7 @@ public sealed record RuntimeCommandExecutionResult
             RuntimeCommandExecutionOutcome.Canceled,
             payload,
             RequiredReason(reason),
-            CommandResultJudgement.Unknown);
+            CommandResultJudgement.Aborted);
     }
 
     private static string RequiredReason(string reason)

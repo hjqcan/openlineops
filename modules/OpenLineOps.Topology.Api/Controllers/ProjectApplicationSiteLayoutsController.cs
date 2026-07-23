@@ -18,6 +18,7 @@ using AppUpdateElementPresentationRequest = OpenLineOps.Topology.Application.Lay
 namespace OpenLineOps.Topology.Api.Controllers;
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.EngineeringPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Topology)]
 [Route(OpenLineOpsApiRoutes.ProjectApplicationSiteLayouts)]
 public sealed class ProjectApplicationSiteLayoutsController : ControllerBase, IAsyncActionFilter

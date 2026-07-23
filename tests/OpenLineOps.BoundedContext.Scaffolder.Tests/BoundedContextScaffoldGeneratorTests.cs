@@ -84,6 +84,16 @@ public sealed class BoundedContextScaffoldGeneratorTests
             workspace.TestRoot,
             "OpenLineOps.Quality.Tests",
             "InspectionPlanAppServiceTests.cs"));
+        var integrationDto = File.ReadAllText(Path.Combine(
+            workspace.ModuleRoot,
+            "OpenLineOps.Quality.Domain.Shared",
+            "IntegrationEvents",
+            "InspectionPlanCreatedIntegrationDto.cs"));
+        var integrationEvent = File.ReadAllText(Path.Combine(
+            workspace.ModuleRoot,
+            "OpenLineOps.Quality.Domain",
+            "Events",
+            "InspectionPlanCreatedDomainEvent.cs"));
 
         Assert.Contains("AggregateRoot<InspectionPlanId>", aggregate, StringComparison.Ordinal);
         Assert.Contains("IAggregateRepository<InspectionPlan, InspectionPlanId>", repositoryPort, StringComparison.Ordinal);
@@ -112,6 +122,12 @@ public sealed class BoundedContextScaffoldGeneratorTests
         Assert.DoesNotContain("EnsureCreatedAsync", persistenceTests, StringComparison.Ordinal);
         Assert.Contains("MigrateAsync", appServiceTests, StringComparison.Ordinal);
         Assert.DoesNotContain("EnsureCreatedAsync", appServiceTests, StringComparison.Ordinal);
+        Assert.Contains("public const string EventName", integrationDto, StringComparison.Ordinal);
+        Assert.DoesNotContain("Version", integrationDto, StringComparison.Ordinal);
+        Assert.Contains("IIntegrationEvent;", integrationEvent, StringComparison.Ordinal);
+        Assert.DoesNotContain("Version", integrationEvent, StringComparison.Ordinal);
+        Assert.Contains("quality.inspection-plan.sample", persistenceTests, StringComparison.Ordinal);
+        Assert.DoesNotContain("quality.inspection-plan.sample.v", persistenceTests, StringComparison.Ordinal);
     }
 
     [Fact]

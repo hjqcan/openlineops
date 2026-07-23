@@ -28,6 +28,14 @@ internal static class ProductionLineRuntimeStateResponseMapper
             state.Stations.Select(station => new ProductionLineStationStateResponse(
                 station.StationSystemId,
                 station.Status.ToString(),
+                station.AgentId,
+                station.StationId,
+                station.AgentPresenceSessionId,
+                station.AgentPresenceSequence,
+                station.AgentPresenceState?.ToString(),
+                station.AgentPresenceHealth.ToString(),
+                station.AgentPresenceLastSeenAtUtc,
+                station.AgentPresenceAge?.TotalSeconds,
                 station.Queue.Select(material => new ProductionLineQueuedMaterialResponse(
                     material.MaterialKind.ToString(),
                     material.MaterialId,

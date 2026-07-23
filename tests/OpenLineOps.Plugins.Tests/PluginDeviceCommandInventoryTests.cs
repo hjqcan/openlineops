@@ -7,6 +7,8 @@ namespace OpenLineOps.Plugins.Tests;
 
 public sealed class PluginDeviceCommandInventoryTests
 {
+    private static readonly ProjectApplicationWorkspaceScope Scope = PluginTestScope.Create();
+
     [Fact]
     public async Task ListDeviceCommandsAsyncReturnsCommandsFromCompatibleManifestsOnly()
     {
@@ -26,7 +28,7 @@ public sealed class PluginDeviceCommandInventoryTests
                     contractVersion: "2.0.0"))),
             new PluginManifestValidator());
 
-        var commands = await inventory.ListDeviceCommandsAsync();
+        var commands = await inventory.ListDeviceCommandsAsync(Scope);
 
         Assert.Equal(2, commands.Count);
         Assert.Contains(commands, command =>
@@ -46,16 +48,16 @@ public sealed class PluginDeviceCommandInventoryTests
                 [Command("device.scanner:scan", "device.scanner", "Scan")]))),
             new PluginManifestValidator());
 
-        var command = await inventory.FindDeviceCommandAsync("device.scanner", "Scan");
+        var command = await inventory.FindDeviceCommandAsync("device.scanner", "Scan", Scope);
 
         Assert.NotNull(command);
         Assert.Equal("device.scanner:scan", command.CommandDefinitionId);
-        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", "scan"));
-        Assert.Null(await inventory.FindDeviceCommandAsync(" device.scanner ", "Scan"));
-        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", " Scan "));
-        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", "Calibrate"));
-        Assert.Null(await inventory.FindDeviceCommandAsync("device.camera", "Scan"));
-        Assert.Null(await inventory.FindDeviceCommandAsync(" ", "Scan"));
+        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", "scan", Scope));
+        Assert.Null(await inventory.FindDeviceCommandAsync(" device.scanner ", "Scan", Scope));
+        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", " Scan ", Scope));
+        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", "Calibrate", Scope));
+        Assert.Null(await inventory.FindDeviceCommandAsync("device.camera", "Scan", Scope));
+        Assert.Null(await inventory.FindDeviceCommandAsync(" ", "Scan", Scope));
     }
 
     [Fact]
@@ -74,11 +76,11 @@ public sealed class PluginDeviceCommandInventoryTests
                 30000,
                 0));
 
-        Assert.NotNull(await inventory.FindDeviceCommandAsync("device.scanner", "Scan"));
-        Assert.Null(await inventory.FindDeviceCommandAsync("Device.Scanner", "Scan"));
-        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", "scan"));
-        Assert.Null(await inventory.FindDeviceCommandAsync(" device.scanner ", "Scan"));
-        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", " Scan "));
+        Assert.NotNull(await inventory.FindDeviceCommandAsync("device.scanner", "Scan", Scope));
+        Assert.Null(await inventory.FindDeviceCommandAsync("Device.Scanner", "Scan", Scope));
+        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", "scan", Scope));
+        Assert.Null(await inventory.FindDeviceCommandAsync(" device.scanner ", "Scan", Scope));
+        Assert.Null(await inventory.FindDeviceCommandAsync("device.scanner", " Scan ", Scope));
     }
 
     private static PluginPackageDescriptor Package(PluginManifest manifest)
@@ -117,6 +119,7 @@ public sealed class PluginDeviceCommandInventoryTests
         params PluginPackageDescriptor[] packages) : IPluginPackageCatalog
     {
         public ValueTask<IReadOnlyCollection<PluginPackageDescriptor>> DiscoverAsync(
+            ProjectApplicationWorkspaceScope scope,
             CancellationToken cancellationToken = default)
         {
             return ValueTask.FromResult<IReadOnlyCollection<PluginPackageDescriptor>>(packages);
@@ -127,6 +130,7 @@ public sealed class PluginDeviceCommandInventoryTests
         params PluginDeviceCommandDescriptor[] commands) : IPluginDeviceCommandInventory
     {
         public ValueTask<IReadOnlyCollection<PluginDeviceCommandDescriptor>> ListDeviceCommandsAsync(
+            ProjectApplicationWorkspaceScope scope,
             CancellationToken cancellationToken = default)
         {
             return ValueTask.FromResult<IReadOnlyCollection<PluginDeviceCommandDescriptor>>(commands);

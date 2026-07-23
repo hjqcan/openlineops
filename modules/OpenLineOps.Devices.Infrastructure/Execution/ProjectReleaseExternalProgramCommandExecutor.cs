@@ -139,9 +139,15 @@ public static class ProjectReleaseExternalProgramCommandExecutor
                 $"External program '{route.ResourceId}' has unsupported launch kind '{route.LaunchKind}'.");
         }
 
-        var resultAxisIsValid = executionResult.Outcome == RuntimeCommandExecutionOutcome.Completed
-            ? executionResult.ResultJudgement == ResultJudgement.NotApplicable
-            : executionResult.ResultJudgement == ResultJudgement.Unknown;
+        var resultAxisIsValid = (executionResult.Outcome, executionResult.ResultJudgement) switch
+        {
+            (RuntimeCommandExecutionOutcome.Completed, ResultJudgement.NotApplicable) => true,
+            (RuntimeCommandExecutionOutcome.Canceled, ResultJudgement.Aborted) => true,
+            (RuntimeCommandExecutionOutcome.Failed, ResultJudgement.Unknown) => true,
+            (RuntimeCommandExecutionOutcome.TimedOut, ResultJudgement.Unknown) => true,
+            (RuntimeCommandExecutionOutcome.Rejected, ResultJudgement.Unknown) => true,
+            _ => false
+        };
         if (!resultAxisIsValid)
         {
             return RuntimeCommandExecutionResult.Failed(
@@ -349,6 +355,11 @@ public static class ProjectReleaseExternalProgramCommandExecutor
         AddOptional(values, "carrier.id", context.CarrierId);
         AddOptional(values, "fixture.id", context.FixtureId);
         AddOptional(values, "device.id", context.DeviceId);
+        foreach (var (key, value) in context.ProductionInputs)
+        {
+            values.Add($"production.{key}", TokenValue.FromProductionContext(value));
+        }
+
         return values;
     }
 
@@ -542,10 +553,16 @@ public static class ProjectReleaseExternalProgramCommandExecutor
                 value.GetBoolean() ? "true" : "false",
             ProductionContextValueKind.WholeNumber when value.ValueKind == JsonValueKind.Number
                 && value.TryGetInt64(out var integer) => integer.ToString(CultureInfo.InvariantCulture),
-            ProductionContextValueKind.FixedPoint when value.ValueKind == JsonValueKind.Number =>
-                value.GetRawText(),
+            ProductionContextValueKind.FixedPoint when value.ValueKind == JsonValueKind.Number
+                && decimal.TryParse(
+                    value.GetRawText(),
+                    NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                    CultureInfo.InvariantCulture,
+                    out var fixedPoint) => fixedPoint.ToString(
+                        "0.############################",
+                        CultureInfo.InvariantCulture),
             ProductionContextValueKind.DateTimeUtc when value.ValueKind == JsonValueKind.String =>
-                value.GetString(),
+                CanonicalUtcTimestamp(value.GetString()),
             _ => null
         };
         if (canonicalValue is null)
@@ -562,6 +579,21 @@ public static class ProjectReleaseExternalProgramCommandExecutor
         {
             return false;
         }
+    }
+
+    private static string? CanonicalUtcTimestamp(string? value)
+    {
+        if (!DateTimeOffset.TryParseExact(
+                value,
+                "O",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var timestamp))
+        {
+            return null;
+        }
+
+        return timestamp.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
     }
 
     private static bool TryResolveResultPath(
@@ -663,6 +695,7 @@ public static class ProjectReleaseExternalProgramCommandExecutor
             context.ProjectId,
             context.ApplicationId,
             context.ProjectSnapshotId,
+            context.ProductionInputs,
             context.ResourceLeaseFences);
     }
 
@@ -799,24 +832,46 @@ public static class ProjectReleaseExternalProgramCommandExecutor
         public static RenderedArgument Failure(string error) => new(null, error);
     }
 
-    private readonly record struct TokenValue(string ArgumentValue, string? TextValue, int? NumberValue)
+    private readonly record struct TokenValue(string ArgumentValue, JsonElement JsonValue)
     {
-        public static TokenValue Text(string value) => new(value, value, null);
+        public static TokenValue Text(string value) => new(
+            value,
+            JsonSerializer.SerializeToElement(value));
 
         public static TokenValue Number(int value) => new(
             value.ToString(CultureInfo.InvariantCulture),
-            null,
-            value);
+            JsonSerializer.SerializeToElement(value));
+
+        public static TokenValue FromProductionContext(ProductionContextValue value)
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            var jsonValue = value.Kind switch
+            {
+                ProductionContextValueKind.Text or ProductionContextValueKind.DateTimeUtc =>
+                    JsonSerializer.SerializeToElement(value.CanonicalValue),
+                ProductionContextValueKind.Boolean =>
+                    JsonSerializer.SerializeToElement(bool.Parse(value.CanonicalValue)),
+                ProductionContextValueKind.WholeNumber =>
+                    JsonSerializer.SerializeToElement(long.Parse(
+                        value.CanonicalValue,
+                        NumberStyles.AllowLeadingSign,
+                        CultureInfo.InvariantCulture)),
+                ProductionContextValueKind.FixedPoint =>
+                    JsonSerializer.SerializeToElement(decimal.Parse(
+                        value.CanonicalValue,
+                        NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+                        CultureInfo.InvariantCulture)),
+                _ => throw new InvalidDataException(
+                    $"Production Context input kind '{value.Kind}' is unsupported.")
+            };
+
+            return new TokenValue(value.CanonicalValue, jsonValue);
+        }
 
         public void Write(Utf8JsonWriter writer, string propertyName)
         {
-            if (NumberValue is not null)
-            {
-                writer.WriteNumber(propertyName, NumberValue.Value);
-                return;
-            }
-
-            writer.WriteString(propertyName, TextValue);
+            writer.WritePropertyName(propertyName);
+            JsonValue.WriteTo(writer);
         }
     }
 }

@@ -83,12 +83,18 @@ public sealed class ProjectReleaseSourceResolverTests
     [Fact]
     public async Task ResolvePackageDependenciesLocksExactPackageForCompiledModuleTargetAction()
     {
-        var packageRoot = Path.Combine(
+        var projectRoot = Path.Combine(
             Path.GetTempPath(),
             "openlineops-release-package-resolution",
             Guid.NewGuid().ToString("N"));
         try
         {
+            var scope = new ProjectApplicationWorkspaceScope(
+                "project.main",
+                "application.main",
+                projectRoot,
+                "applications/main/main.oloapp");
+            var packageRoot = Path.Combine(scope.PluginsRootPath, "axis-provider");
             Directory.CreateDirectory(packageRoot);
             await File.WriteAllTextAsync(
                 Path.Combine(packageRoot, "manifest.json"),
@@ -106,7 +112,7 @@ public sealed class ProjectReleaseSourceResolverTests
                   "capabilities": [ "motion.axis" ],
                   "processCommands": [
                     {
-                      "id": "axis.move.v3",
+                      "id": "axis.move",
                       "capability": "motion.axis",
                       "commandName": "Move",
                       "timeoutMilliseconds": 30000,
@@ -115,8 +121,9 @@ public sealed class ProjectReleaseSourceResolverTests
                   ]
                 }
                 """);
-            await File.WriteAllTextAsync(Path.Combine(packageRoot, "plugin.axis.dll"), "axis-binary-v3");
-            await File.WriteAllTextAsync(Path.Combine(packageRoot, "dependency.bin"), "axis-sidecar-v3");
+            await File.WriteAllTextAsync(Path.Combine(packageRoot, "plugin.axis.dll"), "axis-binary-content");
+            await File.WriteAllTextAsync(Path.Combine(packageRoot, "dependency.bin"), "axis-sidecar-content");
+            var package = await FileSystemPluginPackageInspector.InspectAsync(packageRoot);
             var topology = new AutomationTopologyDetails(
                 "topology.main",
                 "Main",
@@ -174,9 +181,17 @@ public sealed class ProjectReleaseSourceResolverTests
                 flowIrCompiler: null!,
                 flowIrSerializer: null!,
                 clock: null!,
-                packageCatalog: new FileSystemPluginPackageCatalog(packageRoot));
+                packageCatalog: new FileSystemPluginPackageCatalog(
+                    new StaticPluginPackageReferenceStore([
+                        new ProjectApplicationPluginPackageReference(
+                            package.Manifest.Id,
+                            package.Manifest.Version,
+                            ProjectApplicationPluginPackageReferenceContract.ManifestPath("axis-provider"),
+                            package.PackageContentSha256)
+                    ])));
 
             var result = await resolver.ResolvePackageDependenciesAsync(
+                scope,
                 topology,
                 "system.axis",
                 document,
@@ -189,15 +204,29 @@ public sealed class ProjectReleaseSourceResolverTests
             Assert.Equal("win-x64", dependency.RuntimeIdentifier);
             Assert.Equal(64, dependency.PackageContentSha256.Length);
             Assert.Contains(dependency.Files, file => file.RelativePath == "dependency.bin");
-            Assert.Equal("axis.move.v3", Assert.Single(dependency.Commands).CommandDefinitionId);
+            Assert.Equal("axis.move", Assert.Single(dependency.Commands).CommandDefinitionId);
         }
         finally
         {
-            if (Directory.Exists(packageRoot))
+            if (Directory.Exists(projectRoot))
             {
-                Directory.Delete(packageRoot, recursive: true);
+                Directory.Delete(projectRoot, recursive: true);
             }
         }
+    }
+
+    private sealed class StaticPluginPackageReferenceStore(
+        IReadOnlyCollection<ProjectApplicationPluginPackageReference> references)
+        : IProjectApplicationPluginPackageReferenceStore
+    {
+        public ValueTask<IReadOnlyCollection<ProjectApplicationPluginPackageReference>> ReadAsync(
+            ProjectApplicationWorkspaceScope scope,
+            CancellationToken cancellationToken = default) => ValueTask.FromResult(references);
+
+        public ValueTask ReplaceAsync(
+            ProjectApplicationWorkspaceScope scope,
+            IReadOnlyCollection<ProjectApplicationPluginPackageReference> replacement,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
 
     [Fact]

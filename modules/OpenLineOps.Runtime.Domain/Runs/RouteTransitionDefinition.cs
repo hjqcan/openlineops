@@ -33,16 +33,35 @@ public sealed record RouteTransitionDefinition
     public RouteTransitionDefinition(
         string transitionId,
         string sourceOperationId,
-        string targetOperationId,
+        string? targetOperationId,
         RuntimeRouteTransitionKind kind,
         ResultJudgement? requiredJudgement = null,
         int? maxTraversals = null,
         string? parallelGroupId = null,
-        RouteOutputCondition? outputCondition = null)
+        RouteOutputCondition? outputCondition = null,
+        ProductDisposition? terminalDisposition = null)
     {
         TransitionId = ProductionRunText.Required(transitionId, nameof(transitionId));
         SourceOperationId = ProductionRunText.Required(sourceOperationId, nameof(sourceOperationId));
-        TargetOperationId = ProductionRunText.Required(targetOperationId, nameof(targetOperationId));
+        if ((targetOperationId is null) == (terminalDisposition is null))
+        {
+            throw new ArgumentException(
+                "A route transition requires exactly one target Operation or terminal disposition.");
+        }
+
+        TargetOperationId = targetOperationId is null
+            ? null
+            : ProductionRunText.Required(targetOperationId, nameof(targetOperationId));
+        if (terminalDisposition is ProductDisposition.InProcess
+            || terminalDisposition is not null && !Enum.IsDefined(terminalDisposition.Value))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(terminalDisposition),
+                terminalDisposition,
+                "A terminal route disposition must be Completed, Nonconforming, Held, or Scrapped.");
+        }
+
+        TerminalDisposition = terminalDisposition;
         if (string.Equals(SourceOperationId, TargetOperationId, StringComparison.Ordinal))
         {
             throw new ArgumentException("A route transition cannot target its source operation.");
@@ -90,6 +109,15 @@ public sealed record RouteTransitionDefinition
                 "Parallel transitions require a group id and other transitions cannot define one.");
         }
 
+        if (terminalDisposition is not null
+            && kind is RuntimeRouteTransitionKind.Rework
+                or RuntimeRouteTransitionKind.ParallelFork
+                or RuntimeRouteTransitionKind.ParallelJoin)
+        {
+            throw new ArgumentException(
+                "Rework and parallel transitions must target an Operation.");
+        }
+
         Kind = kind;
         RequiredJudgement = requiredJudgement;
         MaxTraversals = maxTraversals;
@@ -103,7 +131,9 @@ public sealed record RouteTransitionDefinition
 
     public string SourceOperationId { get; }
 
-    public string TargetOperationId { get; }
+    public string? TargetOperationId { get; }
+
+    public ProductDisposition? TerminalDisposition { get; }
 
     public RuntimeRouteTransitionKind Kind { get; }
 

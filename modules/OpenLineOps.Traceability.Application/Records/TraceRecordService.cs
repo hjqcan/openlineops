@@ -196,7 +196,12 @@ public sealed class TraceRecordService : ITraceRecordService
     private static TraceRouteDecision ToRouteDecision(CreateTraceRouteDecisionRequest request) => new(
         request.SourceOperationRunId!,
         request.TransitionId!,
-        request.TargetOperationId!,
+        request.TargetOperationId,
+        request.TerminalDisposition is null
+            ? null
+            : ParseEnum<ProductDisposition>(
+                request.TerminalDisposition,
+                "Traceability.InvalidRouteTerminalDisposition"),
         ParseEnum<ResultJudgement>(
             request.SourceJudgement!,
             "Traceability.InvalidRouteSourceJudgement"),
@@ -283,9 +288,11 @@ public sealed class TraceRecordService : ITraceRecordService
             request.TargetId!,
             request.TargetCapabilityId!,
             request.CommandName!,
-            ParseEnum<TraceCommandStatus>(request.Status!, "Traceability.InvalidCommandStatus"),
-            ParseOptionalEnum<OpenLineOps.Runtime.Contracts.ResultJudgement>(
-                request.ResultJudgement,
+            ParseEnum<ExecutionStatus>(
+                request.ExecutionStatus!,
+                "Traceability.InvalidCommandExecutionStatus"),
+            ParseEnum<ResultJudgement>(
+                request.ResultJudgement!,
                 "Traceability.InvalidCommandResultJudgement"),
             request.CreatedAtUtc,
             request.DeadlineAtUtc,
@@ -311,7 +318,12 @@ public sealed class TraceRecordService : ITraceRecordService
             request.ActionId!,
             ParseEnum<TraceTargetKind>(request.TargetKind!, "Traceability.InvalidTargetKind"),
             request.TargetId!,
-            ParseEnum<TraceCommandStatus>(request.CommandStatus!, "Traceability.InvalidCommandStatus"),
+            ParseEnum<ExecutionStatus>(
+                request.CommandExecutionStatus!,
+                "Traceability.InvalidCommandExecutionStatus"),
+            ParseEnum<ResultJudgement>(
+                request.CommandResultJudgement!,
+                "Traceability.InvalidCommandResultJudgement"),
             request.Passed,
             request.MeasuredAtUtc);
     }

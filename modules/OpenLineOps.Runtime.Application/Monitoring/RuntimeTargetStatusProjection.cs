@@ -3,6 +3,7 @@ using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Domain.Sessions;
+using CommandExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus;
 
 namespace OpenLineOps.Runtime.Application.Monitoring;
 
@@ -22,7 +23,7 @@ public sealed record RuntimeTargetStatusProjection(
     string ActionId,
     string TargetKind,
     string TargetId,
-    RuntimeCommandStatus CommandStatus,
+    CommandExecutionStatus CommandStatus,
     DateTimeOffset LastTransitionAtUtc,
     bool IsTerminal,
     string? FailureReason)
@@ -64,27 +65,25 @@ public sealed record RuntimeTargetStatusProjection(
             domainEvent.ToStatus,
             GetTransitionAtUtc(command, domainEvent.ToStatus),
             isTerminal,
-            isTerminal && domainEvent.ToStatus != RuntimeCommandStatus.Completed
+            isTerminal && domainEvent.ToStatus != CommandExecutionStatus.Completed
                 ? command.FailureReason
                 : null);
     }
 
     private static DateTimeOffset GetTransitionAtUtc(
         RuntimeCommand command,
-        RuntimeCommandStatus status)
+        CommandExecutionStatus status)
     {
         return status switch
         {
-            RuntimeCommandStatus.Pending => command.CreatedAtUtc,
-            RuntimeCommandStatus.Accepted => command.AcceptedAtUtc
+            CommandExecutionStatus.Pending => command.CreatedAtUtc,
+            CommandExecutionStatus.Running => command.StartedAtUtc
                 ?? MissingTransitionTimestamp(command, status),
-            RuntimeCommandStatus.InProgress => command.StartedAtUtc
-                ?? MissingTransitionTimestamp(command, status),
-            RuntimeCommandStatus.Completed
-                or RuntimeCommandStatus.Failed
-                or RuntimeCommandStatus.TimedOut
-                or RuntimeCommandStatus.Canceled
-                or RuntimeCommandStatus.Rejected => command.CompletedAtUtc
+            CommandExecutionStatus.Completed
+                or CommandExecutionStatus.Failed
+                or CommandExecutionStatus.TimedOut
+                or CommandExecutionStatus.Canceled
+                or CommandExecutionStatus.Rejected => command.CompletedAtUtc
                     ?? MissingTransitionTimestamp(command, status),
             _ => throw new ArgumentOutOfRangeException(nameof(status), status, "Unsupported runtime command status.")
         };
@@ -92,18 +91,18 @@ public sealed record RuntimeTargetStatusProjection(
 
     private static DateTimeOffset MissingTransitionTimestamp(
         RuntimeCommand command,
-        RuntimeCommandStatus status)
+        CommandExecutionStatus status)
     {
         throw new InvalidOperationException(
             $"Runtime command {command.Id} has status {status} without its transition timestamp.");
     }
 
-    private static bool IsTerminalStatus(RuntimeCommandStatus status)
+    private static bool IsTerminalStatus(CommandExecutionStatus status)
     {
-        return status is RuntimeCommandStatus.Completed
-            or RuntimeCommandStatus.Failed
-            or RuntimeCommandStatus.TimedOut
-            or RuntimeCommandStatus.Canceled
-            or RuntimeCommandStatus.Rejected;
+        return status is CommandExecutionStatus.Completed
+            or CommandExecutionStatus.Failed
+            or CommandExecutionStatus.TimedOut
+            or CommandExecutionStatus.Canceled
+            or CommandExecutionStatus.Rejected;
     }
 }

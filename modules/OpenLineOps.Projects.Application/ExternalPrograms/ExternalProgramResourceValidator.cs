@@ -43,10 +43,12 @@ public static class ExternalProgramResourceValidator
                     "ApplicationExecutable resources require exactly one entry point and no provider key.");
             }
 
-            ExternalProgramResourceContract.CanonicalRelativePath(
-                request.EntryPoint!,
-                nameof(request.EntryPoint),
-                ExternalProgramResourceContract.FilesDirectoryName);
+            if (!ExternalProgramResourceContract.IsSupportedApplicationExecutableEntryPoint(request.EntryPoint))
+            {
+                throw new ArgumentException(
+                    "ApplicationExecutable entry points must be canonical files/*.exe paths.",
+                    nameof(request));
+            }
         }
         else if (request.LaunchKind == ExternalProgramLaunchKind.Provider)
         {
@@ -58,6 +60,12 @@ public static class ExternalProgramResourceValidator
 
             Canonical(request.ProviderKind!, nameof(request.ProviderKind), 64);
             Canonical(request.ProviderKey!, nameof(request.ProviderKey), 256);
+            if (request.ProviderKind is not ("PluginCommand" or "ProcessCommandProvider"))
+            {
+                throw new ArgumentException(
+                    "Provider kind must be PluginCommand or ProcessCommandProvider.",
+                    nameof(request));
+            }
         }
         else
         {
@@ -91,12 +99,15 @@ public static class ExternalProgramResourceValidator
         ArgumentNullException.ThrowIfNull(resource.Files);
         if (!ExternalProgramResourceContract.IsSha256(resource.ContentSha256)
             || resource.UpdatedAtUtc.Offset != TimeSpan.Zero
-            || resource.Files.Count == 0 && resource.LaunchKind == ExternalProgramLaunchKind.ApplicationExecutable)
+            || resource.Files.Count == 0
+                && resource.LaunchKind == ExternalProgramLaunchKind.ApplicationExecutable
+            || resource.Files.Count != 0
+                && resource.LaunchKind == ExternalProgramLaunchKind.Provider)
         {
             throw new InvalidDataException("External program frozen resource metadata is invalid.");
         }
 
-        var paths = new HashSet<string>(StringComparer.Ordinal);
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in resource.Files)
         {
             var path = ExternalProgramResourceContract.CanonicalRelativePath(
@@ -111,22 +122,15 @@ public static class ExternalProgramResourceValidator
             }
         }
 
-        const long maximumTotalFileBytes = 2L * 1024 * 1024 * 1024;
         long totalFileBytes = 0;
-        if (resource.Files.Count > 256
-            || resource.Files.Any(file => file.SizeBytes > 512L * 1024 * 1024))
-        {
-            throw new InvalidDataException("External program file inventory exceeds the supported limits.");
-        }
-
+        var fileCount = 0;
         foreach (var file in resource.Files)
         {
-            if (totalFileBytes > maximumTotalFileBytes - file.SizeBytes)
-            {
-                throw new InvalidDataException("External program file inventory exceeds the supported limits.");
-            }
-
-            totalFileBytes += file.SizeBytes;
+            totalFileBytes = ExternalProgramResourceContract.AccumulateFrozenFileBytes(
+                fileCount,
+                totalFileBytes,
+                file.SizeBytes);
+            fileCount++;
         }
 
         if (resource.EntryPoint is not null && !paths.Contains(resource.EntryPoint))

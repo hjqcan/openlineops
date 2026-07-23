@@ -1,10 +1,53 @@
 using System.Text.Json;
+using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Runner;
 
 namespace OpenLineOps.Runner.Tests;
 
 public sealed class RunnerEntrypointTests
 {
+    [Fact]
+    public void HeadlessConfigurationKeepsWorkspaceAndEvidenceInsideProjectExecutionData()
+    {
+        var projectDirectory = Path.Combine(
+            Path.GetTempPath(),
+            $"openlineops-runner-configuration-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectDirectory);
+        try
+        {
+            var options = new RunnerRunOptions(
+                Path.Combine(projectDirectory, "production-line.oloproj"),
+                "active",
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                "UNIT-CONFIGURATION",
+                "runner.configuration-test");
+
+            var configuration = RunnerEntrypoint.BuildConfiguration(
+                options,
+                Path.GetTempPath());
+
+            var executionDataDirectory =
+                ProjectExecutionDataDirectory.ForProjectDirectory(projectDirectory);
+            var artifactRoot = configuration[
+                "OpenLineOps:Traceability:ArtifactStorage:RootPath"];
+            var evidenceRoot = configuration[
+                "OpenLineOps:Devices:ExternalProgramHost:EvidenceRootPath"];
+            var workspaceRoot = configuration[
+                "OpenLineOps:Devices:ExternalProgramHost:WorkspaceRootPath"];
+
+            Assert.Equal(Path.Combine(executionDataDirectory, "trace-artifacts"), artifactRoot);
+            Assert.Equal(artifactRoot, evidenceRoot);
+            Assert.Equal(
+                Path.Combine(executionDataDirectory, "external-program-workspaces"),
+                workspaceRoot);
+        }
+        finally
+        {
+            Directory.Delete(projectDirectory, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task RunWithMissingProjectBuildsModuleProviderAndReturnsProjectOpenFailure()
     {

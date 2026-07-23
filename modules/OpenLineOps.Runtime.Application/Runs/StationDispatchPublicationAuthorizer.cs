@@ -1,5 +1,4 @@
 using OpenLineOps.Agent.Contracts;
-using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
@@ -21,8 +20,7 @@ public sealed record StationDispatchPublicationDecision(bool Allowed, string? Re
 public sealed class StationDispatchPublicationAuthorizer(
     IProductionRunRepository runs,
     IResourceLeaseRepository resourceLeases,
-    IStationDeploymentResolver deployments,
-    IClock clock)
+    IStationDeploymentResolver deployments)
 {
     public async ValueTask<StationDispatchPublicationDecision> AuthorizeAsync(
         StationJobRequested request,
@@ -135,7 +133,6 @@ public sealed class StationDispatchPublicationAuthorizer(
                 run.RunId,
                 request.OperationRunId,
                 evidence,
-                RequireUtc(clock.UtcNow),
                 cancellationToken)
             .ConfigureAwait(false);
         return leaseValidation.Accepted
@@ -144,10 +141,4 @@ public sealed class StationDispatchPublicationAuthorizer(
                 leaseValidation.RejectionReason
                 ?? "Station dispatch resource leases are no longer current.");
     }
-
-    private static DateTimeOffset RequireUtc(DateTimeOffset value) =>
-        value == default || value.Offset != TimeSpan.Zero
-            ? throw new InvalidOperationException(
-                "Station dispatch publication clock must return non-default UTC.")
-            : value;
 }

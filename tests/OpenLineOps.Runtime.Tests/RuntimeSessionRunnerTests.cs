@@ -1,3 +1,4 @@
+using System.Text.Json;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Commands;
@@ -14,7 +15,6 @@ using OpenLineOps.Runtime.Domain.Steps;
 using OpenLineOps.Runtime.Domain.Targets;
 using OpenLineOps.Runtime.Infrastructure.Events;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
-using RuntimeCommandStatus = OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus;
 
 namespace OpenLineOps.Runtime.Tests;
 
@@ -60,7 +60,7 @@ public sealed class RuntimeSessionRunnerTests
         Assert.NotNull(persisted);
         Assert.Equal(RuntimeSessionStatus.Completed, persisted.Status);
         Assert.All(persisted.Steps, step => Assert.Equal(RuntimeStepStatus.Completed, step.Status));
-        Assert.All(persisted.Commands, command => Assert.Equal(RuntimeCommandStatus.Completed, command.Status));
+        Assert.All(persisted.Commands, command => Assert.Equal(ExecutionStatus.Completed, command.Status));
 
         var eventNames = eventPublisher.Events.Select(domainEvent => domainEvent.EventName).ToArray();
         Assert.Equal("RuntimeSession.Created", eventNames[0]);
@@ -92,7 +92,7 @@ public sealed class RuntimeSessionRunnerTests
         Assert.Equal(RuntimeSessionStatus.Failed, persisted.Status);
         Assert.Equal("Runtime.CommandFailed", Assert.Single(persisted.Incidents).Code);
         Assert.Equal(RuntimeStepStatus.Failed, Assert.Single(persisted.Steps).Status);
-        Assert.Equal(RuntimeCommandStatus.Failed, Assert.Single(persisted.Commands).Status);
+        Assert.Equal(ExecutionStatus.Failed, Assert.Single(persisted.Commands).Status);
     }
 
     [Fact]
@@ -117,7 +117,7 @@ public sealed class RuntimeSessionRunnerTests
         var command = Assert.Single(
             persisted.Commands,
             candidate => candidate.ResultJudgement == ResultJudgement.Failed);
-        Assert.Equal(RuntimeCommandStatus.Completed, command.Status);
+        Assert.Equal(ExecutionStatus.Completed, command.Status);
         Assert.Equal(ResultJudgement.Failed, command.ResultJudgement);
         Assert.Equal("{\"judgement\":\"Failed\"}", command.ResultPayload);
     }
@@ -144,7 +144,7 @@ public sealed class RuntimeSessionRunnerTests
         var command = Assert.Single(
             persisted.Commands,
             candidate => candidate.ResultJudgement == ResultJudgement.Aborted);
-        Assert.Equal(RuntimeCommandStatus.Completed, command.Status);
+        Assert.Equal(ExecutionStatus.Completed, command.Status);
         Assert.Equal(ResultJudgement.Aborted, command.ResultJudgement);
         Assert.Equal("{\"judgement\":\"Aborted\"}", command.ResultPayload);
     }
@@ -336,7 +336,7 @@ public sealed class RuntimeSessionRunnerTests
         var persisted = Assert.IsType<RuntimeSession>(
             await repository.GetByIdAsync(request.SessionId));
         Assert.Equal(RuntimeSessionStatus.Completed, persisted.Status);
-        Assert.Equal(RuntimeCommandStatus.Completed, Assert.Single(persisted.Commands).Status);
+        Assert.Equal(ExecutionStatus.Completed, Assert.Single(persisted.Commands).Status);
         Assert.Equal(RuntimeStepStatus.Completed, Assert.Single(persisted.Steps).Status);
     }
 
@@ -367,10 +367,98 @@ public sealed class RuntimeSessionRunnerTests
         var persisted = Assert.IsType<RuntimeSession>(
             await repository.GetByIdAsync(request.SessionId));
         Assert.Equal(RuntimeSessionStatus.Failed, persisted.Status);
-        Assert.Equal(RuntimeCommandStatus.Failed, Assert.Single(persisted.Commands).Status);
+        Assert.Equal(ExecutionStatus.Failed, Assert.Single(persisted.Commands).Status);
         Assert.Equal(RuntimeStepStatus.Failed, Assert.Single(persisted.Steps).Status);
         Assert.Contains(
             typeof(InvalidOperationException).FullName!,
+            Assert.Single(persisted.Incidents).Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ProductionInputMarkersAreRecursivelyResolvedBeforeAnyActionExecutorRuns()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var commandExecutor = new ScriptedRuntimeCommandExecutor(
+            RuntimeCommandExecutionResult.Completed("ok"));
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            commandExecutor);
+        var process = new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process-production-inputs"),
+            new ProcessVersionId("process-production-inputs@1.0.0"),
+            [
+                Node(
+                    new RuntimeNodeId("node-production-inputs"),
+                    "Use Production inputs",
+                    new RuntimeCapabilityId("capability.production-inputs"),
+                    "execute",
+                    TimeSpan.FromSeconds(1),
+                    """
+                    {
+                      "nested": {
+                        "count": { "$productionInput": "fixture.count" },
+                        "enabled": { "$productionInput": "fixture.enabled" }
+                      },
+                      "labels": [
+                        { "$productionInput": "fixture.label" }
+                      ]
+                    }
+                    """)
+            ]);
+
+        var result = await runner.RunAsync(CreateStartRequest(
+            process,
+            new Dictionary<string, ProductionContextValue>
+            {
+                ["fixture.count"] = new(ProductionContextValueKind.WholeNumber, "42"),
+                ["fixture.enabled"] = new(ProductionContextValueKind.Boolean, "true"),
+                ["fixture.label"] = new(ProductionContextValueKind.Text, "board-a")
+            }));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Completed, result.Value.Status);
+        var context = Assert.Single(commandExecutor.Contexts);
+        using var payload = JsonDocument.Parse(context.InputPayload!);
+        Assert.Equal(42, payload.RootElement.GetProperty("nested").GetProperty("count").GetInt64());
+        Assert.True(payload.RootElement.GetProperty("nested").GetProperty("enabled").GetBoolean());
+        Assert.Equal("board-a", payload.RootElement.GetProperty("labels")[0].GetString());
+    }
+
+    [Fact]
+    public async Task MissingProductionInputRejectsCommandBeforeActionExecutorRuns()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var commandExecutor = new ScriptedRuntimeCommandExecutor(
+            RuntimeCommandExecutionResult.Completed("must-not-run"));
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            commandExecutor);
+        var process = new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process-missing-production-input"),
+            new ProcessVersionId("process-missing-production-input@1.0.0"),
+            [
+                Node(
+                    new RuntimeNodeId("node-missing-production-input"),
+                    "Reject missing Production input",
+                    new RuntimeCapabilityId("capability.production-inputs"),
+                    "execute",
+                    TimeSpan.FromSeconds(1),
+                    """{ "value": { "$productionInput": "missing.key" } }""")
+            ]);
+
+        var result = await runner.RunAsync(CreateStartRequest(process));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Failed, result.Value.Status);
+        Assert.Empty(commandExecutor.Contexts);
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(result.Value.SessionId));
+        Assert.Equal(ExecutionStatus.Rejected, Assert.Single(persisted.Commands).Status);
+        Assert.Contains(
+            "undeclared Production Context input 'missing.key'",
             Assert.Single(persisted.Incidents).Message,
             StringComparison.Ordinal);
     }
@@ -407,7 +495,9 @@ public sealed class RuntimeSessionRunnerTests
             new FixedClock(StartedAtUtc));
     }
 
-    private static StartRuntimeSessionRequest CreateStartRequest(ExecutableRuntimeProcess process)
+    private static StartRuntimeSessionRequest CreateStartRequest(
+        ExecutableRuntimeProcess process,
+        IReadOnlyDictionary<string, ProductionContextValue>? productionInputs = null)
     {
         return new StartRuntimeSessionRequest(
             RuntimeSessionId.New(),
@@ -415,6 +505,7 @@ public sealed class RuntimeSessionRunnerTests
             new ConfigurationSnapshotId("snapshot-20260629-001"),
             new RecipeSnapshotId("recipe-20260629-001"),
             process,
+            productionInputs ?? new Dictionary<string, ProductionContextValue>(),
             RuntimeTestReleaseIdentity.TraceMetadata());
     }
 

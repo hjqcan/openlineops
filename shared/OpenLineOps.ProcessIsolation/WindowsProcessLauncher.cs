@@ -129,6 +129,7 @@ public sealed class WindowsProcessLauncher
 
             var launched = new WindowsIsolatedProcess(
                 process,
+                processHandle,
                 inputStream,
                 outputStream,
                 errorStream,
@@ -138,7 +139,6 @@ public sealed class WindowsProcessLauncher
             inputStream = null;
             outputStream = null;
             errorStream = null;
-            processHandle.Dispose();
             processHandle = null;
             threadHandle.Dispose();
             threadHandle = null;
@@ -713,17 +713,20 @@ public interface IIsolatedProcess : IDisposable
 public sealed class WindowsIsolatedProcess : IIsolatedProcess
 {
     private readonly Process _process;
+    private readonly SafeProcessHandle _processHandle;
     private WindowsProcessJob? _job;
     private int _disposed;
 
     internal WindowsIsolatedProcess(
         Process process,
+        SafeProcessHandle processHandle,
         Stream standardInput,
         Stream standardOutput,
         Stream standardError,
         WindowsProcessJob job)
     {
         _process = process ?? throw new ArgumentNullException(nameof(process));
+        _processHandle = processHandle ?? throw new ArgumentNullException(nameof(processHandle));
         StandardInput = standardInput ?? throw new ArgumentNullException(nameof(standardInput));
         StandardOutput = standardOutput ?? throw new ArgumentNullException(nameof(standardOutput));
         StandardError = standardError ?? throw new ArgumentNullException(nameof(standardError));
@@ -738,14 +741,35 @@ public sealed class WindowsIsolatedProcess : IIsolatedProcess
 
     public int Id => _process.Id;
 
-    public int ExitCode => _process.ExitCode;
+    public int ExitCode
+    {
+        get
+        {
+            if (!GetExitCodeProcess(_processHandle, out var exitCode))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not read the isolated Windows process exit code.");
+            }
+
+            if (exitCode == StillActive && !_process.HasExited)
+            {
+                throw new InvalidOperationException(
+                    "The isolated Windows process has not exited.");
+            }
+
+            return unchecked((int)exitCode);
+        }
+    }
+
+    public uint ActiveProcessCount => Volatile.Read(ref _job)?.ActiveProcessCount ?? 0;
 
     public Task WaitForExitAsync(CancellationToken cancellationToken = default) =>
         _process.WaitForExitAsync(cancellationToken);
 
     public void TerminateProcessTree()
     {
-        Interlocked.Exchange(ref _job, null)?.Dispose();
+        Volatile.Read(ref _job)?.Terminate();
     }
 
     public void Dispose()
@@ -760,5 +784,14 @@ public sealed class WindowsIsolatedProcess : IIsolatedProcess
         StandardOutput.Dispose();
         StandardError.Dispose();
         _process.Dispose();
+        _processHandle.Dispose();
     }
+
+    private const uint StillActive = 259;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetExitCodeProcess(
+        SafeProcessHandle process,
+        out uint exitCode);
 }

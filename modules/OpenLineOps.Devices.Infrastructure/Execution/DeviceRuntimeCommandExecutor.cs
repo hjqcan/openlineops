@@ -29,6 +29,8 @@ public sealed class DeviceRuntimeCommandExecutor
         ArgumentNullException.ThrowIfNull(route);
 
         var deviceRequest = new DeviceCommandExecutionRequest(
+            context.ProjectId,
+            context.ApplicationId,
             route.ProviderKind,
             route.ProviderKey,
             route.DeviceInstanceId,

@@ -627,23 +627,29 @@ public sealed class PostgreSqlProductionMaterialRepository :
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        var selectors = new List<string>();
+        var scopeSelectors = new List<string>();
+        var materialSelectors = new List<string>();
         if (query.ProductionUnitId is { } productionUnitId)
         {
-            selectors.Add("(production_unit_id = @production_unit_id OR genealogy_parent_unit_id = @production_unit_id OR genealogy_child_unit_id = @production_unit_id)");
+            materialSelectors.Add("(production_unit_id = @production_unit_id OR genealogy_parent_unit_id = @production_unit_id OR genealogy_child_unit_id = @production_unit_id)");
             command.Parameters.AddWithValue("production_unit_id", productionUnitId.Value);
         }
 
         if (query.ProductionRunId is { } productionRunId)
         {
-            selectors.Add("production_run_id = @production_run_id");
+            scopeSelectors.Add("production_run_id = @production_run_id");
             command.Parameters.AddWithValue("production_run_id", productionRunId.Value);
         }
 
         if (query.CarrierId is { } carrierId)
         {
-            selectors.Add("carrier_id = @carrier_id");
+            materialSelectors.Add("carrier_id = @carrier_id");
             command.Parameters.AddWithValue("carrier_id", carrierId.Value);
+        }
+
+        if (materialSelectors.Count > 0)
+        {
+            scopeSelectors.Insert(0, "(" + string.Join(" OR ", materialSelectors) + ")");
         }
 
         var throughPredicate = query.ThroughUtc is null
@@ -654,9 +660,10 @@ public sealed class PostgreSqlProductionMaterialRepository :
             command.Parameters.AddWithValue("through_utc", throughUtc);
         }
 
-        command.CommandText = "SELECT document_json::text FROM olo_production_material_timeline WHERE ("
-            + string.Join(" OR ", selectors)
-            + ")"
+        command.CommandText = "SELECT document_json::text FROM olo_production_material_timeline WHERE "
+            + "(" + string.Join(
+                query.Mode == ProductionMaterialTimelineQueryMode.UnionScope ? " OR " : " AND ",
+                scopeSelectors) + ")"
             + throughPredicate
             + " ORDER BY occurred_at_utc, evidence_id;";
         var result = new List<ProductionMaterialTimelineEntry>();
@@ -890,10 +897,19 @@ public sealed class PostgreSqlProductionMaterialRepository :
             }
 
             await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+                .ConfigureAwait(false);
+            await PostgreSqlSchemaInitialization.AcquireLockAsync(
+                    connection,
+                    transaction,
+                    cancellationToken)
+                .ConfigureAwait(false);
             await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
             command.CommandText = SchemaSql;
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-            await ValidateSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
+            await ValidateSchemaAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             Volatile.Write(ref _schemaCreated, 1);
         }
         finally
@@ -904,11 +920,13 @@ public sealed class PostgreSqlProductionMaterialRepository :
 
     private static async ValueTask ValidateSchemaAsync(
         NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
         CancellationToken cancellationToken)
     {
         foreach (var table in ExpectedSchema)
         {
             await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
             command.CommandText = """
                 SELECT column_name, udt_name, is_nullable
                 FROM information_schema.columns

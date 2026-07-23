@@ -27,6 +27,8 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
         Path.GetTempPath(),
         "openlineops-external-program-host-tests",
         Guid.NewGuid().ToString("N"));
+    private readonly string _appContainerProfileName =
+        $"OpenLineOps.Tests.External.{Guid.NewGuid():N}";
 
     [Fact]
     public async Task ProviderResourceCarriesRunOperationAndProductionUnitInputThenMapsExactResult()
@@ -49,7 +51,7 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
                 capturedContext = context;
                 capturedRoute = providerRoute;
                 return ValueTask.FromResult(RuntimeCommandExecutionResult.Completed(
-                    "{\"outcome\":\"Passed\",\"metrics\":{\"voltage\":12.5}}"));
+                    "{\"outcome\":\"Passed\",\"metrics\":{\"voltage\":12.50}}"));
             },
             AllowFences,
             CreateHost());
@@ -96,6 +98,114 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
                 .EnumerateArray()
                 .Select(item => item.GetString()!)
                 .ToArray());
+    }
+
+    [Fact]
+    public async Task VendorBoundaryNormalizesUtcTimestampBeforePersistingTypedOutput()
+    {
+        var route = CreateRoute(
+            ProjectReleaseExternalProgramLaunchKinds.Provider,
+            executable: null,
+            providerRoute: new ProjectReleaseProcessCommandRoute(
+                "provider.external-program",
+                new DeviceCapabilityId("test.external")),
+            extraResultMapping: new ExternalProgramRouteResultMapping(
+                "$.completedAtUtc",
+                "test.completedAtUtc",
+                ProductionContextValueKind.DateTimeUtc));
+
+        var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
+            CreateContext(),
+            route,
+            (_, _, _) => ValueTask.FromResult(RuntimeCommandExecutionResult.Completed(
+                "{\"outcome\":\"Passed\",\"metrics\":{\"voltage\":12.50},"
+                + "\"completedAtUtc\":\"2026-07-15T08:00:00.0000000+08:00\"}")),
+            AllowFences,
+            CreateHost());
+
+        Assert.True(
+            result.Outcome == RuntimeCommandExecutionOutcome.Completed,
+            result.Reason);
+        using var payload = JsonDocument.Parse(result.Payload!);
+        Assert.Equal(
+            "12.5",
+            payload.RootElement.GetProperty("test.voltage").GetProperty("value").GetString());
+        var completedAtUtc = payload.RootElement.GetProperty("test.completedAtUtc");
+        Assert.Equal("DateTimeUtc", completedAtUtc.GetProperty("kind").GetString());
+        Assert.Equal(
+            "2026-07-15T00:00:00.0000000+00:00",
+            completedAtUtc.GetProperty("value").GetString());
+    }
+
+    [Fact]
+    public async Task ProviderResourceMapsTypedProductionInputIntoInvocationAndArguments()
+    {
+        var route = CreateRoute(
+            ProjectReleaseExternalProgramLaunchKinds.Provider,
+            executable: null,
+            providerRoute: new ProjectReleaseProcessCommandRoute(
+                "provider.external-program",
+                new DeviceCapabilityId("test.external")),
+            argumentTemplates: ["--limit", "{{input.limit}}"],
+            productionInputMapping: new ExternalProgramRouteInputMapping(
+                "$production.inspection.limit",
+                "limit"));
+        RuntimeCommandExecutionContext? capturedContext = null;
+
+        var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
+            CreateContext(new Dictionary<string, ProductionContextValue>
+            {
+                ["inspection.limit"] = new(ProductionContextValueKind.FixedPoint, "3.5")
+            }),
+            route,
+            (context, _, _) =>
+            {
+                capturedContext = context;
+                return ValueTask.FromResult(RuntimeCommandExecutionResult.Completed(
+                    "{\"outcome\":\"Passed\",\"metrics\":{\"voltage\":12.5}}"));
+            },
+            AllowFences,
+            CreateHost());
+
+        Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
+        using var invocation = JsonDocument.Parse(capturedContext!.InputPayload!);
+        Assert.Equal(3.50m, invocation.RootElement.GetProperty("inputs").GetProperty("limit").GetDecimal());
+        Assert.Equal(
+            ["--limit", "3.5"],
+            invocation.RootElement.GetProperty("arguments")
+                .EnumerateArray()
+                .Select(item => item.GetString()!)
+                .ToArray());
+    }
+
+    [Fact]
+    public async Task MissingProductionInputRejectsBeforeVendorProviderRuns()
+    {
+        var providerInvoked = false;
+        var route = CreateRoute(
+            ProjectReleaseExternalProgramLaunchKinds.Provider,
+            executable: null,
+            providerRoute: new ProjectReleaseProcessCommandRoute(
+                "provider.external-program",
+                new DeviceCapabilityId("test.external")),
+            productionInputMapping: new ExternalProgramRouteInputMapping(
+                "$production.inspection.limit",
+                "limit"));
+
+        var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
+            CreateContext(),
+            route,
+            (_, _, _) =>
+            {
+                providerInvoked = true;
+                return ValueTask.FromResult(RuntimeCommandExecutionResult.Completed("{}"));
+            },
+            AllowFences,
+            new RecordingExternalProgramHost());
+
+        Assert.Equal(RuntimeCommandExecutionOutcome.Rejected, result.Outcome);
+        Assert.False(providerInvoked);
+        Assert.Contains("unsupported or duplicated input mapping", result.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -222,7 +332,9 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             AllowFences,
             CreateHost());
 
-        Assert.Equal(RuntimeCommandExecutionOutcome.Completed, result.Outcome);
+        Assert.True(
+            result.Outcome == RuntimeCommandExecutionOutcome.Completed,
+            result.Reason);
         var evidence = Assert.IsType<RuntimeCommandEvidence>(
             RuntimeCommandEvidencePayload.Read(result.Payload));
         var stdout = Assert.Single(evidence.Artifacts, artifact => artifact.Name == "stdout.log");
@@ -299,16 +411,16 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
     [Fact]
     public async Task ApplicationExecutableTimeoutTerminatesAndFailsClosed()
     {
-        var executable = CopyDelayProgramIntoApplication();
+        var program = CreateAtomicOutputResidueProgram(delayMilliseconds: 5_000);
         var route = CreateRoute(
             ProjectReleaseExternalProgramLaunchKinds.ApplicationExecutable,
-            executable,
+            program.Executable,
             providerRoute: null,
-            argumentTemplates: DelayArguments(),
-            timeoutMilliseconds: 100);
+            argumentTemplates: program.Arguments,
+            timeoutMilliseconds: 2_000);
 
         var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
-            CreateContext(TimeSpan.FromMilliseconds(100)),
+            CreateContext(timeout: TimeSpan.FromSeconds(2)),
             route,
             ProviderMustNotRun,
             AllowFences,
@@ -317,7 +429,41 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
         Assert.True(
             result.Outcome == RuntimeCommandExecutionOutcome.TimedOut,
             result.Reason);
-        Assert.Contains("100 ms", result.Reason, StringComparison.Ordinal);
+        Assert.Contains("2000 ms", result.Reason, StringComparison.Ordinal);
+        Assert.Contains(
+            OpenLineOps.VendorTestHelper.Program.AtomicOutputResidueMarker,
+            result.Reason,
+            StringComparison.Ordinal);
+        var evidence = Assert.IsType<RuntimeCommandEvidence>(
+            RuntimeCommandEvidencePayload.Read(result.Payload));
+        Assert.DoesNotContain(
+            evidence.Artifacts,
+            artifact => artifact.Name == OpenLineOps.VendorTestHelper.Program.AtomicOutputResidueFileName);
+        Assert.Empty(Directory.EnumerateFiles(
+            _hostRoot,
+            OpenLineOps.VendorTestHelper.Program.AtomicOutputResidueFileName,
+            SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task SuccessfulExecutableCannotHideNonCanonicalArtifactAsAtomicWriteResidue()
+    {
+        var program = CreateAtomicOutputResidueProgram(delayMilliseconds: 0);
+        var route = CreateRoute(
+            ProjectReleaseExternalProgramLaunchKinds.ApplicationExecutable,
+            program.Executable,
+            providerRoute: null,
+            argumentTemplates: program.Arguments);
+
+        var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
+            CreateContext(),
+            route,
+            ProviderMustNotRun,
+            AllowFences,
+            CreateHost());
+
+        Assert.Equal(RuntimeCommandExecutionOutcome.Failed, result.Outcome);
+        Assert.Contains("artifact path is not canonical", result.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -337,7 +483,7 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             timeoutMilliseconds: 2_000);
 
         var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
-            CreateContext(TimeSpan.FromSeconds(2)),
+            CreateContext(timeout: TimeSpan.FromSeconds(2)),
             route,
             ProviderMustNotRun,
             AllowFences,
@@ -377,7 +523,7 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             timeoutMilliseconds: 30_000);
         using var cancellation = new CancellationTokenSource();
         var execution = ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
-                CreateContext(TimeSpan.FromSeconds(30)),
+                CreateContext(timeout: TimeSpan.FromSeconds(30)),
                 route,
                 ProviderMustNotRun,
                 AllowFences,
@@ -389,7 +535,10 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
         cancellation.Cancel();
         var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
 
-        Assert.Equal(RuntimeCommandExecutionOutcome.Canceled, result.Outcome);
+        Assert.True(
+            result.Outcome == RuntimeCommandExecutionOutcome.Canceled,
+            result.Reason);
+        Assert.Equal(ResultJudgement.Aborted, result.ResultJudgement);
         Assert.False(await IsProcessRunningAsync(childProcessId));
     }
 
@@ -562,9 +711,9 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             RequireRestrictedHostIdentity = true,
             RequireImmutableContentProtection = false,
             RequireAppContainerIsolation = true,
-            AppContainerProfileName = "OpenLineOps.Tests.ExternalPrograms"
+            AppContainerProfileName = _appContainerProfileName,
+            RestrictedServiceSid = "S-1-5-80-123-456-789-1011-1213"
         };
-        options.AllowedRestrictedHostSids.Add("S-1-5-21-1000");
         return new ExternalProgramHost(
             options,
             processLauncher: null,
@@ -580,7 +729,9 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
         ProjectReleaseRuntimeCommandRoute? providerRoute,
         IReadOnlyCollection<string>? argumentTemplates = null,
         long timeoutMilliseconds = 30_000,
-        bool networkAccessAllowed = false)
+        bool networkAccessAllowed = false,
+        ExternalProgramRouteInputMapping? productionInputMapping = null,
+        ExternalProgramRouteResultMapping? extraResultMapping = null)
     {
         var resourceRelativePath = executable is null
             ? "external-programs/resource.external-program"
@@ -639,13 +790,15 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             executableSha256,
             files,
             argumentTemplates ?? [],
-            [
+            new ExternalProgramRouteInputMapping[]
+            {
                 new ExternalProgramRouteInputMapping("$product.identity", "serial"),
                 new ExternalProgramRouteInputMapping("$product.model", "model"),
                 new ExternalProgramRouteInputMapping("$run.id", "runId"),
                 new ExternalProgramRouteInputMapping("$operation.id", "operationId")
-            ],
-            [
+            }.Concat(productionInputMapping is null ? [] : [productionInputMapping]).ToArray(),
+            new ExternalProgramRouteResultMapping[]
+            {
                 new ExternalProgramRouteResultMapping(
                     "$.outcome",
                     "test.outcome",
@@ -654,7 +807,7 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
                     "$.metrics.voltage",
                     "test.voltage",
                     ProductionContextValueKind.FixedPoint)
-            ],
+            }.Concat(extraResultMapping is null ? [] : [extraResultMapping]).ToArray(),
             new ExternalProgramRouteOutcomeMapping(
                 "$.outcome",
                 "Passed",
@@ -677,7 +830,9 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             providerRoute);
     }
 
-    private static RuntimeCommandExecutionContext CreateContext(TimeSpan? timeout = null)
+    private static RuntimeCommandExecutionContext CreateContext(
+        IReadOnlyDictionary<string, ProductionContextValue>? productionInputs = null,
+        TimeSpan? timeout = null)
     {
         return new RuntimeCommandExecutionContext(
             new RuntimeSessionId(Guid.Parse("00000000-0000-0000-0000-000000000001")),
@@ -707,6 +862,7 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             "project-main",
             "application-main",
             "snapshot-main",
+            productionInputs ?? new Dictionary<string, ProductionContextValue>(),
             [new ResourceLeaseFenceEvidence(
                 new ResourceRequirement(ResourceKind.Station, "station-eol"),
                 1,
@@ -715,12 +871,13 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
 
     private sealed class TestHostIdentityReader : IExternalProgramHostIdentityReader
     {
-        public ExternalProgramHostIdentity Read() => new(
-            "FACTORY\\OpenLineOpsTestAgent",
-            "S-1-5-21-1000",
-            IsAuthenticated: true,
-            IsSystem: false,
-            IsAdministrator: false);
+        public ExternalProgramHostIdentity Read(string requiredServiceSid) => new(
+            "S-1-5-19",
+            requiredServiceSid,
+            ServiceLogonSidEnabled: true,
+            IsRestrictedToken: true,
+            ServiceSidEnabled: true,
+            ServiceSidRestricted: true);
     }
 
     private sealed class RecordingExternalProgramHost : IExternalProgramHost
@@ -761,14 +918,31 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
         return $"programs/external-program/{fileName}";
     }
 
-    private string CopyDelayProgramIntoApplication()
+    private FrozenTestProgram CreateAtomicOutputResidueProgram(int delayMilliseconds)
     {
-        if (!OperatingSystem.IsWindows())
+        if (OperatingSystem.IsWindows())
         {
-            return CopyShellIntoApplication();
+            return new FrozenTestProgram(
+                CopyVendorHelperIntoApplication(),
+                [
+                    "sandbox-atomic-output-residue",
+                    delayMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                ]);
         }
 
-        return CopyVendorHelperIntoApplication();
+        var command = "printf '%s' 'uncommitted' > \"$OPENLINEOPS_OUTPUT_DIRECTORY/"
+                      + OpenLineOps.VendorTestHelper.Program.AtomicOutputResidueFileName
+                      + "\"; printf '%s\\n' '"
+                      + OpenLineOps.VendorTestHelper.Program.AtomicOutputResidueMarker
+                      + "' >&2";
+        if (delayMilliseconds > 0)
+        {
+            var delaySeconds = Math.Max(1, (delayMilliseconds + 999) / 1_000);
+            command += "; sleep "
+                       + delaySeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return new FrozenTestProgram(CopyShellIntoApplication(), ["-c", command]);
     }
 
     private FrozenTestProgram CreateJsonOutputProgram()
@@ -903,13 +1077,6 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
         return OperatingSystem.IsWindows()
             ? ["/d", "/s", "/c", "exit /b 7"]
             : ["-c", "exit 7"];
-    }
-
-    private static IReadOnlyCollection<string> DelayArguments()
-    {
-        return OperatingSystem.IsWindows()
-            ? ["--mode", "Delay", "--delay-milliseconds", "5000"]
-            : ["-c", "sleep 5"];
     }
 
     private static ValueTask<RuntimeCommandExecutionResult> ProviderMustNotRun(

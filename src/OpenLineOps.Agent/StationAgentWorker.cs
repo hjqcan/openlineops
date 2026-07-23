@@ -1,17 +1,19 @@
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
+using OpenLineOps.Agent.Infrastructure.Transport;
 using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.Agent;
 
-public sealed class StationAgentWorker(
+internal sealed class StationAgentWorker(
     StationJobCoordinator coordinator,
     StationResourceLeaseChangeCoordinator resourceLeaseChanges,
     IStationJobReceiver receiver,
     IStationSafetyReceiver safetyReceiver,
     IStationSafetyActuator safetyActuator,
     StationJobOutboxDispatcher outboxDispatcher,
+    StationAgentShutdownState shutdownState,
     ILogger<StationAgentWorker> logger) : BackgroundService
 {
     private static readonly Action<ILogger, StationJobId, string, Exception?> LogRecoveryRequired =
@@ -58,16 +60,56 @@ public sealed class StationAgentWorker(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var recovered = await coordinator.RecoverAsync(stoppingToken).ConfigureAwait(false);
-        foreach (var job in recovered.Where(job => job.Status == StationJobStatus.RecoveryRequired))
+        var workerLoopsStarted = false;
+        var quiesced = false;
+        try
         {
-            LogRecoveryRequired(logger, job.JobId, job.OperationId, null);
-        }
+            var recovered = await coordinator.RecoverAsync(stoppingToken).ConfigureAwait(false);
+            foreach (var job in recovered.Where(job =>
+                         job.Status == StationJobStatus.RecoveryRequired))
+            {
+                LogRecoveryRequired(logger, job.JobId, job.OperationId, null);
+            }
 
-        await Task.WhenAll(
-                ReceiveWithReconnectAsync(stoppingToken),
-                ReceiveSafetyWithReconnectAsync(stoppingToken),
-                DispatchOutboxAsync(stoppingToken))
+            workerLoopsStarted = true;
+            await RunWorkerLoopsAsync(stoppingToken).ConfigureAwait(false);
+            quiesced = true;
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            quiesced = true;
+        }
+        finally
+        {
+            if (!workerLoopsStarted || quiesced)
+            {
+                shutdownState.MarkWorkerQuiesced();
+            }
+        }
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await StationAgentWorkerLifecycle.RequireQuiescenceAsync(
+                base.StopAsync(cancellationToken),
+                shutdownState,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task RunWorkerLoopsAsync(CancellationToken stoppingToken)
+    {
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        Task[] loops =
+        [
+            ReceiveWithReconnectAsync(lifetime.Token),
+            ReceiveSafetyWithReconnectAsync(lifetime.Token),
+            DispatchOutboxAsync(lifetime.Token)
+        ];
+        await StationAgentWorkerLifecycle.AwaitLoopsAsync(
+                loops,
+                lifetime,
+                stoppingToken)
             .ConfigureAwait(false);
     }
 
@@ -89,6 +131,14 @@ public sealed class StationAgentWorker(
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
                 return;
+            }
+            catch (Exception exception) when (ContainsDeliveryDrainTimeout(exception))
+            {
+                throw;
+            }
+            catch (Exception) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception exception)
             {
@@ -165,6 +215,14 @@ public sealed class StationAgentWorker(
             {
                 return;
             }
+            catch (Exception exception) when (ContainsDeliveryDrainTimeout(exception))
+            {
+                throw;
+            }
+            catch (Exception) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception exception)
             {
                 LogDisconnected(logger, retryDelay, exception);
@@ -201,4 +259,10 @@ public sealed class StationAgentWorker(
         }
         while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
     }
+
+    private static bool ContainsDeliveryDrainTimeout(Exception exception) =>
+        exception is StationDeliveryDrainTimeoutException
+        || exception is AggregateException aggregate
+        && aggregate.Flatten().InnerExceptions.Any(static inner =>
+            inner is StationDeliveryDrainTimeoutException);
 }
