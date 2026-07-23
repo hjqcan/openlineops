@@ -66,7 +66,7 @@ public sealed class StationJobCoordinatorTests
             job,
             validator,
             principalSid,
-            TimeSpan.FromMilliseconds(100));
+            TimeSpan.FromSeconds(2));
         using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var server = authority.RunAsync(cancellation.Token);
 
@@ -80,7 +80,10 @@ public sealed class StationJobCoordinatorTests
             {
                 await blocker.ConnectAsync(cancellation.Token);
                 WindowsIdentityBoundNamedPipe.Verify(blocker, principalSid);
-                await Task.Delay(300, cancellation.Token);
+                var disconnected = await blocker.ReadAsync(
+                    new byte[1],
+                    cancellation.Token);
+                Assert.Equal(0, disconnected);
             }
 
             var duplicate = Record.Exception(() =>
