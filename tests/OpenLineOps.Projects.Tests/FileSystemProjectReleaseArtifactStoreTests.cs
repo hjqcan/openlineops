@@ -519,6 +519,38 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             "snapshot.concurrent-source-change")));
     }
 
+    [Theory]
+    [InlineData(unchecked((int)0x80070020))]
+    [InlineData(unchecked((int)0x80070021))]
+    public void ConcurrentSourceMutationClassifierRecognizesWindowsSharingFailures(int hResult)
+    {
+        var exception = new IOException("Simulated Windows file access conflict.", hResult);
+
+        Assert.Equal(
+            OperatingSystem.IsWindows(),
+            FileSystemProjectReleaseArtifactStore.IsConcurrentSourceMutationFailure(exception));
+    }
+
+    [Fact]
+    public void ConcurrentSourceMutationClassifierRecognizesMissingSourceFailures()
+    {
+        Assert.True(FileSystemProjectReleaseArtifactStore.IsConcurrentSourceMutationFailure(
+            new FileNotFoundException("Source file was removed.")));
+        Assert.True(FileSystemProjectReleaseArtifactStore.IsConcurrentSourceMutationFailure(
+            new DirectoryNotFoundException("Source directory was removed.")));
+    }
+
+    [Fact]
+    public void ConcurrentSourceMutationClassifierRejectsUnrelatedFileSystemFailures()
+    {
+        Assert.False(FileSystemProjectReleaseArtifactStore.IsConcurrentSourceMutationFailure(
+            new IOException("Unrelated I/O failure.")));
+        Assert.False(FileSystemProjectReleaseArtifactStore.IsConcurrentSourceMutationFailure(
+            new UnauthorizedAccessException("Access denied.")));
+        Assert.False(FileSystemProjectReleaseArtifactStore.IsConcurrentSourceMutationFailure(
+            new PathTooLongException("Path is too long.")));
+    }
+
     [Fact]
     public async Task OpenRejectsTamperedSourceFile()
     {

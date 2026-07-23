@@ -14,6 +14,8 @@ public sealed class FileSystemProjectReleaseArtifactStore :
     IProjectReleaseArtifactStore,
     IInstalledProjectReleaseReader
 {
+    private const int HResultSharingViolation = unchecked((int)0x80070020);
+    private const int HResultLockViolation = unchecked((int)0x80070021);
     private const int FileBufferSize = 64 * 1024;
     private static readonly string[] SupportedRouteJudgements =
         ["Passed", "Failed", "Aborted", "Unknown", "NotApplicable"];
@@ -362,7 +364,16 @@ public sealed class FileSystemProjectReleaseArtifactStore :
         string sourceApplicationRelativePath,
         CancellationToken cancellationToken)
     {
-        var currentTree = InspectFileTree(sourceApplicationPath);
+        FileTreeSnapshot currentTree;
+        try
+        {
+            currentTree = InspectFileTree(sourceApplicationPath);
+        }
+        catch (IOException exception) when (IsConcurrentSourceMutationFailure(exception))
+        {
+            throw SourceChangedWhilePublishing(relativeFile: null, exception);
+        }
+
         if (!initialTree.Directories.SequenceEqual(currentTree.Directories, StringComparer.Ordinal)
             || !initialTree.Files.SequenceEqual(currentTree.Files, StringComparer.Ordinal))
         {
@@ -382,15 +393,49 @@ public sealed class FileSystemProjectReleaseArtifactStore :
                 throw new IOException("Project application source changed while the release was being published.");
             }
 
-            var sourceInfo = new FileInfo(sourcePath);
-            var sourceSha256 = await ComputeFileSha256Async(sourcePath, cancellationToken).ConfigureAwait(false);
-            if (sourceInfo.Length != copiedFile.SizeBytes
+            long sourceSizeBytes;
+            string sourceSha256;
+            try
+            {
+                sourceSizeBytes = new FileInfo(sourcePath).Length;
+                sourceSha256 = await ComputeFileSha256Async(sourcePath, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (IOException exception) when (IsConcurrentSourceMutationFailure(exception))
+            {
+                throw SourceChangedWhilePublishing(relativeFile, exception);
+            }
+
+            if (sourceSizeBytes != copiedFile.SizeBytes
                 || !string.Equals(sourceSha256, copiedFile.Sha256, StringComparison.Ordinal))
             {
                 throw new IOException(
                     $"Project application source file '{relativeFile}' changed while the release was being published.");
             }
         }
+    }
+
+    private static IOException SourceChangedWhilePublishing(
+        string? relativeFile,
+        Exception innerException)
+    {
+        var subject = relativeFile is null
+            ? "Project application source"
+            : $"Project application source file '{relativeFile}'";
+        return new IOException(
+            $"{subject} changed while the release was being published or became unavailable.",
+            innerException);
+    }
+
+    internal static bool IsConcurrentSourceMutationFailure(Exception exception)
+    {
+        if (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return true;
+        }
+
+        return OperatingSystem.IsWindows()
+               && exception.HResult is HResultSharingViolation or HResultLockViolation;
     }
 
     private static FileTreeSnapshot FilterReleaseSourceTree(
