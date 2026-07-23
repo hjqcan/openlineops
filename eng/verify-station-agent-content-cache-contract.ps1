@@ -565,6 +565,15 @@ foreach ($coordinationLiteral in @(
     Assert-ContainsLiteral $serviceTokenHelperOperation $coordinationLiteral `
         "The helper operation is missing strict suspended-relay coordination '$coordinationLiteral'."
 }
+Assert-ContainsLiteral $serviceTokenHelperOperation `
+    'failureReason = "source-service-before-relay-ready";' `
+    "The helper does not distinguish a source service failure after relay validation and before readiness."
+Assert-ContainsLiteral $serviceTokenBridge `
+    'or "source-service-before-relay-ready"' `
+    "The runner does not accept the exact post-validation source-service failure contract."
+Assert-ContainsLiteral $serviceTokenContractTests `
+    'new FailureContract("source-relay", "source-service-before-relay-ready", true, true, true, 2, false)' `
+    "The helper contract tests do not cover the exact post-validation source-service failure."
 $createSuspendedIndex = $serviceTokenHelperOperation.IndexOf(
     "SourceTokenRelayProcess.CreateSuspended(",
     [System.StringComparison]::Ordinal)
