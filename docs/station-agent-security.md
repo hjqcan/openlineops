@@ -57,9 +57,12 @@ completion.
 
 The helper first authenticates to a random coordination pipe. The runner binds
 the pipe client to the exact SCM PID and virtual-account SID before granting any
-Station-process access. Only then does one temporary leading process-object ACE
-grant the helper SID exactly `PROCESS_CREATE_PROCESS` on the retained Station
-PID. The leading position is a deliberate, short-lived exact-SID exception to
+Station-process access. The pipe deliberately permits identification only: the
+runner can authenticate the helper but cannot act as it. One temporary leading
+process-object ACE then grants the helper SID exactly
+`PROCESS_CREATE_PROCESS` on the retained Station PID. Effective capability is
+proved only when the fixed helper's own primary token opens that process. The
+leading position is a deliberate, short-lived exact-SID exception to
 any broader process deny ACE; no original ACE is reordered or removed, and the
 original DACL is restored byte-for-byte. Query, synchronization, PID, creation
 time, liveness, image/hash and job membership remain runner-only checks through
