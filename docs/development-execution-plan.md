@@ -250,10 +250,12 @@ entry. The SERVICE well-known SID `S-1-5-6` remains enabled and the helper SID
 must be absent from `TokenRestrictedSids`.
 Before any Station capability exists, a minimal-rights coordination pipe binds
 that exact account SID to the exact SCM helper PID and protected helper hash. A
-scoped process-object lease then grants only that SID
-`PROCESS_CREATE_PROCESS | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` on
-the exact retained Station PID. After validating the Station SCM binding,
-creation time, image and hash, the helper uses
+scoped leading process-object lease then grants only that SID
+`PROCESS_CREATE_PROCESS` on the exact retained Station PID. This deliberate
+short-lived exact-SID exception precedes any broader deny ACE without changing
+or removing the original entries; the original DACL is restored byte-for-byte.
+The runner alone validates the Station SCM binding, retained PID, creation time,
+liveness, image/hash and job membership. The helper uses
 `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` to create a fixed, suspended relay;
 Windows supplies the relay with the Station process token. A simultaneous
 `PROC_THREAD_ATTRIBUTE_JOB_LIST` places it atomically in a non-inheritable,
@@ -268,12 +270,14 @@ authenticated coordination channel. The runner immediately retains that exact
 suspended-process handle, reads the authoritative creation time, verifies its
 image and hash, and returns the creation time in its capture acknowledgement.
 The helper binds that value to an independent creation-time read from its
-original native process handle before validating the image, containment job and
-source process, closes its only
+original native relay-process handle before validating the relay image and
+containment job, closes its only
 `PROCESS_CREATE_PROCESS` handle, and sends a separate ready marker. Before
-acknowledging resume, the runner rehashes the exact full self-contained helper
-inventory, revalidates all bridge ACLs, restores and bytewise revalidates the
-original Station process DACL, and creates the control pipe. The creation lease
+acknowledging resume, the runner revalidates the Station SCM binding, retained
+PID, creation time, liveness, image/hash and job membership, rehashes the exact full
+self-contained helper inventory, revalidates all bridge ACLs, restores and
+bytewise revalidates the original Station process DACL, and creates the control
+pipe. The creation lease
 and strong handle therefore cannot span `RunAsClient` or any business-side
 effect.
 The runner treats its PID-opened handle as provisional until that ready marker,

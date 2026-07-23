@@ -116,7 +116,7 @@ public sealed class WindowsServiceTokenTestHelperContractTests
     }
 
     [Fact]
-    public void SourceProcessAccessLeaseGrantsOnlyRelayCreationQueryAndWaitAndRestoresDacl()
+    public void SourceProcessAccessLeaseGrantsOnlyRelayCreationAndRestoresDacl()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -152,6 +152,47 @@ public sealed class WindowsServiceTokenTestHelperContractTests
             WindowsProcessAccessLease.HasExactRelayCreationAce(
                 process.SafeHandle,
                 bridgeServiceSid));
+    }
+
+    [Fact]
+    public void KernelObjectGrantLeadsAnExistingBroadDenyWithoutChangingIt()
+    {
+        const int requestedAccess = 0x00000080;
+        var worldSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+        var localSystemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var helperSid = new SecurityIdentifier(
+            WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
+                "OpenLineOpsTokenBridge-" + Guid.NewGuid().ToString("N")));
+        var original = new RawAcl(GenericAcl.AclRevision, capacity: 2);
+        original.InsertAce(0, new CommonAce(
+            AceFlags.None,
+            AceQualifier.AccessDenied,
+            unchecked((int)0x10000000),
+            worldSid,
+            isCallback: false,
+            opaque: null));
+        original.InsertAce(1, new CommonAce(
+            AceFlags.Inherited,
+            AceQualifier.AccessAllowed,
+            requestedAccess,
+            localSystemSid,
+            isCallback: false,
+            opaque: null));
+        var originalBytes = SerializeAcl(original);
+
+        var updated = WindowsKernelObjectAccessLease.BuildTemporaryDacl(
+            original,
+            helperSid,
+            requestedAccess);
+
+        var grant = Assert.IsType<CommonAce>(updated[0]);
+        Assert.Equal(AceQualifier.AccessAllowed, grant.AceQualifier);
+        Assert.Equal(requestedAccess, grant.AccessMask);
+        Assert.Equal(helperSid, grant.SecurityIdentifier);
+        Assert.Equal(original.Count + 1, updated.Count);
+        Assert.Equal(
+            originalBytes,
+            SerializeAclWithoutFirstAce(updated));
     }
 
     [Fact]
@@ -378,19 +419,16 @@ public sealed class WindowsServiceTokenTestHelperContractTests
             new FailureContract("source-service", "source-service", true, false, false, 0, false),
             new FailureContract("source-process", "open-process", true, true, false, 0, false),
             new FailureContract("source-process", "process-validation", true, true, false, 0, false),
-            new FailureContract("source-process", "open-weak-process", true, true, true, 2, false),
-            new FailureContract("source-process", "weak-process-validation", true, true, true, 2, false),
             new FailureContract("source-relay", "create-source-token-relay", true, true, true, 0, false),
             new FailureContract("source-relay", "relay-observation", true, true, true, 3, false),
             new FailureContract("source-relay", "relay-creation-time", true, true, true, 3, false),
             new FailureContract("source-relay", "relay-validation", true, true, true, 1, false),
+            new FailureContract("source-relay", "source-service-before-relay-ready", true, true, true, 2, false),
             new FailureContract("source-relay", "relay-ready", true, true, true, 2, false),
             new FailureContract("source-relay", "source-service-before-relay-resume", true, true, true, 2, false),
-            new FailureContract("source-relay", "source-process-before-relay-resume", true, true, true, 2, false),
             new FailureContract("source-relay", "resume-source-token-relay", true, true, true, 2, false),
             new FailureContract("source-relay", "source-token-relay-exit", true, true, true, 2, false),
-            new FailureContract("post-receipt-source", "source-service-post-receipt", true, true, true, 2, true),
-            new FailureContract("post-receipt-source", "process-validation-post-receipt", true, true, true, 2, true)
+            new FailureContract("post-receipt-source", "source-service-post-receipt", true, true, true, 2, true)
         };
 
         foreach (var contract in contracts)
@@ -664,6 +702,28 @@ public sealed class WindowsServiceTokenTestHelperContractTests
                 (FileInfo)entry,
                 AccessControlSections.Owner);
         return (SecurityIdentifier?)security.GetOwner(typeof(SecurityIdentifier));
+    }
+
+    private static byte[] SerializeAcl(RawAcl acl)
+    {
+        var bytes = new byte[acl.BinaryLength];
+        acl.GetBinaryForm(bytes, 0);
+        return bytes;
+    }
+
+    private static byte[] SerializeAclWithoutFirstAce(RawAcl acl)
+    {
+        var retained = new RawAcl(acl.Revision, acl.Count - 1);
+        for (var index = 1; index < acl.Count; index++)
+        {
+            var aceBytes = new byte[acl[index].BinaryLength];
+            acl[index].GetBinaryForm(aceBytes, 0);
+            retained.InsertAce(
+                index - 1,
+                GenericAce.CreateFromBinaryForm(aceBytes, 0));
+        }
+
+        return SerializeAcl(retained);
     }
 
     private static string AccessSddl(FileSystemInfo entry)

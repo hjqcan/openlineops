@@ -70,9 +70,7 @@ internal sealed class WindowsProcessAccessLease : IDisposable
             WindowsKernelObjectAccessLease.PrepareOwnedHandle(
                 securityHandle,
                 bridgeServiceSid,
-                unchecked((int)(ProcessCreateProcess
-                                | ProcessQueryLimitedInformation
-                                | Synchronize)),
+                unchecked((int)ProcessCreateProcess),
                 ObjectDescription));
     }
 
@@ -89,9 +87,7 @@ internal sealed class WindowsProcessAccessLease : IDisposable
         WindowsKernelObjectAccessLease.HasExactAce(
             processHandle,
             bridgeServiceSid,
-            unchecked((int)(ProcessCreateProcess
-                            | ProcessQueryLimitedInformation
-                            | Synchronize)),
+            unchecked((int)ProcessCreateProcess),
             ObjectDescription);
 
     public void Dispose() => _lease.Dispose();

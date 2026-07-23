@@ -9,9 +9,7 @@ namespace OpenLineOps.WindowsServiceToken.TestHelper;
 [SupportedOSPlatform("windows")]
 internal static class WindowsNative
 {
-    public const uint ProcessQueryLimitedInformation = 0x1000;
     public const uint ProcessCreateProcess = 0x0080;
-    public const uint Synchronize = 0x00100000;
 
     private const uint ScManagerConnect = 0x0001;
     private const uint ServiceQueryConfig = 0x0001;
@@ -21,9 +19,6 @@ internal static class WindowsNative
     private const uint ScStatusProcessInfo = 0;
     private const uint ServiceConfigServiceSidInfo = 5;
     private const uint ServiceSidTypeRestricted = 3;
-    private const uint WaitObject0 = 0;
-    private const uint WaitTimeout = 258;
-    private const uint WaitFailed = uint.MaxValue;
     private const int ErrorInsufficientBuffer = 122;
     private const uint GroupEnabled = 0x00000004;
     private const uint GroupUseForDenyOnly = 0x00000010;
@@ -117,54 +112,22 @@ internal static class WindowsNative
         }
     }
 
-    public static SafeProcessHandle OpenRequiredProcess(
-        uint processId,
-        uint desiredAccess,
-        string role)
+    public static SafeProcessHandle OpenRequiredSourceCreationProcess(uint processId)
     {
-        var process = OpenProcess(desiredAccess, inheritHandle: false, processId);
+        var process = OpenProcess(
+            ProcessCreateProcess,
+            inheritHandle: false,
+            processId);
         if (process.IsInvalid)
         {
             var error = Marshal.GetLastPInvokeError();
             process.Dispose();
             throw new Win32Exception(
                 error,
-                $"Could not open exact {role} process PID {processId}; Win32 error {error}.");
+                $"Could not open exact source Station relay-creation process PID {processId}; Win32 error {error}.");
         }
 
         return process;
-    }
-
-    public static void ValidateProcessCreationTime(
-        SafeProcessHandle process,
-        uint processId,
-        long expectedCreatedAtUtcTicks,
-        string role)
-    {
-        var actualCreatedAtUtcTicks = ReadProcessCreatedAtUtcTicks(process, processId, role);
-        if (actualCreatedAtUtcTicks != expectedCreatedAtUtcTicks)
-        {
-            throw new InvalidOperationException(
-                $"Exact {role} PID {processId} creation time is {actualCreatedAtUtcTicks}, not requested {expectedCreatedAtUtcTicks} UTC ticks.");
-        }
-
-    }
-
-    public static void ValidateProcessExecutablePath(
-        SafeProcessHandle process,
-        uint processId,
-        string expectedExecutablePath,
-        string role)
-    {
-        var actualExecutablePath = ReadProcessExecutablePath(process, processId, role);
-        if (!string.Equals(
-                actualExecutablePath,
-                expectedExecutablePath,
-                StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException(
-                $"Exact {role} PID {processId} runs '{actualExecutablePath}', not requested image '{expectedExecutablePath}'.");
-        }
     }
 
     public static void ValidateCanonicalSourceExecutableHandle(
@@ -228,32 +191,6 @@ internal static class WindowsNative
         return path.StartsWith(extendedPrefix, StringComparison.OrdinalIgnoreCase)
             ? path[extendedPrefix.Length..]
             : path;
-    }
-
-    public static void EnsureProcessAlive(
-        SafeProcessHandle process,
-        uint processId,
-        string role)
-    {
-        var wait = WaitForSingleObject(process, milliseconds: 0);
-        if (wait == WaitTimeout)
-        {
-            return;
-        }
-
-        if (wait == WaitFailed)
-        {
-            throw NativeFailure($"Could not inspect exact {role} PID {processId} liveness.");
-        }
-
-        if (wait == WaitObject0)
-        {
-            throw new InvalidOperationException(
-                $"Exact {role} PID {processId} has exited.");
-        }
-
-        throw new InvalidOperationException(
-            $"Exact {role} PID {processId} returned unexpected wait status 0x{wait:x8}.");
     }
 
     public static void ValidateCurrentSourceToken(string expectedServiceSid)
@@ -392,42 +329,6 @@ internal static class WindowsNative
                 $"Could not derive the SID for {role} service '{serviceName}'.",
                 exception);
         }
-    }
-
-    private static string ReadProcessExecutablePath(
-        SafeProcessHandle process,
-        uint processId,
-        string role)
-    {
-        const int maximumWindowsPathLength = 32_768;
-        var path = new char[maximumWindowsPathLength];
-        var length = checked((uint)path.Length);
-        if (!QueryFullProcessImageName(process, flags: 0, path, ref length) || length == 0)
-        {
-            throw NativeFailure($"Could not read exact {role} PID {processId} image path.");
-        }
-
-        return Path.GetFullPath(new string(path, 0, checked((int)length)));
-    }
-
-    private static long ReadProcessCreatedAtUtcTicks(
-        SafeProcessHandle process,
-        uint processId,
-        string role)
-    {
-        if (!GetProcessTimes(
-                process,
-                out var creationTime,
-                out _,
-                out _,
-                out _))
-        {
-            throw NativeFailure($"Could not read exact {role} PID {processId} creation time.");
-        }
-
-        var fileTime = checked(((long)creationTime.HighDateTime << 32)
-                               | creationTime.LowDateTime);
-        return DateTime.FromFileTimeUtc(fileTime).Ticks;
     }
 
     private static TokenEvidence ReadTokenEvidence(SafeHandle token)
@@ -752,28 +653,6 @@ internal static class WindowsNative
         [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
         uint processId);
 
-    [DllImport(
-        "kernel32.dll",
-        EntryPoint = "QueryFullProcessImageNameW",
-        CharSet = CharSet.Unicode,
-        ExactSpelling = true,
-        SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool QueryFullProcessImageName(
-        SafeProcessHandle process,
-        uint flags,
-        [Out] char[] executablePath,
-        ref uint executablePathLength);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetProcessTimes(
-        SafeProcessHandle process,
-        out NativeFileTime creationTime,
-        out NativeFileTime exitTime,
-        out NativeFileTime kernelTime,
-        out NativeFileTime userTime);
-
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandle(
@@ -791,11 +670,6 @@ internal static class WindowsNative
         [Out] char[] filePath,
         uint filePathLength,
         uint flags);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint WaitForSingleObject(
-        SafeProcessHandle process,
-        uint milliseconds);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

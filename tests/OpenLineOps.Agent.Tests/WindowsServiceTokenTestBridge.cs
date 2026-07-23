@@ -365,6 +365,19 @@ internal static class WindowsServiceTokenTestBridge
             DeleteServiceRequired(service, bridgeServiceName);
             serviceMarkedForDeletion = true;
 
+            ValidateSourceServiceAndProcessRunning(
+                manager,
+                canonicalSourceServiceName,
+                sourceProcessHandle,
+                sourceProcessId,
+                sourceProcessCreatedAtUtcTicks);
+            ValidateCapturedProcessImageAndHash(
+                sourceProcessHandle,
+                sourceProcessId,
+                "source Station",
+                fullSourceExecutablePath,
+                canonicalSourceExecutableSha256);
+            ValidateSourceProcessOutsideJob(sourceProcessHandle, sourceProcessId);
             sourceProcessAccessLease = WindowsProcessAccessLease.Prepare(
                 sourceProcessHandle,
                 sourceProcessId,
@@ -404,6 +417,19 @@ internal static class WindowsServiceTokenTestBridge
             }
             relayReadyReceived = true;
             relayProcessIdentityConfirmed = true;
+            ValidateSourceServiceAndProcessRunning(
+                manager,
+                canonicalSourceServiceName,
+                sourceProcessHandle,
+                sourceProcessId,
+                sourceProcessCreatedAtUtcTicks);
+            ValidateCapturedProcessImageAndHash(
+                sourceProcessHandle,
+                sourceProcessId,
+                "source Station",
+                fullSourceExecutablePath,
+                canonicalSourceExecutableSha256);
+            ValidateSourceProcessOutsideJob(sourceProcessHandle, sourceProcessId);
             VerifyHelperBundle(helperBundleRoot, helperBundleInventory);
             AssertBridgeTreeSecurity(
                 bridgeRoot,
@@ -1695,6 +1721,25 @@ internal static class WindowsServiceTokenTestBridge
             "pre-action source Station");
     }
 
+    private static void ValidateSourceProcessOutsideJob(
+        SafeProcessHandle sourceProcess,
+        uint sourceProcessId)
+    {
+        if (!IsProcessInJob(sourceProcess, IntPtr.Zero, out var sourceIsInJob))
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(
+                error,
+                $"Could not determine whether exact source Station PID {sourceProcessId} belongs to a job; Win32 error {error}.");
+        }
+
+        if (sourceIsInJob)
+        {
+            throw new InvalidOperationException(
+                $"Source Station PID {sourceProcessId} belongs to a job, so its inherited job contract cannot be proven safe for source-token relay creation.");
+        }
+    }
+
     private static void WriteProtocolByte(Stream stream, byte value)
     {
         stream.WriteByte(value);
@@ -1841,24 +1886,21 @@ internal static class WindowsServiceTokenTestBridge
             "source-process" =>
                 result.FailureReason is "open-process"
                     or "process-validation"
-                ? result.HelperIdentityValidated
-                  && result.SourceServiceValidated
-                  && !result.SourceProcessValidated
-                  && HasNoRelayProcess(result)
-                  && !result.SourceTokenValidated
-                  && !result.ControlPipeConnected
-                  && !result.ReceiptReceived
-                : result.FailureReason is "open-weak-process"
-                    or "weak-process-validation"
-                  && HasValidatedRelayBeforeReceipt(result),
+                && result.HelperIdentityValidated
+                && result.SourceServiceValidated
+                && !result.SourceProcessValidated
+                && HasNoRelayProcess(result)
+                && !result.SourceTokenValidated
+                && !result.ControlPipeConnected
+                && !result.ReceiptReceived,
             "source-relay" =>
                 result.FailureReason is "create-source-token-relay"
                     or "relay-creation-time"
                     or "relay-observation"
                     or "relay-validation"
+                    or "source-service-before-relay-ready"
                     or "relay-ready"
                     or "source-service-before-relay-resume"
-                    or "source-process-before-relay-resume"
                     or "resume-source-token-relay"
                     or "source-token-relay-exit"
                 && result.HelperIdentityValidated
@@ -1877,8 +1919,7 @@ internal static class WindowsServiceTokenTestBridge
                 && !result.ControlPipeConnected
                 && !result.ReceiptReceived,
             "post-receipt-source" =>
-                result.FailureReason is "source-service-post-receipt"
-                    or "process-validation-post-receipt"
+                result.FailureReason == "source-service-post-receipt"
                 && HasEveryValidationFlag(result),
             "source-relay-cleanup" =>
                 result.FailureReason == "terminate-job-and-wait"
@@ -1938,15 +1979,6 @@ internal static class WindowsServiceTokenTestBridge
     private static bool HasReportedUnvalidatedRelayProcess(BridgeResult result) =>
         HasReportedRelayProcess(result)
         && !result.RelayProcessValidated;
-
-    private static bool HasValidatedRelayBeforeReceipt(BridgeResult result) =>
-        result.HelperIdentityValidated
-        && result.SourceServiceValidated
-        && result.SourceProcessValidated
-        && HasValidatedRelayProcess(result)
-        && !result.SourceTokenValidated
-        && !result.ControlPipeConnected
-        && !result.ReceiptReceived;
 
     private static bool HasEveryValidationFlag(BridgeResult result) =>
         result.HelperIdentityValidated
@@ -2744,6 +2776,13 @@ internal static class WindowsServiceTokenTestBridge
         uint desiredAccess,
         [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
         uint processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsProcessInJob(
+        SafeProcessHandle process,
+        IntPtr job,
+        [MarshalAs(UnmanagedType.Bool)] out bool result);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint GetProcessId(SafeProcessHandle process);

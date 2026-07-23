@@ -57,31 +57,35 @@ completion.
 
 The helper first authenticates to a random coordination pipe. The runner binds
 the pipe client to the exact SCM PID and virtual-account SID before granting any
-Station-process access. Only then does one temporary process-object ACE grant the
-helper SID exactly `PROCESS_CREATE_PROCESS |
-PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` on the retained Station PID.
-Query and synchronization bind the SCM PID, creation time, liveness and image;
-`PROCESS_CREATE_PROCESS` is used only by the fixed helper to create one suspended
-relay with `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`. Windows therefore supplies
-that relay with the Station process token without exporting a token handle. The
-source Station must not already belong to another job. The same `STARTUPINFOEX`
+Station-process access. Only then does one temporary leading process-object ACE
+grant the helper SID exactly `PROCESS_CREATE_PROCESS` on the retained Station
+PID. The leading position is a deliberate, short-lived exact-SID exception to
+any broader process deny ACE; no original ACE is reordered or removed, and the
+original DACL is restored byte-for-byte. Query, synchronization, PID, creation
+time, liveness, image/hash and job membership remain runner-only checks through
+its already-retained handle. `PROCESS_CREATE_PROCESS` is used only by the fixed
+helper to create one suspended relay with
+`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`. Windows therefore supplies that relay
+with the Station process token without exporting a token handle. The source
+Station must not already belong to another job. The same `STARTUPINFOEX`
 atomically assigns a private job through `PROC_THREAD_ATTRIBUTE_JOB_LIST`; the
 job has kill-on-close and an active-process limit of one. Breakaway, inherited
 handles, debug rights, process-memory rights, token duplication and dynamic
 privilege changes are forbidden.
 
-Immediately after native process creation, before a subsequent process query or
-validation can fail, the helper reports only the observed relay PID over the
+Immediately after native process creation, before subsequent relay validation
+can fail, the helper reports only the observed relay PID over the
 authenticated coordination pipe. The runner immediately retains that exact
 suspended-process handle, reads its authoritative creation time, validates the
 protected image/hash, and returns the creation time in its capture
 acknowledgement. The helper independently reads creation time from its original
 native process handle and requires an exact match before validating the
-containment job and source process, closing its sole
+relay image and containment job, closing its sole
 `PROCESS_CREATE_PROCESS` handle and emitting a distinct ready marker. The runner
-revalidates the complete immutable helper inventory and
-ACLs, restores and bytewise revalidates the original Station process DACL,
-creates the control pipe, and only then acknowledges resume. Consequently
+revalidates the exact Station SCM binding, retained PID, creation time,
+liveness, image/hash and job membership, then revalidates the complete immutable helper
+inventory and ACLs, restores and bytewise revalidates the original Station
+process DACL, creates the control pipe, and only then acknowledges resume. Consequently
 neither the temporary ACE nor an already-open creation handle spans the
 impersonated test action.
 The PID-opened runner handle remains provisional until that ready marker, or a

@@ -64,17 +64,6 @@ internal sealed class SourceTokenRelayProcess : IDisposable
                 "The source-token relay helper requires its staged win-x64 process.");
         }
 
-        if (!IsProcessInJob(sourceProcess, IntPtr.Zero, out var sourceIsInJob))
-        {
-            throw NativeFailure(
-                "Could not determine whether the exact source Station belongs to a job");
-        }
-        if (sourceIsInJob)
-        {
-            throw new InvalidOperationException(
-                "The source Station belongs to a job, so its inherited job contract cannot be proven safe for source-token relay creation.");
-        }
-
         var helperServiceSid = new SecurityIdentifier(
             WindowsNative.DeriveServiceSid(request.HelperServiceName, "helper"));
         var runnerSid = new SecurityIdentifier(request.RunnerSid);
@@ -212,13 +201,10 @@ internal sealed class SourceTokenRelayProcess : IDisposable
         CreatedAtUtcTicks = actualCreatedAtUtcTicks;
     }
 
-    public void ValidateCreated(
-        WindowsServiceTokenTransferRequest request,
-        SafeProcessHandle sourceProcess)
+    public void ValidateCreated(WindowsServiceTokenTransferRequest request)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(request);
-        ArgumentNullException.ThrowIfNull(sourceProcess);
         if (_resumed)
         {
             throw new InvalidOperationException(
@@ -262,10 +248,6 @@ internal sealed class SourceTokenRelayProcess : IDisposable
                 "The source-token relay was not atomically assigned to its kill-on-close job.");
         }
 
-        WindowsNative.EnsureProcessAlive(
-            sourceProcess,
-            request.SourceProcessId,
-            "source Station");
         _validated = true;
     }
 

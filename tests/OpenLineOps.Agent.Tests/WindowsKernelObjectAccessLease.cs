@@ -93,7 +93,7 @@ internal sealed class WindowsKernelObjectAccessLease : IDisposable
                     $"The {objectDescription} DACL already mentions the one-shot bridge service SID.");
             }
 
-            var insertedAceIndex = FirstInheritedAceIndex(originalDacl);
+            const int insertedAceIndex = 0;
             return new WindowsKernelObjectAccessLease(
                 ownedHandle,
                 originalDescriptor,
@@ -171,23 +171,10 @@ internal sealed class WindowsKernelObjectAccessLease : IDisposable
         RawSecurityDescriptor original,
         RawAcl originalDacl)
     {
-        var updatedDacl = new RawAcl(
-            originalDacl.Revision,
-            checked(originalDacl.Count + 1));
-        for (var index = 0; index < originalDacl.Count; index++)
-        {
-            updatedDacl.InsertAce(index, CloneAce(originalDacl[index]));
-        }
-
-        updatedDacl.InsertAce(
-            _insertedAceIndex,
-            new CommonAce(
-                AceFlags.None,
-                AceQualifier.AccessAllowed,
-                _accessMask,
-                _grantee,
-                isCallback: false,
-                opaque: null));
+        var updatedDacl = BuildTemporaryDacl(
+            originalDacl,
+            _grantee,
+            _accessMask);
         var updated = new RawSecurityDescriptor(
             original.ControlFlags,
             original.Owner,
@@ -209,6 +196,40 @@ internal sealed class WindowsKernelObjectAccessLease : IDisposable
 
         _accessApplied = true;
         VerifyTemporaryDacl(original, originalDacl);
+    }
+
+    internal static RawAcl BuildTemporaryDacl(
+        RawAcl originalDacl,
+        SecurityIdentifier grantee,
+        int accessMask)
+    {
+        ArgumentNullException.ThrowIfNull(originalDacl);
+        ArgumentNullException.ThrowIfNull(grantee);
+        if (accessMask == 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(accessMask),
+                "The scoped access mask must be nonzero.");
+        }
+
+        var updatedDacl = new RawAcl(
+            originalDacl.Revision,
+            checked(originalDacl.Count + 1));
+        for (var index = 0; index < originalDacl.Count; index++)
+        {
+            updatedDacl.InsertAce(index, CloneAce(originalDacl[index]));
+        }
+
+        updatedDacl.InsertAce(
+            index: 0,
+            new CommonAce(
+                AceFlags.None,
+                AceQualifier.AccessAllowed,
+                accessMask,
+                grantee,
+                isCallback: false,
+                opaque: null));
+        return updatedDacl;
     }
 
     private void RestoreRequired()
@@ -485,19 +506,6 @@ internal sealed class WindowsKernelObjectAccessLease : IDisposable
         }
 
         return dacl;
-    }
-
-    private static int FirstInheritedAceIndex(RawAcl dacl)
-    {
-        for (var index = 0; index < dacl.Count; index++)
-        {
-            if ((dacl[index].AceFlags & AceFlags.Inherited) != 0)
-            {
-                return index;
-            }
-        }
-
-        return dacl.Count;
     }
 
     private static GenericAce CloneAce(GenericAce ace) =>

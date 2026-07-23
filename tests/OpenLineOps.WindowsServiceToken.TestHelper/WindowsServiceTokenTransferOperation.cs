@@ -4,7 +4,6 @@ using System.IO.Pipes;
 using System.Runtime.ExceptionServices;
 using System.Runtime.Versioning;
 using System.Security.Principal;
-using Microsoft.Win32.SafeHandles;
 
 namespace OpenLineOps.WindowsServiceToken.TestHelper;
 
@@ -63,15 +62,13 @@ internal sealed class WindowsServiceTokenTransferOperation(
             ExceptionDispatchInfo? relayOperationFailure = null;
             try
             {
-                using (var creationSourceProcess = WindowsNative.OpenRequiredProcess(
-                           request.SourceProcessId,
-                           WindowsNative.ProcessCreateProcess
-                           | WindowsNative.ProcessQueryLimitedInformation
-                           | WindowsNative.Synchronize,
-                           "source Station relay-creation"))
+                sourceService.EnsureRunning();
+                using (var creationSourceProcess =
+                       WindowsNative.OpenRequiredSourceCreationProcess(
+                           request.SourceProcessId))
                 {
                     failureReason = "process-validation";
-                    ValidateSourceProcess(creationSourceProcess);
+                    sourceService.EnsureRunning();
                     sourceProcessValidated = true;
 
                     failurePhase = "source-relay";
@@ -91,20 +88,12 @@ internal sealed class WindowsServiceTokenTransferOperation(
                     relay.BindCreatedAtUtcTicks(runnerCapturedCreatedAtUtcTicks);
                     relayProcessCreatedAtUtcTicks = relay.CreatedAtUtcTicks;
                     failureReason = "relay-validation";
-                    relay.ValidateCreated(request, creationSourceProcess);
+                    relay.ValidateCreated(request);
                     relayProcessValidated = true;
                 }
 
-                failurePhase = "source-process";
-                failureReason = "open-weak-process";
-                using var weakSourceProcess = WindowsNative.OpenRequiredProcess(
-                    request.SourceProcessId,
-                    WindowsNative.ProcessQueryLimitedInformation
-                    | WindowsNative.Synchronize,
-                    "source Station weak validation");
-                failureReason = "weak-process-validation";
+                failureReason = "source-service-before-relay-ready";
                 sourceService.EnsureRunning();
-                ValidateSourceProcess(weakSourceProcess);
 
                 failurePhase = "source-relay";
                 failureReason = "relay-ready";
@@ -114,8 +103,6 @@ internal sealed class WindowsServiceTokenTransferOperation(
 
                 failureReason = "source-service-before-relay-resume";
                 sourceService.EnsureRunning();
-                failureReason = "source-process-before-relay-resume";
-                ValidateSourceProcess(weakSourceProcess);
                 failureReason = "resume-source-token-relay";
                 relay.Resume();
                 failureReason = "source-token-relay-exit";
@@ -129,8 +116,6 @@ internal sealed class WindowsServiceTokenTransferOperation(
                 failurePhase = "post-receipt-source";
                 failureReason = "source-service-post-receipt";
                 sourceService.EnsureRunning();
-                failureReason = "process-validation-post-receipt";
-                ValidateSourceProcess(weakSourceProcess);
             }
             catch (Exception exception)
             {
@@ -227,24 +212,6 @@ internal sealed class WindowsServiceTokenTransferOperation(
         resultFile.Publish(successResult
                            ?? throw new InvalidOperationException(
                                "The token-transfer operation produced no success result."));
-    }
-
-    private void ValidateSourceProcess(SafeProcessHandle sourceProcess)
-    {
-        WindowsNative.EnsureProcessAlive(
-            sourceProcess,
-            request.SourceProcessId,
-            "source Station");
-        WindowsNative.ValidateProcessCreationTime(
-            sourceProcess,
-            request.SourceProcessId,
-            request.SourceProcessCreatedAtUtcTicks,
-            "source Station");
-        WindowsNative.ValidateProcessExecutablePath(
-            sourceProcess,
-            request.SourceProcessId,
-            request.SourceExecutablePath,
-            "source Station");
     }
 
     private static async Task<NamedPipeClientStream> ConnectAndAwaitGrantAsync(

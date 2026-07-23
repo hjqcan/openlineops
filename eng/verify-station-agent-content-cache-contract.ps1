@@ -256,6 +256,8 @@ foreach ($leaseLiteral in @(
         "AceQualifier.AccessAllowed",
         "SetKernelObjectSecurity(",
         "VerifyTemporaryDacl(",
+        "BuildTemporaryDacl(",
+        "index: 0",
         "RestoreRequired();",
         "AssertEquivalentDacl(",
         "RemoveScopedAccessAfterDaclDrift(",
@@ -288,11 +290,14 @@ if ($kernelLeaseDisposeIndex -lt 0 `
 foreach ($processLeaseLiteral in @(
         "ReadControl | WriteDac | ProcessQueryLimitedInformation | Synchronize",
         "ProcessCreateProcess",
-        "unchecked((int)(ProcessCreateProcess",
+        "unchecked((int)ProcessCreateProcess)",
         "WindowsKernelObjectAccessLease.PrepareOwnedHandle(",
         "ApplyRequired()")) {
     Assert-ContainsLiteral $serviceTokenProcessLease $processLeaseLiteral `
         "The source-process query lease is missing strict boundary '$processLeaseLiteral'."
+}
+if ($serviceTokenProcessLease -cmatch 'unchecked\(\(int\)\(ProcessCreateProcess\s*\|') {
+    throw "The temporary helper ACE must grant only PROCESS_CREATE_PROCESS."
 }
 if (Test-Path -LiteralPath (Join-Path $repoRoot "tests/OpenLineOps.Agent.Tests/WindowsTokenAccessLease.cs")) {
     throw "The retired source-token DACL lease must not exist."
@@ -350,6 +355,18 @@ $captureAcknowledgementIndex = $serviceTokenBridge.IndexOf(
 $relayReadyIndex = $serviceTokenBridge.IndexOf(
     "preparedRelayMarker[0] != PreparedRelayMarker",
     [System.StringComparison]::Ordinal)
+$preRestoreSourceValidationIndex = $serviceTokenBridge.IndexOf(
+    "ValidateSourceServiceAndProcessRunning(",
+    $relayReadyIndex,
+    [System.StringComparison]::Ordinal)
+$preRestoreSourceImageValidationIndex = $serviceTokenBridge.IndexOf(
+    "ValidateCapturedProcessImageAndHash(",
+    $preRestoreSourceValidationIndex,
+    [System.StringComparison]::Ordinal)
+$preRestoreSourceJobValidationIndex = $serviceTokenBridge.IndexOf(
+    "ValidateSourceProcessOutsideJob(sourceProcessHandle, sourceProcessId);",
+    $preRestoreSourceImageValidationIndex,
+    [System.StringComparison]::Ordinal)
 $preResumeRestoreIndex = $serviceTokenBridge.IndexOf(
     "sourceProcessAccessLease.Dispose();",
     [System.StringComparison]::Ordinal)
@@ -375,7 +392,10 @@ if ($coordinationValidationIndex -lt 0 `
     -or $runnerRelayValidationIndex -le $runnerRelayCreationReadIndex `
     -or $captureAcknowledgementIndex -le $runnerRelayValidationIndex `
     -or $relayReadyIndex -le $captureAcknowledgementIndex `
-    -or $preResumeRestoreIndex -le $relayReadyIndex `
+    -or $preRestoreSourceValidationIndex -le $relayReadyIndex `
+    -or $preRestoreSourceImageValidationIndex -le $preRestoreSourceValidationIndex `
+    -or $preRestoreSourceJobValidationIndex -le $preRestoreSourceImageValidationIndex `
+    -or $preResumeRestoreIndex -le $preRestoreSourceJobValidationIndex `
     -or $controlPipeCreateIndex -le $preResumeRestoreIndex `
     -or $resumeAcknowledgementIndex -le $controlPipeCreateIndex `
     -or $controlClientValidationIndex -le $resumeAcknowledgementIndex `
@@ -429,8 +449,10 @@ if ($reportedRelayCleanupIndex -lt 0 `
 }
 Assert-ContainsLiteral $serviceTokenBridge "var postTerminationWait = WaitForSingleObject(" `
     "The exact helper-process cleanup does not close the normal-exit race after TerminateProcess failure."
-Assert-ContainsLiteral $serviceTokenContractTests "SourceProcessAccessLeaseGrantsOnlyRelayCreationQueryAndWaitAndRestoresDacl" `
+Assert-ContainsLiteral $serviceTokenContractTests "SourceProcessAccessLeaseGrantsOnlyRelayCreationAndRestoresDacl" `
     "The scoped source-process relay-creation lease lacks an apply-and-exact-restore regression test."
+Assert-ContainsLiteral $serviceTokenContractTests "KernelObjectGrantLeadsAnExistingBroadDenyWithoutChangingIt" `
+    "The source-process lease does not regression-test its exact temporary leading grant without changing an existing broad deny."
 Assert-ContainsLiteral $serviceTokenContractTests "OverlappingKernelObjectLeasesRemoveOnlyTheirOwnSidAndRejectDaclDrift" `
     "The shared kernel-object lease does not behavior-test fail-closed DACL drift cleanup."
 Assert-ContainsLiteral $serviceTokenContractTests "SourceProcessAccessLeaseRejectsExitedProcessWithStillActiveExitCode" `
@@ -525,14 +547,19 @@ Assert-ContainsLiteral $serviceTokenHelperProtocol "ReadRelayRequest(" `
     "The source-token relay must parse the shared request without touching its inaccessible result directory."
 Assert-ContainsLiteral $serviceTokenHelperOperation "SourceTokenRelayProcess.CreateSuspended(" `
     "The helper does not launch the fixed relay through the exact source Station process."
+Assert-ContainsLiteral $serviceTokenHelperNative "OpenRequiredSourceCreationProcess(" `
+    "The helper lacks its fixed PROCESS_CREATE_PROCESS-only source handle opener."
+if ($serviceTokenHelperOperation -cmatch 'ProcessQueryLimitedInformation|Synchronize|OpenRequiredProcess\(' `
+    -or $serviceTokenHelperNative -cmatch 'public const uint (ProcessQueryLimitedInformation|Synchronize)') {
+    throw "The helper source-process capability must contain only PROCESS_CREATE_PROCESS."
+}
 foreach ($coordinationLiteral in @(
         "ConnectAndAwaitGrantAsync(",
-        "using (var creationSourceProcess = WindowsNative.OpenRequiredProcess(",
-        "using var weakSourceProcess = WindowsNative.OpenRequiredProcess(",
+        "WindowsNative.OpenRequiredSourceCreationProcess(",
         "SendObservedAndAwaitCaptureAsync(",
         "relay.BindCreatedAtUtcTicks(runnerCapturedCreatedAtUtcTicks)",
         "relayProcessCreatedAtUtcTicks = relay.CreatedAtUtcTicks;",
-        "relay.ValidateCreated(request, creationSourceProcess)",
+        "relay.ValidateCreated(request)",
         "SendReadyAndAwaitResumeAsync(",
         "relay.Resume();")) {
     Assert-ContainsLiteral $serviceTokenHelperOperation $coordinationLiteral `
@@ -541,14 +568,11 @@ foreach ($coordinationLiteral in @(
 $createSuspendedIndex = $serviceTokenHelperOperation.IndexOf(
     "SourceTokenRelayProcess.CreateSuspended(",
     [System.StringComparison]::Ordinal)
-$openWeakProcessIndex = $serviceTokenHelperOperation.IndexOf(
-    "using var weakSourceProcess = WindowsNative.OpenRequiredProcess(",
-    [System.StringComparison]::Ordinal)
 $sendObservedIndex = $serviceTokenHelperOperation.IndexOf(
     "SendObservedAndAwaitCaptureAsync(",
     [System.StringComparison]::Ordinal)
 $validateRelayIndex = $serviceTokenHelperOperation.IndexOf(
-    "relay.ValidateCreated(request, creationSourceProcess)",
+    "relay.ValidateCreated(request)",
     [System.StringComparison]::Ordinal)
 $bindRelayCreationTimeIndex = $serviceTokenHelperOperation.IndexOf(
     "relay.BindCreatedAtUtcTicks(runnerCapturedCreatedAtUtcTicks)",
@@ -567,10 +591,9 @@ if ($createSuspendedIndex -lt 0 `
     -or $bindRelayCreationTimeIndex -le $sendObservedIndex `
     -or $publishRelayCreationTimeIndex -le $bindRelayCreationTimeIndex `
     -or $validateRelayIndex -le $publishRelayCreationTimeIndex `
-    -or $openWeakProcessIndex -le $validateRelayIndex `
-    -or $sendReadyIndex -le $openWeakProcessIndex `
+    -or $sendReadyIndex -le $validateRelayIndex `
     -or $resumeRelayIndex -le $sendReadyIndex) {
-    throw "The helper does not create suspended, downgrade to a weak source handle, authenticate readiness, and only then resume the relay."
+    throw "The helper does not create suspended, close its sole creation handle, authenticate readiness, and only then resume the relay."
 }
 Assert-ContainsLiteral $serviceTokenHelperOperation "WaitForSuccessfulExitAsync(" `
     "The helper does not wait for exact source-token relay termination."
@@ -585,7 +608,6 @@ foreach ($relayProcessLiteral in @(
         "inheritHandles: false",
         "ResumeThread(_thread)",
         "previousSuspendCount != 1",
-        "IsProcessInJob(sourceProcess, IntPtr.Zero",
         "IsProcessInJob(_process, _job",
         "TerminateJobObject(job, 70)",
         "TerminateProcess(process, 70)",
@@ -593,6 +615,13 @@ foreach ($relayProcessLiteral in @(
         "ValidateCreated(")) {
     Assert-ContainsLiteral $serviceTokenRelayProcess $relayProcessLiteral `
         "The fixed source-token relay is missing process containment boundary '$relayProcessLiteral'."
+}
+$sourceJobValidationCount = [regex]::Matches(
+    $serviceTokenBridge,
+    [regex]::Escape(
+        "ValidateSourceProcessOutsideJob(sourceProcessHandle, sourceProcessId);")).Count
+if ($sourceJobValidationCount -ne 2) {
+    throw "The runner must reject a source Station job both before granting the helper and before resuming the validated relay."
 }
 $createRelayMethodIndex = $serviceTokenRelayProcess.IndexOf(
     "public static SourceTokenRelayProcess CreateSuspended(",
