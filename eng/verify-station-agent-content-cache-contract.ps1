@@ -107,6 +107,50 @@ if ($runnerScalarReaderStart -lt 0 `
 $runnerScalarReader = $runnerStagedE2E.Substring(
     $runnerScalarReaderStart,
     $runnerBufferReaderStart - $runnerScalarReaderStart)
+$helperIdentityMarker = "public static void ValidateHelperIdentity("
+$sourceServiceMarker = "public static ValidatedSourceService OpenValidatedSourceService("
+$sourceTokenIdentityMarker = "public static void ValidateCurrentSourceToken("
+$sourceTokenIdentityEndMarker = "private static SafeServiceHandle OpenRequiredServiceControlManager("
+$unrestrictedServiceSidMarker = "private static bool HasUnrestrictedVirtualServiceSidGroup("
+$nativeFailureMarker = "private static Win32Exception NativeFailure("
+$helperIdentityStart = $serviceTokenHelperNative.IndexOf(
+    $helperIdentityMarker,
+    [System.StringComparison]::Ordinal)
+$sourceServiceStart = $serviceTokenHelperNative.IndexOf(
+    $sourceServiceMarker,
+    [System.StringComparison]::Ordinal)
+if ($helperIdentityStart -lt 0 -or $sourceServiceStart -le $helperIdentityStart) {
+    throw "The one-shot helper is missing its bounded virtual-service identity validator."
+}
+$helperIdentityValidation = $serviceTokenHelperNative.Substring(
+    $helperIdentityStart,
+    $sourceServiceStart - $helperIdentityStart)
+$sourceTokenIdentityStart = $serviceTokenHelperNative.IndexOf(
+    $sourceTokenIdentityMarker,
+    [System.StringComparison]::Ordinal)
+$sourceTokenIdentityEnd = $serviceTokenHelperNative.IndexOf(
+    $sourceTokenIdentityEndMarker,
+    [System.StringComparison]::Ordinal)
+if ($sourceTokenIdentityStart -lt 0 `
+    -or $sourceTokenIdentityEnd -le $sourceTokenIdentityStart) {
+    throw "The one-shot helper is missing its bounded restricted Station-token validator."
+}
+$sourceTokenIdentityValidation = $serviceTokenHelperNative.Substring(
+    $sourceTokenIdentityStart,
+    $sourceTokenIdentityEnd - $sourceTokenIdentityStart)
+$unrestrictedServiceSidStart = $serviceTokenHelperNative.IndexOf(
+    $unrestrictedServiceSidMarker,
+    [System.StringComparison]::Ordinal)
+$nativeFailureStart = $serviceTokenHelperNative.IndexOf(
+    $nativeFailureMarker,
+    [System.StringComparison]::Ordinal)
+if ($unrestrictedServiceSidStart -lt 0 `
+    -or $nativeFailureStart -le $unrestrictedServiceSidStart) {
+    throw "The one-shot helper is missing its bounded unrestricted service-SID predicate."
+}
+$unrestrictedServiceSidValidation = $serviceTokenHelperNative.Substring(
+    $unrestrictedServiceSidStart,
+    $nativeFailureStart - $unrestrictedServiceSidStart)
 
 Assert-ContainsLiteral $commandLine "--provision-content-cache" `
     "Station Agent is missing the explicit content-cache provisioning switch."
@@ -430,6 +474,69 @@ foreach ($helperLiteral in @(
         "ValidateCurrentSourceToken")) {
     Assert-ContainsLiteral $serviceTokenHelperNative $helperLiteral `
         "The one-shot helper is missing strict source-token boundary '$helperLiteral'."
+}
+foreach ($unrestrictedServiceSidConstant in @(
+        "private const uint GroupEnabledByDefault = 0x00000002;",
+        "private const uint GroupOwner = 0x00000008;")) {
+    Assert-ContainsLiteral $serviceTokenHelperNative $unrestrictedServiceSidConstant `
+        "The one-shot helper is missing Windows' documented unrestricted service-SID attribute '$unrestrictedServiceSidConstant'."
+}
+foreach ($helperIdentityLiteral in @(
+        'var helperServiceSid = DeriveServiceSid(helperServiceName, "helper");',
+        "identity.TokenType != TokenPrimary",
+        "identity.ElevationType != TokenElevationTypeDefault",
+        "identity.IsRestricted",
+        "HasEnabledGroup(identity.Groups, ServiceLogonSid)",
+        "HasUnrestrictedVirtualServiceSidGroup(",
+        "identity.RestrictedSids.Any(group => string.Equals(",
+        "AdministratorsSid")) {
+    Assert-ContainsLiteral $helperIdentityValidation $helperIdentityLiteral `
+        "The one-shot helper identity validator is missing exact virtual-account boundary '$helperIdentityLiteral'."
+}
+if ([regex]::Matches(
+        $helperIdentityValidation,
+        [regex]::Escape("identity.UserSid")).Count -ne 1 `
+    -or $helperIdentityValidation -cnotmatch '(?s)!\s*string\.Equals\(\s*identity\.UserSid,\s*helperServiceSid,\s*StringComparison\.Ordinal\)') {
+    throw "The one-shot helper must accept only its exact random virtual service account as TokenUser, never LocalService or a shared service SID."
+}
+if ($helperIdentityValidation -cmatch '(?s)HasEnabledGroup\(\s*identity\.Groups,\s*helperServiceSid\s*\)') {
+    throw "The helper service SID must use its dedicated unrestricted-service attribute predicate, not the enabled-group predicate used by the Station relay."
+}
+if ($helperIdentityValidation -cnotmatch '(?s)HasUnrestrictedVirtualServiceSidGroup\(\s*identity\.Groups,\s*helperServiceSid\s*\)') {
+    throw "The helper identity validator must apply its unrestricted-service attribute predicate to the exact derived helper service SID."
+}
+if ($helperIdentityValidation -cnotmatch '(?s)identity\.Groups\.Any\(group => string\.Equals\(\s*group\.Sid,\s*AdministratorsSid,\s*StringComparison\.Ordinal\)\)') {
+    throw "The one-shot helper identity validator must reject an Administrators SID regardless of that SID's group attributes."
+}
+if ($helperIdentityValidation -cnotmatch '(?s)identity\.RestrictedSids\.Any\(group => string\.Equals\(\s*group\.Sid,\s*helperServiceSid,\s*StringComparison\.Ordinal\)\)') {
+    throw "The unrestricted helper identity validator must reject its exact service SID from TokenRestrictedSids."
+}
+foreach ($unrestrictedServiceSidLiteral in @(
+        "const uint requiredAttributes = GroupEnabledByDefault | GroupOwner;",
+        "string.Equals(group.Sid, sid, StringComparison.Ordinal)",
+        "(group.Attributes & requiredAttributes) == requiredAttributes",
+        "(group.Attributes & GroupUseForDenyOnly) == 0")) {
+    Assert-ContainsLiteral $unrestrictedServiceSidValidation $unrestrictedServiceSidLiteral `
+        "The helper unrestricted service-SID predicate is missing documented boundary '$unrestrictedServiceSidLiteral'."
+}
+if ($unrestrictedServiceSidValidation -cmatch '\bGroupEnabled\b') {
+    throw "The unrestricted helper service SID must not require SE_GROUP_ENABLED; Windows documents ENABLED_BY_DEFAULT and OWNER for that entry."
+}
+foreach ($sourceTokenIdentityLiteral in @(
+        "string.Equals(evidence.UserSid, LocalServiceSid, StringComparison.Ordinal)",
+        "evidence.IsRestricted",
+        "HasEnabledGroup(evidence.Groups, ServiceLogonSid)",
+        "HasEnabledGroup(evidence.Groups, expectedServiceSid)",
+        "evidence.RestrictedSids.Any(group => string.Equals(",
+        "AdministratorsSid")) {
+    Assert-ContainsLiteral $sourceTokenIdentityValidation $sourceTokenIdentityLiteral `
+        "The restricted Station relay identity validator is missing boundary '$sourceTokenIdentityLiteral'."
+}
+if ($sourceTokenIdentityValidation -cmatch 'HasUnrestrictedVirtualServiceSidGroup') {
+    throw "The restricted LocalService Station relay must not reuse the virtual-account helper SID predicate."
+}
+if ($sourceTokenIdentityValidation -cnotmatch '(?s)evidence\.RestrictedSids\.Any\(group => string\.Equals\(\s*group\.Sid,\s*expectedServiceSid,\s*StringComparison\.Ordinal\)\)') {
+    throw "The restricted LocalService Station relay must retain its exact service SID in TokenRestrictedSids."
 }
 if (($serviceTokenBridge + $serviceTokenHelperAllSource) `
     -cmatch 'DuplicateTokenEx|DuplicateHandle|OpenProcessToken|OpenThreadToken|TokenDuplicate|TokenImpersonate|ProcessDupHandle|TokenAllAccess|MaximumAllowed|SeDebugPrivilege|SeTakeOwnershipPrivilege|AdjustTokenPrivileges|CreateRemoteThread|ProcessVm(Read|Write|Operation)|CreateBreakawayFromJob') {
