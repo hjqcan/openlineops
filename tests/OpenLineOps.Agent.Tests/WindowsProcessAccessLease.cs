@@ -11,6 +11,7 @@ internal sealed class WindowsProcessAccessLease : IDisposable
 {
     private const uint ReadControl = 0x00020000;
     private const uint WriteDac = 0x00040000;
+    private const uint ProcessCreateProcess = 0x00000080;
     private const uint ProcessQueryLimitedInformation = 0x00001000;
     private const uint Synchronize = 0x00100000;
     private const uint WaitObject0 = 0;
@@ -25,7 +26,7 @@ internal sealed class WindowsProcessAccessLease : IDisposable
         _lease = lease;
     }
 
-    public static WindowsProcessAccessLease Acquire(
+    public static WindowsProcessAccessLease Prepare(
         SafeProcessHandle retainedProcessHandle,
         uint processId,
         long expectedCreatedAtUtcTicks,
@@ -66,25 +67,31 @@ internal sealed class WindowsProcessAccessLease : IDisposable
         }
 
         return new WindowsProcessAccessLease(
-            WindowsKernelObjectAccessLease.AcquireOwnedHandle(
+            WindowsKernelObjectAccessLease.PrepareOwnedHandle(
                 securityHandle,
                 bridgeServiceSid,
-                unchecked((int)(ProcessQueryLimitedInformation | Synchronize)),
+                unchecked((int)(ProcessCreateProcess
+                                | ProcessQueryLimitedInformation
+                                | Synchronize)),
                 ObjectDescription));
     }
+
+    public void ApplyRequired() => _lease.ApplyRequired();
 
     internal static string ReadDaclSddl(SafeProcessHandle processHandle) =>
         WindowsKernelObjectAccessLease.ReadDaclSddl(
             processHandle,
             ObjectDescription);
 
-    internal static bool HasExactQueryAndWaitAce(
+    internal static bool HasExactRelayCreationAce(
         SafeProcessHandle processHandle,
         SecurityIdentifier bridgeServiceSid) =>
         WindowsKernelObjectAccessLease.HasExactAce(
             processHandle,
             bridgeServiceSid,
-            unchecked((int)(ProcessQueryLimitedInformation | Synchronize)),
+            unchecked((int)(ProcessCreateProcess
+                            | ProcessQueryLimitedInformation
+                            | Synchronize)),
             ObjectDescription);
 
     public void Dispose() => _lease.Dispose();

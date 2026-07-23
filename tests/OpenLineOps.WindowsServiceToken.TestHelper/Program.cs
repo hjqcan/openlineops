@@ -14,10 +14,10 @@ internal static class Program
             return InvalidInvocationExitCode;
         }
 
-        string requestPath;
+        TokenTransferInvocation invocation;
         try
         {
-            requestPath = TokenTransferProtocol.ParseRequestPath(args);
+            invocation = TokenTransferProtocol.ParseInvocation(args);
         }
         catch (Exception exception) when (exception is InvalidDataException
                                            or ArgumentException
@@ -30,7 +30,9 @@ internal static class Program
 
         try
         {
-            return await RunWindowsServiceAsync(requestPath);
+            return invocation.IsRelay
+                ? await SourceTokenRelayOperation.ExecuteAsync(invocation.RequestPath)
+                : await RunWindowsServiceAsync(invocation.RequestPath);
         }
         catch (Exception exception)
         {
@@ -42,7 +44,7 @@ internal static class Program
     [SupportedOSPlatform("windows")]
     private static async Task<int> RunWindowsServiceAsync(string requestPath)
     {
-        var request = TokenTransferProtocol.ReadRequest(requestPath);
+        var request = TokenTransferProtocol.ReadServiceRequest(requestPath);
         var builder = Host.CreateApplicationBuilder([]);
         builder.Logging.ClearProviders();
         builder.Services.AddWindowsService(options =>

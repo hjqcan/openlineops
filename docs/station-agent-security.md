@@ -35,46 +35,84 @@ independent service-SID configuration value that can drift from the SCM name.
 ### Test-only identity attestation
 
 An external test process is not allowed to open a production Station token with
-`TOKEN_DUPLICATE`. The Windows process E2E uses a separate, self-contained
-test-only helper service instead. Each invocation creates a random LocalService
-`SERVICE_SID_TYPE_UNRESTRICTED` helper whose service-object and filesystem ACLs
-grant access to that exact helper SID. The helper validates its own SCM identity
-and marks itself for deletion before it validates the source Station's exact SCM
-name, running PID, creation time, restricted LocalService token, service-logon
-SID, and enabled-and-restricted Station SID. Before the helper starts, the
-elevated test harness binds a temporary process-object ACE to that invocation's
-random helper service SID. The ACE grants only
-`PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`: query access is required for
-the exact image, creation-time, and token checks, while synchronization provides
-an unambiguous process-exit proof. A second temporary ACE on the exact source
-primary-token object grants only `TOKEN_QUERY | TOKEN_DUPLICATE`, the rights
-required to validate and impersonate from a primary token. The helper uses that
-validated primary token directly and never creates or exports another token
-handle. Both DACL grants use the same shared kernel-object lease, which verifies
-that no existing ACE changed, proves the exact helper process has exited
-(forcibly terminating only that
-captured PID if graceful service stop fails), and restores both original DACLs.
-A gate can pass only when termination was proved and both restored DACLs are
-exact. If Windows prevents termination proof, cleanup hard-fails and still
-attempts exact DACL restoration to prevent new helper opens; restoration or
-revalidation failure also hard-fails. It never
-grants the shared LocalService, service-logon, Administrators, or runner SID.
-The helper then impersonates directly from that validated primary token; only
-inside that exact source identity does it open the
-frozen executable, reject path aliases and reparse resolution by handle, verify
-the SHA-256, and connect to a random single-instance control pipe whose protected
-DACL allows only the source Station SID. A 256-bit nonce binds the request, the
-runner calls `RunAsClient` and revalidates the Station identity, and an exact
-one-byte receipt completes the one-shot protocol. No token handle is exported,
-no arbitrary command is accepted, no debug privilege or LocalSystem broker is
-used, and all service and temporary state must be deleted before the gate can
-pass. The helper binary is rejected from every deployable release artifact;
-only its buildable test source may appear in the source archive. This
-attestation mechanism never changes the production Agent token, IPC, or cache
-ACL, and both kernel-object leases exist only inside the Windows test harness.
-Its result document contains only bounded validation flags, a finite failure
-reason, and an optional numeric Win32 error; it never serializes exception text,
-paths, tokens, or credentials.
+`TOKEN_DUPLICATE`, and the test harness never reads or modifies the token DACL.
+The Windows process E2E uses a separate, self-contained test-only helper service.
+Each invocation creates a random virtual service account named
+`NT SERVICE\<random-service-name>` with `SERVICE_SID_TYPE_UNRESTRICTED`. Its
+unique account SID is also its service SID, so the capability is not shared with
+the LocalService account. The protected service object admits only fixed
+administrative owners. The bridge root separates immutable `helper/` and
+`protocol/` trees from a dedicated `result/` tree. Both the helper and Station
+SIDs receive only read/execute/synchronize rights over the immutable trees; the
+Station SID has no result access, and only the helper SID receives bounded
+modify rights inside `result/`. The runner records the exact relative path,
+length and SHA-256 of every file in the complete self-contained helper closure,
+rejects missing, changed and additional files, and rechecks that inventory and
+all ACLs before start, after helper capture, before relay resume and after
+completion.
+
+The helper first authenticates to a random coordination pipe. The runner binds
+the pipe client to the exact SCM PID and virtual-account SID before granting any
+Station-process access. Only then does one temporary process-object ACE grant the
+helper SID exactly `PROCESS_CREATE_PROCESS |
+PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` on the retained Station PID.
+Query and synchronization bind the SCM PID, creation time, liveness and image;
+`PROCESS_CREATE_PROCESS` is used only by the fixed helper to create one suspended
+relay with `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`. Windows therefore supplies
+that relay with the Station process token without exporting a token handle. The
+source Station must not already belong to another job. The same `STARTUPINFOEX`
+atomically assigns a private job through `PROC_THREAD_ATTRIBUTE_JOB_LIST`; the
+job has kill-on-close and an active-process limit of one. Breakaway, inherited
+handles, debug rights, process-memory rights, token duplication and dynamic
+privilege changes are forbidden.
+
+Immediately after native process creation, before a subsequent process query or
+validation can fail, the helper reports only the observed relay PID over the
+authenticated coordination pipe. The runner immediately retains that exact
+suspended-process handle, reads its authoritative creation time, validates the
+protected image/hash, and returns the creation time in its capture
+acknowledgement. The helper independently reads creation time from its original
+native process handle and requires an exact match before validating the
+containment job and source process, closing its sole
+`PROCESS_CREATE_PROCESS` handle and emitting a distinct ready marker. The runner
+revalidates the complete immutable helper inventory and
+ACLs, restores and bytewise revalidates the original Station process DACL,
+creates the control pipe, and only then acknowledges resume. Consequently
+neither the temporary ACE nor an already-open creation handle spans the
+impersonated test action.
+The PID-opened runner handle remains provisional until that ready marker, or a
+bounded helper result containing the independently bound creation time,
+confirms the same process object. Before confirmation the runner never
+terminates through that handle; it closes the provisional handle and relies on
+closure of the helper-owned, non-inheritable kill-on-close job to terminate the
+actual relay.
+
+Running under the inherited identity, the relay proves primary restricted
+LocalService, the service-logon SID, no Administrators group, and the exact
+Station SID enabled in the normal group set and present in the restricted SID
+set. It then opens the
+frozen Agent image by canonical non-reparse handle, verifies both executable
+hashes, and connects to a random single-instance control pipe whose protected
+DACL grants the Station SID only read/write/synchronize client rights. The runner
+uses `GetNamedPipeClientProcessId` and requires that pipe client to equal the
+already authenticated, retained relay PID before reading the 256-bit nonce.
+`RunAsClient` independently revalidates the Station identity, and an exact
+one-byte receipt completes the protocol.
+
+The helper's unique kill-on-close job removes the relay even if the helper is
+terminated. Normal and failure cleanup still retain exact process handles,
+terminate and wait only those PIDs, delete and await deletion of the helper
+service, restore and revalidate the original Station process DACL, and delete the
+bridge tree. A gate hard-fails if any termination or restoration proof is
+missing. The runner and helper never open or modify the Station token; the relay
+queries only its non-transferable current-process token pseudo-handle to prove
+identity, and no token handle crosses a process boundary. No arbitrary command
+is accepted, and no debug
+privilege or LocalSystem broker is used. The helper binary is
+rejected from every deployable release artifact; only its buildable test source
+may appear in the source archive. The bounded result binds the source and relay
+PIDs, relay creation time, validation flags, finite failure reason, and optional
+numeric Win32 error; it never serializes exception text, tokens, or credentials.
 
 ## Station-local IPC
 

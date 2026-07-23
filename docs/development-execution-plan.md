@@ -1,6 +1,6 @@
 # OpenLineOps Production-Line Implementation Baseline
 
-Last updated: 2026-07-21
+Last updated: 2026-07-23
 
 ## Product Contract
 
@@ -241,25 +241,65 @@ wrapper `finally` blocks and independent workflow `always()` steps invoke the
 same bounded, idempotent scavenger. Studio's two Station services share the
 LocalService base account but must expose distinct restricted service SIDs.
 Because Windows checks `TOKEN_DUPLICATE` against the service token object's own
-DACL, the external test runner never copies a Station token. Windows E2E instead
-starts a random, one-shot, self-deleting LocalService test helper that validates
-the SCM PID, restricted source token, and exact service SID, then validates the
-frozen Agent path/hash and connects to a single-instance reverse pipe while
-impersonating that source token. The runner executes the existing boundary
-assertion through `RunAsClient`; no token handle crosses the process boundary.
-The test harness temporarily grants only that random helper service SID
-`PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` on the exact retained Station
-process and `TOKEN_QUERY | TOKEN_DUPLICATE` on that process's exact primary token.
-A shared kernel-object lease proves that neither grant changed an existing ACE
-and restores and revalidates both original DACLs. The helper uses the validated
-primary token directly without duplicating or exporting a token handle. The
-harness proves the exact helper PID has exited before a gate can pass. A cleanup
-path that cannot prove exact helper
-termination hard-fails and still attempts exact DACL restoration so no new helper
-handle can be opened; a DACL restoration or revalidation failure also hard-fails.
-It never grants the shared
-LocalService, service-logon, Administrators, or runner SID and never enables a
-debug privilege.
+DACL, the external test runner never opens, copies, or changes a Station token.
+Windows E2E instead starts a random, one-shot helper under the unique virtual
+account `NT SERVICE\<random-service-name>`, not the shared LocalService account.
+Before any Station capability exists, a minimal-rights coordination pipe binds
+that exact account SID to the exact SCM helper PID and protected helper hash. A
+scoped process-object lease then grants only that SID
+`PROCESS_CREATE_PROCESS | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` on
+the exact retained Station PID. After validating the Station SCM binding,
+creation time, image and hash, the helper uses
+`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` to create a fixed, suspended relay;
+Windows supplies the relay with the Station process token. A simultaneous
+`PROC_THREAD_ATTRIBUTE_JOB_LIST` places it atomically in a non-inheritable,
+kill-on-close job with an active-process limit of one before its only thread can
+run. A Station already contained by another job is rejected because its inherited
+job policy cannot be proven compatible. No token handle crosses a process
+boundary and no token DACL is read or modified.
+
+Immediately after native process creation, and before any later relay query or
+validation can fail, the helper reports only the observed relay PID through the
+authenticated coordination channel. The runner immediately retains that exact
+suspended-process handle, reads the authoritative creation time, verifies its
+image and hash, and returns the creation time in its capture acknowledgement.
+The helper binds that value to an independent creation-time read from its
+original native process handle before validating the image, containment job and
+source process, closes its only
+`PROCESS_CREATE_PROCESS` handle, and sends a separate ready marker. Before
+acknowledging resume, the runner rehashes the exact full self-contained helper
+inventory, revalidates all bridge ACLs, restores and bytewise revalidates the
+original Station process DACL, and creates the control pipe. The creation lease
+and strong handle therefore cannot span `RunAsClient` or any business-side
+effect.
+The runner treats its PID-opened handle as provisional until that ready marker,
+or a bounded helper result carrying the independently bound creation time,
+confirms the same process object. A pre-confirmation failure closes the
+provisional handle without terminating through it; termination of the real
+relay is then guaranteed by closure of the helper-owned, non-inheritable
+kill-on-close job.
+
+The relay revalidates its restricted LocalService identity, enabled-and-
+restricted Station SID, its own protected image/hash and the frozen Agent
+image/hash, then connects to the single-instance reverse pipe, whose Station SID
+ACE contains only read/write/synchronize client rights. The runner binds the
+connection with `GetNamedPipeClientProcessId` and requires it to match the relay
+PID and creation time retained by the runner and independently confirmed by the
+authenticated helper; only then
+does it execute the boundary assertion through `RunAsClient`. The protected
+bridge root physically separates immutable `helper/` and `protocol/` trees from
+the writable `result/` tree. The helper and Station SIDs have only
+read/execute/synchronize rights over every executable and protocol dependency;
+only the helper SID has bounded modify rights inside `result/`. An exact
+path/length/SHA-256 inventory rejects missing, changed or additional helper
+files before service start, after helper capture, before relay resume and after
+completion. A gate passes only after the exact
+relay and helper PIDs have exited, the one-process job is closed, the original
+source-process DACL is restored and revalidated, and all service and temporary
+state is deleted. Failure to prove termination or exact DACL restoration is a
+hard failure. The source-process lease never grants shared LocalService,
+service-logon, Administrators, or runner access and never enables a debug or
+ownership privilege.
 This helper is self-contained, accepts only its fixed nonce-bound request, is
 absent from every deployable artifact, and does not relax any production Agent
 pipe, cache, or token ACL.

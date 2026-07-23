@@ -44,9 +44,14 @@ internal sealed class AtomicTokenTransferResult : IDisposable
             writer.WriteStartObject();
             writer.WriteString("nonce", result.Nonce);
             writer.WriteNumber("sourceProcessId", result.SourceProcessId);
+            writer.WriteNumber("relayProcessId", result.RelayProcessId);
+            writer.WriteNumber(
+                "relayProcessCreatedAtUtcTicks",
+                result.RelayProcessCreatedAtUtcTicks);
             writer.WriteBoolean("helperIdentityValidated", result.HelperIdentityValidated);
             writer.WriteBoolean("sourceServiceValidated", result.SourceServiceValidated);
             writer.WriteBoolean("sourceProcessValidated", result.SourceProcessValidated);
+            writer.WriteBoolean("relayProcessValidated", result.RelayProcessValidated);
             writer.WriteBoolean("sourceTokenValidated", result.SourceTokenValidated);
             writer.WriteBoolean("controlPipeConnected", result.ControlPipeConnected);
             writer.WriteBoolean("receiptReceived", result.ReceiptReceived);

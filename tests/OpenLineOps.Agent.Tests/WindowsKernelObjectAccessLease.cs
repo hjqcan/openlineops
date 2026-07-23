@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
@@ -48,7 +47,7 @@ internal sealed class WindowsKernelObjectAccessLease : IDisposable
         _objectDescription = objectDescription;
     }
 
-    public static WindowsKernelObjectAccessLease AcquireOwnedHandle(
+    public static WindowsKernelObjectAccessLease PrepareOwnedHandle(
         SafeHandle ownedHandle,
         SecurityIdentifier grantee,
         int accessMask,
@@ -79,7 +78,6 @@ internal sealed class WindowsKernelObjectAccessLease : IDisposable
                 nameof(objectDescription));
         }
 
-        WindowsKernelObjectAccessLease? lease = null;
         try
         {
             var originalDescriptor = ReadSecurityDescriptor(
@@ -96,50 +94,32 @@ internal sealed class WindowsKernelObjectAccessLease : IDisposable
             }
 
             var insertedAceIndex = FirstInheritedAceIndex(originalDacl);
-            lease = new WindowsKernelObjectAccessLease(
+            return new WindowsKernelObjectAccessLease(
                 ownedHandle,
                 originalDescriptor,
                 grantee,
                 accessMask,
                 insertedAceIndex,
                 objectDescription);
-            lease.Apply(original, originalDacl);
-            return lease;
         }
-        catch (Exception operationFailure)
+        catch
         {
-            if (lease is null)
-            {
-                ownedHandle.Dispose();
-                throw;
-            }
-
-            Exception? restorationFailure = null;
-            try
-            {
-                lease.RestoreRequired();
-            }
-            catch (Exception exception)
-            {
-                restorationFailure = exception;
-            }
-            finally
-            {
-                lease._handle.Dispose();
-                lease._disposed = true;
-            }
-
-            if (restorationFailure is not null)
-            {
-                throw new AggregateException(
-                    $"Applying scoped access to the {objectDescription} failed, and its original DACL could not be restored.",
-                    operationFailure,
-                    restorationFailure);
-            }
-
-            ExceptionDispatchInfo.Capture(operationFailure).Throw();
+            ownedHandle.Dispose();
             throw;
         }
+    }
+
+    public void ApplyRequired()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_accessApplied)
+        {
+            throw new InvalidOperationException(
+                $"Scoped access is already active on the {_objectDescription}.");
+        }
+
+        var original = ParseDescriptor(_originalDescriptor, _objectDescription);
+        Apply(original, RequireBoundedDacl(original, _objectDescription));
     }
 
     public static string ReadDaclSddl(
@@ -182,25 +162,9 @@ internal sealed class WindowsKernelObjectAccessLease : IDisposable
             return;
         }
 
-        Exception? restorationFailure = null;
-        try
-        {
-            RestoreRequired();
-        }
-        catch (Exception exception)
-        {
-            restorationFailure = exception;
-        }
-        finally
-        {
-            _handle.Dispose();
-            _disposed = true;
-        }
-
-        if (restorationFailure is not null)
-        {
-            ExceptionDispatchInfo.Capture(restorationFailure).Throw();
-        }
+        RestoreRequired();
+        _handle.Dispose();
+        _disposed = true;
     }
 
     private void Apply(

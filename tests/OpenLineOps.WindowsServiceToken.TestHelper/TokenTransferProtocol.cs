@@ -3,7 +3,10 @@ using System.Text.Json;
 
 namespace OpenLineOps.WindowsServiceToken.TestHelper;
 
+internal sealed record TokenTransferInvocation(bool IsRelay, string RequestPath);
+
 internal sealed record WindowsServiceTokenTransferRequest(
+    string RequestPath,
     string HelperServiceName,
     string SourceServiceName,
     string Nonce,
@@ -12,15 +15,23 @@ internal sealed record WindowsServiceTokenTransferRequest(
     string SourceExecutablePath,
     string SourceExecutableSha256,
     string ExpectedSourceServiceSid,
+    string RunnerSid,
+    string HelperBundleRoot,
+    string HelperExecutablePath,
+    string HelperExecutableSha256,
+    string CoordinationPipeName,
     string ControlPipeName,
     string ResultPath);
 
 internal sealed record WindowsServiceTokenTransferResult(
     string Nonce,
     uint SourceProcessId,
+    uint RelayProcessId,
+    long RelayProcessCreatedAtUtcTicks,
     bool HelperIdentityValidated,
     bool SourceServiceValidated,
     bool SourceProcessValidated,
+    bool RelayProcessValidated,
     bool SourceTokenValidated,
     bool ControlPipeConnected,
     bool ReceiptReceived,
@@ -42,24 +53,41 @@ internal static class TokenTransferProtocol
         "sourceExecutablePath",
         "sourceExecutableSha256",
         "expectedSourceServiceSid",
+        "runnerSid",
+        "helperBundleRoot",
+        "helperExecutablePath",
+        "helperExecutableSha256",
+        "coordinationPipeName",
         "controlPipeName",
         "resultPath"
     ];
 
-    public static string ParseRequestPath(IReadOnlyList<string> args)
+    public static TokenTransferInvocation ParseInvocation(IReadOnlyList<string> args)
     {
         ArgumentNullException.ThrowIfNull(args);
         if (args.Count != 2
-            || !string.Equals(args[0], "--request", StringComparison.Ordinal))
+            || args[0] is not ("--request" or "--relay-request"))
         {
             throw new InvalidDataException(
-                "The helper accepts exactly '--request <canonical-absolute-json-path>'.");
+                "The helper accepts exactly '--request <canonical-absolute-json-path>' as its SCM role or '--relay-request <canonical-absolute-json-path>' as its source-token relay role.");
         }
 
-        return RequireCanonicalAbsoluteFile(args[1], "request path");
+        return new TokenTransferInvocation(
+            string.Equals(args[0], "--relay-request", StringComparison.Ordinal),
+            RequireCanonicalAbsoluteFile(args[1], "request path"));
     }
 
-    public static WindowsServiceTokenTransferRequest ReadRequest(string requestPath)
+    public static WindowsServiceTokenTransferRequest ReadServiceRequest(
+        string requestPath) =>
+        ReadRequest(requestPath, requireResultDestination: true);
+
+    public static WindowsServiceTokenTransferRequest ReadRelayRequest(
+        string requestPath) =>
+        ReadRequest(requestPath, requireResultDestination: false);
+
+    private static WindowsServiceTokenTransferRequest ReadRequest(
+        string requestPath,
+        bool requireResultDestination)
     {
         var fullRequestPath = RequireCanonicalAbsoluteFile(requestPath, "request path");
         RejectReparsePoint(fullRequestPath, "request path");
@@ -137,12 +165,51 @@ internal static class TokenTransferProtocol
         var sourceExecutablePath = RequireCanonicalAbsolutePath(
             RequiredString(root, "sourceExecutablePath"),
             "sourceExecutablePath");
-        var controlPipeName = RequireControlPipeName(
-            RequiredString(root, "controlPipeName"));
+        var helperBundleRoot = RequireCanonicalAbsoluteDirectory(
+            RequiredString(root, "helperBundleRoot"),
+            "helperBundleRoot");
+        var helperExecutablePath = RequireCanonicalAbsoluteFile(
+            RequiredString(root, "helperExecutablePath"),
+            "helperExecutablePath");
+        var relativeHelperExecutable = Path.GetRelativePath(
+            helperBundleRoot,
+            helperExecutablePath);
+        if (Path.IsPathRooted(relativeHelperExecutable)
+            || relativeHelperExecutable.Equals("..", StringComparison.Ordinal)
+            || relativeHelperExecutable.StartsWith(
+                ".." + Path.DirectorySeparatorChar,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                Path.GetFileName(helperExecutablePath),
+                "OpenLineOps.WindowsServiceToken.TestHelper.exe",
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Request property 'helperExecutablePath' must name the fixed helper executable beneath helperBundleRoot.");
+        }
+        var coordinationPipeName = RequirePipeName(
+            RequiredString(root, "coordinationPipeName"),
+            "coordinationPipeName");
+        var controlPipeName = RequirePipeName(
+            RequiredString(root, "controlPipeName"),
+            "controlPipeName");
+        if (string.Equals(
+                coordinationPipeName,
+                controlPipeName,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "The coordination and source-token control pipes must be distinct.");
+        }
 
-        var resultPath = RequireCanonicalAbsoluteDestination(
-            RequiredString(root, "resultPath"),
-            "resultPath");
+        var resultPathValue = RequiredString(root, "resultPath");
+        var resultPath = requireResultDestination
+            ? RequireCanonicalAbsoluteDestination(
+                resultPathValue,
+                "resultPath")
+            : RequireCanonicalAbsolutePath(
+                resultPathValue,
+                "resultPath");
         if (string.Equals(resultPath, fullRequestPath, StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidDataException(
@@ -155,8 +222,16 @@ internal static class TokenTransferProtocol
             "sourceExecutableSha256");
         var expectedSourceServiceSid = RequireCanonicalServiceSid(
             RequiredString(root, "expectedSourceServiceSid"));
+        var runnerSid = RequireCanonicalSid(
+            RequiredString(root, "runnerSid"),
+            "runnerSid");
+        var helperSha256 = RequireLowerHex(
+            RequiredString(root, "helperExecutableSha256"),
+            64,
+            "helperExecutableSha256");
 
         return new WindowsServiceTokenTransferRequest(
+            fullRequestPath,
             helperServiceName,
             sourceServiceName,
             nonce,
@@ -165,6 +240,11 @@ internal static class TokenTransferProtocol
             sourceExecutablePath,
             sourceSha256,
             expectedSourceServiceSid,
+            runnerSid,
+            helperBundleRoot,
+            helperExecutablePath,
+            helperSha256,
+            coordinationPipeName,
             controlPipeName,
             resultPath);
     }
@@ -220,14 +300,14 @@ internal static class TokenTransferProtocol
         return value;
     }
 
-    private static string RequireControlPipeName(string value)
+    private static string RequirePipeName(string value, string propertyName)
     {
         if (value.Length is < 1 or > 200
             || value.Any(character => !char.IsAsciiLetterOrDigit(character)
                                       && character is not ('.' or '_' or '-')))
         {
             throw new InvalidDataException(
-                "Request property 'controlPipeName' must contain 1 to 200 ASCII letters, digits, '.', '_', or '-'.");
+                $"Request property '{propertyName}' must contain 1 to 200 ASCII letters, digits, '.', '_', or '-'.");
         }
 
         return value;
@@ -281,6 +361,29 @@ internal static class TokenTransferProtocol
         return value;
     }
 
+    private static string RequireCanonicalSid(string value, string propertyName)
+    {
+        System.Security.Principal.SecurityIdentifier sid;
+        try
+        {
+            sid = new System.Security.Principal.SecurityIdentifier(value);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidDataException(
+                $"Request property '{propertyName}' is not a valid SID.",
+                exception);
+        }
+
+        if (!string.Equals(sid.Value, value, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Request property '{propertyName}' must be a canonical SID.");
+        }
+
+        return value;
+    }
+
     private static string RequireCanonicalAbsoluteFile(string value, string description)
     {
         var fullPath = RequireCanonicalAbsolutePath(value, description);
@@ -289,6 +392,19 @@ internal static class TokenTransferProtocol
             throw new FileNotFoundException($"The {description} does not exist.", fullPath);
         }
 
+        return fullPath;
+    }
+
+    private static string RequireCanonicalAbsoluteDirectory(string value, string description)
+    {
+        var fullPath = RequireCanonicalAbsolutePath(value, description);
+        if (!Directory.Exists(fullPath))
+        {
+            throw new DirectoryNotFoundException(
+                $"The {description} does not exist: '{fullPath}'.");
+        }
+
+        RejectReparsePoint(fullPath, description);
         return fullPath;
     }
 

@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -49,13 +50,23 @@ internal static class WindowsServiceTokenTestBridge
     private const int ErrorServiceAlreadyRunning = 1056;
     private const int ErrorServiceMarkedForDelete = 1072;
     private const int ErrorAlreadyExists = 183;
+    private const int ErrorInvalidParameter = 87;
     private const uint WaitObject0 = 0;
     private const uint WaitTimeout = 258;
     private const uint WaitFailed = uint.MaxValue;
     private const uint ForcedHelperTerminationExitCode = 70;
     private const byte CompletionReceipt = 0xA5;
+    private const byte RelayCreationGrant = 0xC1;
+    private const byte ObservedRelayMarker = 0xD0;
+    private const byte RelayCaptureAcknowledgement = 0xA0;
+    private const byte PreparedRelayMarker = 0xD1;
+    private const byte RelayResumeAcknowledgement = 0xA1;
     private const int NonceBytes = 32;
+    private const int ObservedRelayFrameBytes = 1 + sizeof(uint);
+    private const int RelayCaptureAcknowledgementFrameBytes = 1 + sizeof(long);
     private const int MaximumResultBytes = 4096;
+    internal const PipeAccessRights AuthenticatedPipeClientRights =
+        PipeAccessRights.ReadWrite | PipeAccessRights.Synchronize;
 
     private static readonly TimeSpan TransitionTimeout = TimeSpan.FromSeconds(30);
     private static readonly Encoding StrictUtf8 = new UTF8Encoding(
@@ -156,12 +167,15 @@ internal static class WindowsServiceTokenTestBridge
         var bridgeServiceSid =
             WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
                 bridgeServiceName);
-        var pipeName = "openlineops-token-bridge-" + nonce;
+        var coordinationPipeName = "openlineops-token-bridge-coordination-" + nonce;
+        var controlPipeName = "openlineops-token-bridge-control-" + nonce;
         var bridgeRoot = Path.Combine(
             fullParentRoot,
             ".service-token-bridge-" + nonce[..16]);
-        var requestPath = Path.Combine(bridgeRoot, "request.json");
-        var resultPath = Path.Combine(bridgeRoot, "result.json");
+        var protocolRoot = Path.Combine(bridgeRoot, "protocol");
+        var requestPath = Path.Combine(protocolRoot, "request.json");
+        var resultRoot = Path.Combine(bridgeRoot, "result");
+        var resultPath = Path.Combine(resultRoot, "result.json");
         var helperBundleSource = Path.Combine(
             AppContext.BaseDirectory,
             "windows-service-token-test-helper");
@@ -172,35 +186,56 @@ internal static class WindowsServiceTokenTestBridge
 
         SafeServiceHandle? manager = null;
         SafeServiceHandle? service = null;
+        NamedPipeServerStream? coordinationPipe = null;
         NamedPipeServerStream? controlPipe = null;
         SafeProcessHandle? helperProcessHandle = null;
+        SafeProcessHandle? relayProcessHandle = null;
         ExceptionDispatchInfo? actionFailure = null;
         ExceptionDispatchInfo? operationFailure = null;
         Exception? bridgeDiagnostic = null;
         WindowsProcessAccessLease? sourceProcessAccessLease = null;
-        WindowsTokenAccessLease? sourceTokenAccessLease = null;
         T? actionResult = default;
         var actionCompleted = false;
         var bridgeResultConsumed = false;
         var bridgeRootOwned = false;
         var serviceOwned = false;
+        var serviceMarkedForDeletion = false;
         var helperServiceStarted = false;
         var helperProcessTerminationProven = false;
+        var relayProcessTerminationProven = false;
+        var relayObservedReceived = false;
+        var relayReadyReceived = false;
+        var relayProcessIdentityConfirmed = false;
+        var sourceProcessLeaseRestored = false;
+        var relayResumeAcknowledged = false;
+        var relayProcessId = 0u;
+        var relayProcessCreatedAtUtcTicks = 0L;
+        var helperExecutableSha256 = string.Empty;
         try
         {
-            PrepareBridgeRoot(bridgeRoot, bridgeServiceSid);
+            PrepareBridgeRoot(
+                bridgeRoot,
+                bridgeServiceSid,
+                canonicalSourceServiceSid);
             bridgeRootOwned = true;
-            AssertBridgeTreeSecurity(bridgeRoot, bridgeServiceSid);
-            CopyHelperBundle(helperBundleSource, helperBundleRoot);
+            Directory.CreateDirectory(protocolRoot);
+            var helperBundleInventory = CopyHelperBundle(
+                helperBundleSource,
+                helperBundleRoot);
+            PrepareResultRoot(resultRoot, bridgeServiceSid);
             if (!File.Exists(helperExecutablePath))
             {
                 throw new FileNotFoundException(
                     "The staged Windows service-token test helper executable is missing.",
                     helperExecutablePath);
             }
+            helperExecutableSha256 = Sha256File(helperExecutablePath);
 
             var sourceProcessCreatedAtUtcTicks = ReadProcessCreationUtcTicks(
                 sourceProcessHandle);
+            var runnerSid = WindowsIdentity.GetCurrent().User
+                            ?? throw new InvalidOperationException(
+                                "The service-token bridge runner has no Windows SID.");
             var request = new BridgeRequest(
                 bridgeServiceName,
                 nonce,
@@ -210,25 +245,25 @@ internal static class WindowsServiceTokenTestBridge
                 fullSourceExecutablePath,
                 canonicalSourceExecutableSha256,
                 canonicalSourceServiceSid,
-                pipeName,
+                runnerSid.Value,
+                helperBundleRoot,
+                helperExecutablePath,
+                helperExecutableSha256,
+                coordinationPipeName,
+                controlPipeName,
                 resultPath);
             WriteJsonAtomically(requestPath, request);
             CanonicalizeBridgeTreeOwner(bridgeRoot);
             AssertBridgeTreeSecurity(
                 bridgeRoot,
-                bridgeServiceSid);
+                bridgeServiceSid,
+                canonicalSourceServiceSid,
+                resultRoot);
+            VerifyHelperBundle(helperBundleRoot, helperBundleInventory);
             var bridgeServiceIdentity = new SecurityIdentifier(bridgeServiceSid);
-            sourceProcessAccessLease = WindowsProcessAccessLease.Acquire(
-                sourceProcessHandle,
-                sourceProcessId,
-                sourceProcessCreatedAtUtcTicks,
-                bridgeServiceIdentity);
-            sourceTokenAccessLease = WindowsTokenAccessLease.Acquire(
-                sourceProcessHandle,
-                sourceProcessId,
-                sourceProcessCreatedAtUtcTicks,
-                bridgeServiceIdentity);
-            controlPipe = CreateControlPipe(pipeName, canonicalSourceServiceSid);
+            coordinationPipe = CreateAuthenticatedPipe(
+                coordinationPipeName,
+                bridgeServiceSid);
 
             manager = OpenSCManager(
                 machineName: null,
@@ -262,7 +297,7 @@ internal static class WindowsServiceTokenTestBridge
                 loadOrderGroup: null,
                 IntPtr.Zero,
                 dependencies: null,
-                @"NT AUTHORITY\LocalService",
+                $@"NT SERVICE\{bridgeServiceName}",
                 password: null);
             if (service.IsInvalid)
             {
@@ -278,8 +313,7 @@ internal static class WindowsServiceTokenTestBridge
                 bridgeServiceName);
             ProtectOneShotServiceObject(
                 service,
-                bridgeServiceName,
-                bridgeServiceSid);
+                bridgeServiceName);
 
             if (!StartService(service, argumentCount: 0, IntPtr.Zero))
             {
@@ -296,14 +330,122 @@ internal static class WindowsServiceTokenTestBridge
                 service,
                 bridgeServiceName,
                 resultPath);
-            WaitForBridgeConnection(controlPipe, service, bridgeServiceName, resultPath);
-            var receivedNonce = new byte[NonceBytes];
-            ReadExactlyWithTimeout(controlPipe, receivedNonce, TransitionTimeout);
-            if (!CryptographicOperations.FixedTimeEquals(receivedNonce, nonceBytes))
+            ValidateCapturedHelperProcess(
+                helperProcessHandle,
+                helperExecutablePath,
+                helperExecutableSha256);
+            VerifyHelperBundle(helperBundleRoot, helperBundleInventory);
+            AssertBridgeTreeSecurity(
+                bridgeRoot,
+                bridgeServiceSid,
+                canonicalSourceServiceSid,
+                resultRoot);
+            WaitForBridgeConnection(
+                coordinationPipe,
+                service,
+                bridgeServiceName,
+                resultPath);
+            ValidateCoordinationClient(
+                coordinationPipe,
+                helperProcessHandle,
+                bridgeServiceSid);
+            var coordinationNonce = new byte[NonceBytes];
+            ReadExactlyWithTimeout(
+                coordinationPipe,
+                coordinationNonce,
+                TransitionTimeout);
+            if (!CryptographicOperations.FixedTimeEquals(
+                    coordinationNonce,
+                    nonceBytes))
+            {
+                throw new InvalidDataException(
+                    "The service-token bridge coordination nonce does not match its request.");
+            }
+
+            DeleteServiceRequired(service, bridgeServiceName);
+            serviceMarkedForDeletion = true;
+
+            sourceProcessAccessLease = WindowsProcessAccessLease.Prepare(
+                sourceProcessHandle,
+                sourceProcessId,
+                sourceProcessCreatedAtUtcTicks,
+                bridgeServiceIdentity);
+            sourceProcessAccessLease.ApplyRequired();
+            WriteProtocolByte(coordinationPipe, RelayCreationGrant);
+
+            var observedRelayFrame = new byte[ObservedRelayFrameBytes];
+            ReadExactlyWithTimeout(
+                coordinationPipe,
+                observedRelayFrame,
+                TransitionTimeout);
+            relayProcessId = ParseObservedRelayFrame(observedRelayFrame);
+            relayProcessHandle = OpenObservedRelayProcess(relayProcessId);
+            relayObservedReceived = true;
+            relayProcessCreatedAtUtcTicks = ReadProcessCreationUtcTicks(
+                relayProcessHandle);
+            ValidateCapturedRelayProcess(
+                relayProcessHandle,
+                relayProcessId,
+                relayProcessCreatedAtUtcTicks,
+                helperExecutablePath,
+                helperExecutableSha256);
+            WriteRelayCaptureAcknowledgement(
+                coordinationPipe,
+                relayProcessCreatedAtUtcTicks);
+            var preparedRelayMarker = new byte[1];
+            ReadExactlyWithTimeout(
+                coordinationPipe,
+                preparedRelayMarker,
+                TransitionTimeout);
+            if (preparedRelayMarker[0] != PreparedRelayMarker)
+            {
+                throw new InvalidDataException(
+                    "The helper did not send the exact validated prepared-relay marker.");
+            }
+            relayReadyReceived = true;
+            relayProcessIdentityConfirmed = true;
+            VerifyHelperBundle(helperBundleRoot, helperBundleInventory);
+            AssertBridgeTreeSecurity(
+                bridgeRoot,
+                bridgeServiceSid,
+                canonicalSourceServiceSid,
+                resultRoot);
+
+            sourceProcessAccessLease.Dispose();
+            sourceProcessAccessLease = null;
+            sourceProcessLeaseRestored = true;
+            controlPipe = CreateAuthenticatedPipe(
+                controlPipeName,
+                canonicalSourceServiceSid);
+            WriteProtocolByte(coordinationPipe, RelayResumeAcknowledgement);
+            relayResumeAcknowledged = true;
+
+            WaitForBridgeConnection(
+                controlPipe,
+                service,
+                bridgeServiceName,
+                resultPath);
+            ValidateRelayControlClient(
+                controlPipe,
+                relayProcessHandle,
+                relayProcessId,
+                relayProcessCreatedAtUtcTicks,
+                helperExecutablePath,
+                helperExecutableSha256);
+            var controlNonce = new byte[NonceBytes];
+            ReadExactlyWithTimeout(controlPipe, controlNonce, TransitionTimeout);
+            if (!CryptographicOperations.FixedTimeEquals(controlNonce, nonceBytes))
             {
                 throw new InvalidDataException(
                     "The service-token bridge control nonce does not match its request.");
             }
+
+            ValidateSourceServiceAndProcessRunning(
+                manager,
+                canonicalSourceServiceName,
+                sourceProcessHandle,
+                sourceProcessId,
+                sourceProcessCreatedAtUtcTicks);
 
             controlPipe.RunAsClient(() =>
             {
@@ -340,14 +482,34 @@ internal static class WindowsServiceTokenTestBridge
                 bridgeServiceName,
                 TransitionTimeout);
             helperProcessTerminationProven = true;
+            VerifyHelperBundle(helperBundleRoot, helperBundleInventory);
+            AssertBridgeTreeSecurity(
+                bridgeRoot,
+                bridgeServiceSid,
+                canonicalSourceServiceSid,
+                resultRoot);
             var bridgeResult = ReadRequiredResult(resultPath, nonce, sourceProcessId);
             bridgeResultConsumed = true;
+            if (!HasResultRelayBinding(
+                    relayProcessId,
+                    relayProcessCreatedAtUtcTicks,
+                    bridgeResult.RelayProcessId,
+                    bridgeResult.RelayProcessCreatedAtUtcTicks))
+            {
+                throw new InvalidDataException(
+                    "The helper result did not bind the exact relay process captured from the control pipe.");
+            }
             if (!bridgeResult.IsSuccess())
             {
                 throw new InvalidOperationException(
                     "The service-token bridge did not prove every required validation and control-pipe fact. "
                     + JsonSerializer.Serialize(bridgeResult, JsonOptions));
             }
+            WaitForProcessExit(
+                relayProcessHandle,
+                $"source-token relay PID {relayProcessId}",
+                TransitionTimeout);
+            relayProcessTerminationProven = true;
 
             actionFailure?.Throw();
             if (!actionCompleted)
@@ -364,18 +526,14 @@ internal static class WindowsServiceTokenTestBridge
 
         var cleanupFailures = new List<Exception>();
         CaptureCleanupFailure(cleanupFailures, () => controlPipe?.Dispose());
+        CaptureCleanupFailure(cleanupFailures, () => coordinationPipe?.Dispose());
         if (service is not null)
         {
             if (serviceOwned && !service.IsInvalid)
             {
-                var serviceStopped = false;
                 CaptureCleanupFailure(
                     cleanupFailures,
-                    () =>
-                    {
-                        StopServiceRequired(service, bridgeServiceName);
-                        serviceStopped = true;
-                    });
+                    () => StopServiceRequired(service, bridgeServiceName));
                 if (helperProcessHandle is not null
                     && !helperProcessTerminationProven)
                 {
@@ -393,7 +551,7 @@ internal static class WindowsServiceTokenTestBridge
                 }
                 if (operationFailure is not null
                     && !bridgeResultConsumed
-                    && serviceStopped
+                    && helperProcessTerminationProven
                     && File.Exists(resultPath))
                 {
                     try
@@ -402,6 +560,45 @@ internal static class WindowsServiceTokenTestBridge
                             resultPath,
                             nonce,
                             sourceProcessId);
+                        if (relayObservedReceived
+                            && !HasFailureResultRelayBinding(
+                                relayProcessId,
+                                relayProcessCreatedAtUtcTicks,
+                                relayReadyReceived,
+                                result.RelayProcessId,
+                                result.RelayProcessCreatedAtUtcTicks,
+                                result.RelayProcessValidated))
+                        {
+                            throw new InvalidDataException(
+                                "The helper failure result did not bind the exact relay process captured before the control protocol failed.");
+                        }
+                        if (relayObservedReceived
+                            && HasResultRelayBinding(
+                                relayProcessId,
+                                relayProcessCreatedAtUtcTicks,
+                                result.RelayProcessId,
+                                result.RelayProcessCreatedAtUtcTicks))
+                        {
+                            relayProcessIdentityConfirmed = true;
+                        }
+                        if (!relayObservedReceived
+                            && HasReportedRelayProcess(result))
+                        {
+                            relayProcessId = result.RelayProcessId;
+                            relayProcessCreatedAtUtcTicks =
+                                result.RelayProcessCreatedAtUtcTicks;
+                            relayProcessHandle = CaptureReportedRelayForCleanup(
+                                relayProcessId,
+                                relayProcessCreatedAtUtcTicks,
+                                helperExecutablePath,
+                                helperExecutableSha256,
+                                out relayProcessTerminationProven);
+                            relayProcessIdentityConfirmed =
+                                result.RelayProcessCreatedAtUtcTicks
+                                >= DateTime.UnixEpoch.Ticks
+                                && result.RelayProcessCreatedAtUtcTicks
+                                <= DateTime.MaxValue.Ticks;
+                        }
                         bridgeDiagnostic = new InvalidOperationException(
                             "The service-token bridge published this bound result after the control protocol failed: "
                             + JsonSerializer.Serialize(result, JsonOptions));
@@ -414,9 +611,12 @@ internal static class WindowsServiceTokenTestBridge
                     }
                 }
 
-                CaptureCleanupFailure(
-                    cleanupFailures,
-                    () => DeleteServiceRequired(service, bridgeServiceName));
+                if (!serviceMarkedForDeletion)
+                {
+                    CaptureCleanupFailure(
+                        cleanupFailures,
+                        () => DeleteServiceRequired(service, bridgeServiceName));
+                }
             }
 
             CaptureCleanupFailure(cleanupFailures, service.Dispose);
@@ -429,6 +629,75 @@ internal static class WindowsServiceTokenTestBridge
             helperProcessHandle = null;
         }
 
+        if (relayProcessHandle is not null)
+        {
+            if (!relayProcessTerminationProven
+                && relayProcessIdentityConfirmed)
+            {
+                try
+                {
+                    EnsureHelperProcessTerminated(
+                        relayProcessHandle,
+                        $"source-token relay PID {relayProcessId}");
+                    relayProcessTerminationProven = true;
+                }
+                catch (Exception exception)
+                {
+                    cleanupFailures.Add(exception);
+                }
+            }
+            else if (!relayProcessTerminationProven
+                     && helperProcessTerminationProven)
+            {
+                relayProcessTerminationProven = true;
+            }
+            else if (!relayProcessTerminationProven)
+            {
+                cleanupFailures.Add(new InvalidOperationException(
+                    $"The provisional source-token relay PID {relayProcessId} was never identity-bound and its helper-owned kill-on-close job could not be proven closed."));
+            }
+
+            CaptureCleanupFailure(cleanupFailures, relayProcessHandle.Dispose);
+            relayProcessHandle = null;
+        }
+
+        if (sourceProcessAccessLease is not null
+            && (!helperProcessTerminationProven
+                || (relayProcessId != 0 && !relayProcessTerminationProven))
+            && helperServiceStarted)
+        {
+            cleanupFailures.Add(new InvalidOperationException(
+                "Exact termination of the helper/relay process tree was not proven before emergency source-process DACL restoration; any already-open relay-creation handle could not be treated as revoked."));
+        }
+
+        if (relayResumeAcknowledged && !sourceProcessLeaseRestored)
+        {
+            cleanupFailures.Add(new InvalidOperationException(
+                "The source-token relay was resumed before exact source-process DACL restoration was proven."));
+        }
+        if (actionCompleted
+            && (!relayReadyReceived
+                || !sourceProcessLeaseRestored
+                || !relayResumeAcknowledged))
+        {
+            cleanupFailures.Add(new InvalidOperationException(
+                "The service-token action completed without the authenticated prepared-relay and pre-resume lease-restoration handshake."));
+        }
+
+        if (sourceProcessAccessLease is not null)
+        {
+            try
+            {
+                sourceProcessAccessLease.Dispose();
+                sourceProcessAccessLease = null;
+                sourceProcessLeaseRestored = true;
+            }
+            catch (Exception exception)
+            {
+                cleanupFailures.Add(exception);
+            }
+        }
+
         if (manager is not null)
         {
             if (serviceOwned && !manager.IsInvalid)
@@ -439,26 +708,6 @@ internal static class WindowsServiceTokenTestBridge
             }
 
             CaptureCleanupFailure(cleanupFailures, manager.Dispose);
-        }
-
-        if ((sourceTokenAccessLease is not null || sourceProcessAccessLease is not null)
-            && !helperProcessTerminationProven
-            && helperServiceStarted)
-        {
-            cleanupFailures.Add(new InvalidOperationException(
-                "The scoped source process and token DACLs were restored, but exact termination of the helper process was not proven; any already-open helper handles could not be revoked."));
-        }
-
-        if (sourceTokenAccessLease is not null)
-        {
-            CaptureCleanupFailure(cleanupFailures, sourceTokenAccessLease.Dispose);
-            sourceTokenAccessLease = null;
-        }
-
-        if (sourceProcessAccessLease is not null)
-        {
-            CaptureCleanupFailure(cleanupFailures, sourceProcessAccessLease.Dispose);
-            sourceProcessAccessLease = null;
         }
 
         if (bridgeRootOwned)
@@ -514,7 +763,10 @@ internal static class WindowsServiceTokenTestBridge
         return actionResult!;
     }
 
-    private static void PrepareBridgeRoot(string bridgeRoot, string bridgeServiceSid)
+    private static void PrepareBridgeRoot(
+        string bridgeRoot,
+        string bridgeServiceSid,
+        string sourceServiceSid)
     {
         var currentSid = WindowsIdentity.GetCurrent().User
                          ?? throw new InvalidOperationException(
@@ -526,8 +778,7 @@ internal static class WindowsServiceTokenTestBridge
                  {
                      new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
                      new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
-                     currentSid,
-                     new SecurityIdentifier(bridgeServiceSid)
+                     currentSid
                  }.Distinct())
         {
             security.AddAccessRule(new FileSystemAccessRule(
@@ -537,7 +788,62 @@ internal static class WindowsServiceTokenTestBridge
                 PropagationFlags.None,
                 AccessControlType.Allow));
         }
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(bridgeServiceSid),
+            FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(sourceServiceSid),
+            FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
 
+        CreateProtectedDirectory(bridgeRoot, security, "service-token bridge root");
+    }
+
+    private static void PrepareResultRoot(
+        string resultRoot,
+        string bridgeServiceSid)
+    {
+        var currentSid = WindowsIdentity.GetCurrent().User
+                         ?? throw new InvalidOperationException(
+                             "The service-token bridge runner has no Windows SID.");
+        var security = new DirectorySecurity();
+        security.SetOwner(currentSid);
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        foreach (var sid in new[]
+                 {
+                     new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                     new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                     currentSid
+                 }.Distinct())
+        {
+            security.AddAccessRule(new FileSystemAccessRule(
+                sid,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+        }
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(bridgeServiceSid),
+            FileSystemRights.Modify
+            | FileSystemRights.ReadPermissions
+            | FileSystemRights.Synchronize,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        CreateProtectedDirectory(resultRoot, security, "service-token result root");
+    }
+
+    private static void CreateProtectedDirectory(
+        string path,
+        DirectorySecurity security,
+        string description)
+    {
         var descriptor = security.GetSecurityDescriptorBinaryForm();
         var descriptorBuffer = Marshal.AllocHGlobal(descriptor.Length);
         try
@@ -549,14 +855,14 @@ internal static class WindowsServiceTokenTestBridge
                 SecurityDescriptor = descriptorBuffer,
                 InheritHandle = false
             };
-            if (!CreateDirectory(bridgeRoot, ref attributes))
+            if (!CreateDirectory(path, ref attributes))
             {
                 var error = Marshal.GetLastWin32Error();
                 throw new Win32Exception(
                     error,
                     error == ErrorAlreadyExists
-                        ? $"Service-token bridge root '{bridgeRoot}' already exists."
-                        : $"Could not atomically create protected service-token bridge root '{bridgeRoot}'.");
+                        ? $"Protected {description} '{path}' already exists."
+                        : $"Could not atomically create protected {description} '{path}'.");
             }
         }
         finally
@@ -565,7 +871,9 @@ internal static class WindowsServiceTokenTestBridge
         }
     }
 
-    private static void CopyHelperBundle(string source, string destination)
+    internal static Dictionary<string, HelperBundleFile> CopyHelperBundle(
+        string source,
+        string destination)
     {
         var fullSource = Path.GetFullPath(source);
         if (!Directory.Exists(fullSource))
@@ -582,6 +890,8 @@ internal static class WindowsServiceTokenTestBridge
         }
 
         Directory.CreateDirectory(destination);
+        var inventory = new Dictionary<string, HelperBundleFile>(
+            StringComparer.Ordinal);
         var pending = new Stack<(DirectoryInfo Source, string Destination)>();
         pending.Push((sourceRoot, destination));
         while (pending.Count > 0)
@@ -608,21 +918,111 @@ internal static class WindowsServiceTokenTestBridge
 
                 var sourceFile = (FileInfo)entry;
                 File.Copy(sourceFile.FullName, target, overwrite: false);
+                var sourceSha256 = Sha256File(sourceFile.FullName);
+                var targetSha256 = Sha256File(target);
                 if (!string.Equals(
-                        Sha256File(sourceFile.FullName),
-                        Sha256File(target),
+                        sourceSha256,
+                        targetSha256,
                         StringComparison.Ordinal))
                 {
                     throw new InvalidDataException(
                         $"The service-token test helper copy changed '{sourceFile.FullName}'.");
                 }
+                var relativePath = Path.GetRelativePath(destination, target)
+                    .Replace(Path.DirectorySeparatorChar, '/');
+                if (!inventory.TryAdd(
+                        relativePath,
+                        new HelperBundleFile(
+                            sourceFile.Length,
+                            sourceSha256)))
+                {
+                    throw new InvalidDataException(
+                        $"The service-token test helper bundle duplicates relative path '{relativePath}'.");
+                }
             }
+        }
+
+        if (inventory.Count == 0)
+        {
+            throw new InvalidDataException(
+                "The service-token test helper bundle is empty.");
+        }
+
+        return inventory;
+    }
+
+    internal static void VerifyHelperBundle(
+        string bundleRoot,
+        IReadOnlyDictionary<string, HelperBundleFile> expectedInventory)
+    {
+        ArgumentNullException.ThrowIfNull(expectedInventory);
+        var root = new DirectoryInfo(Path.GetFullPath(bundleRoot));
+        if ((root.Attributes & (FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+        {
+            throw new InvalidDataException(
+                $"The protected helper bundle root '{root.FullName}' is not an ordinary directory.");
+        }
+
+        var observed = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new Stack<DirectoryInfo>();
+        pending.Push(root);
+        while (pending.TryPop(out var directory))
+        {
+            foreach (var entry in directory.EnumerateFileSystemInfos(
+                         "*",
+                         SearchOption.TopDirectoryOnly))
+            {
+                var attributes = entry.Attributes;
+                if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+                {
+                    throw new InvalidDataException(
+                        $"The protected helper bundle contains a reparse or device entry '{entry.FullName}'.");
+                }
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    pending.Push((DirectoryInfo)entry);
+                    continue;
+                }
+
+                var relativePath = Path.GetRelativePath(root.FullName, entry.FullName)
+                    .Replace(Path.DirectorySeparatorChar, '/');
+                if (!expectedInventory.TryGetValue(relativePath, out var expected)
+                    || !observed.Add(relativePath))
+                {
+                    throw new InvalidDataException(
+                        $"The protected helper bundle contains unexpected file '{relativePath}'.");
+                }
+                var file = (FileInfo)entry;
+                if (file.Length != expected.Length
+                    || !string.Equals(
+                        Sha256File(file.FullName),
+                        expected.Sha256,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        $"The protected helper bundle file '{relativePath}' changed.");
+                }
+            }
+        }
+
+        var missing = expectedInventory.Keys
+            .Where(path => !observed.Contains(path))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (missing.Length != 0)
+        {
+            throw new InvalidDataException(
+                "The protected helper bundle is missing files: "
+                + string.Join(", ", missing)
+                + ".");
         }
     }
 
     private static void AssertBridgeTreeSecurity(
         string bridgeRoot,
-        string bridgeServiceSid)
+        string bridgeServiceSid,
+        string sourceServiceSid,
+        string resultRoot)
     {
         var currentSid = WindowsIdentity.GetCurrent().User
                          ?? throw new InvalidOperationException(
@@ -632,7 +1032,8 @@ internal static class WindowsServiceTokenTestBridge
             new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value,
             new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value,
             currentSid.Value,
-            new SecurityIdentifier(bridgeServiceSid).Value
+            new SecurityIdentifier(bridgeServiceSid).Value,
+            new SecurityIdentifier(sourceServiceSid).Value
         };
         var pending = new Stack<FileSystemInfo>();
         pending.Push(new DirectoryInfo(bridgeRoot));
@@ -649,18 +1050,32 @@ internal static class WindowsServiceTokenTestBridge
             FileSystemSecurity security = entry is DirectoryInfo directory
                 ? FileSystemAclExtensions.GetAccessControl(directory)
                 : FileSystemAclExtensions.GetAccessControl((FileInfo)entry);
-            if (string.Equals(
-                    entry.FullName,
-                    bridgeRoot,
-                    StringComparison.OrdinalIgnoreCase)
+            var isResultEntry = string.Equals(
+                                    entry.FullName,
+                                    resultRoot,
+                                    StringComparison.OrdinalIgnoreCase)
+                                || entry.FullName.StartsWith(
+                                    resultRoot + Path.DirectorySeparatorChar,
+                                    StringComparison.OrdinalIgnoreCase);
+            if ((string.Equals(
+                     entry.FullName,
+                     bridgeRoot,
+                     StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(
+                     entry.FullName,
+                     resultRoot,
+                     StringComparison.OrdinalIgnoreCase))
                 && !security.AreAccessRulesProtected)
             {
                 throw new InvalidDataException(
-                    "The service-token bridge root DACL must be protected from parent inheritance.");
+                    $"The service-token bridge security boundary '{entry.FullName}' must be protected from parent inheritance.");
             }
 
             var owner = (SecurityIdentifier?)security.GetOwner(typeof(SecurityIdentifier));
-            if (owner is null || !owner.Equals(currentSid))
+            var canonicalBridgeServiceSid = new SecurityIdentifier(bridgeServiceSid);
+            if (owner is null
+                || (!owner.Equals(currentSid)
+                    && !(isResultEntry && owner.Equals(canonicalBridgeServiceSid))))
             {
                 throw new InvalidDataException(
                     $"The protected service-token bridge entry '{entry.FullName}' has unexpected owner "
@@ -687,11 +1102,44 @@ internal static class WindowsServiceTokenTestBridge
                 grantedRights[sid] |= rule.FileSystemRights;
             }
 
-            if (grantedRights.Any(pair =>
-                    (pair.Value & FileSystemRights.FullControl) != FileSystemRights.FullControl))
+            var canonicalBridgeSid = canonicalBridgeServiceSid.Value;
+            var canonicalSourceServiceSid = new SecurityIdentifier(sourceServiceSid).Value;
+            var administrativeSids = new[]
+            {
+                new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value,
+                new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value,
+                currentSid.Value
+            };
+            if (administrativeSids.Any(sid =>
+                    (grantedRights[sid] & FileSystemRights.FullControl)
+                    != FileSystemRights.FullControl))
             {
                 throw new InvalidDataException(
-                    $"The protected service-token bridge entry does not grant every exact principal full control: '{entry.FullName}'.");
+                    $"The protected service-token bridge entry does not grant every administrative principal full control: '{entry.FullName}'.");
+            }
+
+            var exactReadOnlyRights = FileSystemRights.ReadAndExecute
+                                      | FileSystemRights.Synchronize;
+            var bridgeRights = grantedRights[canonicalBridgeSid];
+            var expectedBridgeRights = isResultEntry
+                ? FileSystemRights.Modify
+                  | FileSystemRights.ReadPermissions
+                  | FileSystemRights.Synchronize
+                : exactReadOnlyRights;
+            if (bridgeRights != expectedBridgeRights)
+            {
+                throw new InvalidDataException(
+                    $"The exact helper service SID has unexpected rights in the protected bridge tree: '{entry.FullName}'.");
+            }
+
+            var sourceRights = grantedRights[canonicalSourceServiceSid];
+            var exactSourceRights = isResultEntry
+                ? (FileSystemRights)0
+                : exactReadOnlyRights;
+            if (sourceRights != exactSourceRights)
+            {
+                throw new InvalidDataException(
+                    $"The exact source Station SID must have only ReadAndExecute and required synchronization access in the protected bridge tree: '{entry.FullName}'.");
             }
 
             if (entry is not DirectoryInfo childDirectory)
@@ -762,20 +1210,24 @@ internal static class WindowsServiceTokenTestBridge
         }
     }
 
-    private static NamedPipeServerStream CreateControlPipe(
+    private static NamedPipeServerStream CreateAuthenticatedPipe(
         string pipeName,
-        string sourceServiceSid)
+        string clientSid)
     {
         var owner = WindowsIdentity.GetCurrent().User
                     ?? throw new InvalidOperationException(
                         "The service-token bridge runner has no Windows SID.");
-        var sourceService = new SecurityIdentifier(sourceServiceSid);
+        var client = new SecurityIdentifier(clientSid);
         var security = new PipeSecurity();
         security.SetOwner(owner);
         security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
         security.AddAccessRule(new PipeAccessRule(
-            sourceService,
+            owner,
             PipeAccessRights.FullControl,
+            AccessControlType.Allow));
+        security.AddAccessRule(new PipeAccessRule(
+            client,
+            AuthenticatedPipeClientRights,
             AccessControlType.Allow));
         return NamedPipeServerStreamAcl.Create(
             pipeName,
@@ -822,6 +1274,463 @@ internal static class WindowsServiceTokenTestBridge
         connection.GetAwaiter().GetResult();
     }
 
+    private static void ValidateCoordinationClient(
+        NamedPipeServerStream pipe,
+        SafeProcessHandle retainedHelperProcess,
+        string expectedHelperSid)
+    {
+        if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle, out var pipeClientProcessId)
+            || pipeClientProcessId == 0)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(
+                error,
+                $"Could not bind the coordination pipe to its helper client PID; Win32 error {error}.");
+        }
+
+        var retainedHelperProcessId = GetProcessId(retainedHelperProcess);
+        if (retainedHelperProcessId == 0)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(
+                error,
+                $"Could not read the retained helper process identifier; Win32 error {error}.");
+        }
+        if (pipeClientProcessId != retainedHelperProcessId)
+        {
+            throw new InvalidDataException(
+                $"The coordination pipe client PID {pipeClientProcessId} is not retained helper PID {retainedHelperProcessId}.");
+        }
+        if (WaitForSingleObject(retainedHelperProcess, milliseconds: 0) != WaitTimeout)
+        {
+            throw new InvalidOperationException(
+                $"Retained helper PID {retainedHelperProcessId} exited before coordination identity validation.");
+        }
+
+        var helperSid = new SecurityIdentifier(expectedHelperSid);
+        var administratorsSid = new SecurityIdentifier(
+            WellKnownSidType.BuiltinAdministratorsSid,
+            null);
+        pipe.RunAsClient(() =>
+        {
+            using var identity = WindowsIdentity.GetCurrent(TokenAccessLevels.Query);
+            if (identity.User is not { } user
+                || !user.Equals(helperSid)
+                || identity.Groups?.Contains(administratorsSid) == true)
+            {
+                throw new InvalidOperationException(
+                    "The coordination pipe did not impersonate the exact non-administrative one-shot virtual service account.");
+            }
+        });
+    }
+
+    private static uint ParseObservedRelayFrame(
+        ReadOnlySpan<byte> frame)
+    {
+        if (frame.Length != ObservedRelayFrameBytes
+            || frame[0] != ObservedRelayMarker)
+        {
+            throw new InvalidDataException(
+                "The helper did not send the exact observed-relay frame.");
+        }
+
+        var processId = BinaryPrimitives.ReadUInt32LittleEndian(
+            frame.Slice(1, sizeof(uint)));
+        if (processId == 0)
+        {
+            throw new InvalidDataException(
+                "The helper sent an invalid observed-relay PID.");
+        }
+
+        return processId;
+    }
+
+    private static SafeProcessHandle OpenObservedRelayProcess(uint processId)
+    {
+        var process = OpenProcess(
+            ProcessTerminate | ProcessQueryLimitedInformation | Synchronize,
+            inheritHandle: false,
+            processId);
+        if (process.IsInvalid)
+        {
+            var error = Marshal.GetLastWin32Error();
+            process.Dispose();
+            throw new Win32Exception(
+                error,
+                $"Could not retain exact source-token relay PID {processId}; Win32 error {error}.");
+        }
+
+        return process;
+    }
+
+    private static SafeProcessHandle? CaptureReportedRelayForCleanup(
+        uint processId,
+        long expectedCreatedAtUtcTicks,
+        string expectedExecutablePath,
+        string expectedExecutableSha256,
+        out bool terminationProven)
+    {
+        terminationProven = false;
+        if (expectedCreatedAtUtcTicks == 0)
+        {
+            throw new InvalidOperationException(
+                $"Helper-reported source-token relay PID {processId} has no runner-captured creation time, so cleanup must not reopen a live PID-only process.");
+        }
+
+        var process = OpenProcess(
+            ProcessTerminate | ProcessQueryLimitedInformation | Synchronize,
+            inheritHandle: false,
+            processId);
+        if (process.IsInvalid)
+        {
+            var error = Marshal.GetLastWin32Error();
+            process.Dispose();
+            if (error == ErrorInvalidParameter)
+            {
+                terminationProven = true;
+                return null;
+            }
+
+            throw new Win32Exception(
+                error,
+                $"Could not recover the helper-reported source-token relay PID {processId} for cleanup; Win32 error {error}.");
+        }
+
+        try
+        {
+            var actualProcessId = GetProcessId(process);
+            if (actualProcessId == 0)
+            {
+                var error = Marshal.GetLastWin32Error();
+                throw new Win32Exception(
+                    error,
+                    $"Could not read helper-reported source-token relay PID {processId}; Win32 error {error}.");
+            }
+            var actualCreatedAtUtcTicks = ReadProcessCreationUtcTicks(process);
+            if (actualProcessId != processId)
+            {
+                terminationProven = true;
+                process.Dispose();
+                return null;
+            }
+            if (actualCreatedAtUtcTicks != expectedCreatedAtUtcTicks)
+            {
+                terminationProven = true;
+                process.Dispose();
+                return null;
+            }
+
+            var wait = WaitForSingleObject(process, milliseconds: 0);
+            if (wait == WaitObject0)
+            {
+                terminationProven = true;
+                process.Dispose();
+                return null;
+            }
+            if (wait != WaitTimeout)
+            {
+                throw wait == WaitFailed
+                    ? new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        $"Could not inspect helper-reported source-token relay PID {processId} during cleanup.")
+                    : new InvalidOperationException(
+                        $"Helper-reported source-token relay PID {processId} returned unexpected wait status 0x{wait:x8} during cleanup.");
+            }
+
+            ValidateCapturedProcessImageAndHash(
+                process,
+                processId,
+                "helper-reported source-token relay",
+                expectedExecutablePath,
+                expectedExecutableSha256);
+            return process;
+        }
+        catch
+        {
+            process.Dispose();
+            throw;
+        }
+    }
+
+    private static void ValidateCapturedHelperProcess(
+        SafeProcessHandle process,
+        string expectedExecutablePath,
+        string expectedExecutableSha256)
+    {
+        var processId = GetProcessId(process);
+        if (processId == 0)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(
+                error,
+                $"Could not read the retained helper process identifier; Win32 error {error}.");
+        }
+
+        var wait = WaitForSingleObject(process, milliseconds: 0);
+        if (wait == WaitObject0)
+        {
+            throw new InvalidOperationException(
+                $"Retained helper PID {processId} exited before image validation.");
+        }
+        if (wait == WaitFailed)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(
+                error,
+                $"Could not validate retained helper PID {processId} liveness; Win32 error {error}.");
+        }
+        if (wait != WaitTimeout)
+        {
+            throw new InvalidOperationException(
+                $"Retained helper PID {processId} returned unexpected wait status 0x{wait:x8}.");
+        }
+
+        ValidateCapturedProcessImageAndHash(
+            process,
+            processId,
+            "one-shot helper",
+            expectedExecutablePath,
+            expectedExecutableSha256);
+    }
+
+    private static void ValidateRelayControlClient(
+        NamedPipeServerStream pipe,
+        SafeProcessHandle retainedRelayProcess,
+        uint preparedProcessId,
+        long preparedCreatedAtUtcTicks,
+        string expectedExecutablePath,
+        string expectedExecutableSha256)
+    {
+        if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle, out var pipeClientProcessId)
+            || pipeClientProcessId == 0)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(
+                error,
+                $"Could not bind the relay control pipe to its client PID; Win32 error {error}.");
+        }
+
+        ValidateCapturedRelayProcess(
+            retainedRelayProcess,
+            preparedProcessId,
+            preparedCreatedAtUtcTicks,
+            expectedExecutablePath,
+            expectedExecutableSha256);
+        var retainedProcessId = GetProcessId(retainedRelayProcess);
+        var retainedCreatedAtUtcTicks = ReadProcessCreationUtcTicks(retainedRelayProcess);
+        if (!HasCapturedRelayBinding(
+                preparedProcessId,
+                preparedCreatedAtUtcTicks,
+                pipeClientProcessId,
+                retainedProcessId,
+                retainedCreatedAtUtcTicks))
+        {
+            throw new InvalidDataException(
+                "The relay control pipe client is not the exact authenticated prepared relay process.");
+        }
+    }
+
+    internal static bool HasCapturedRelayBinding(
+        uint preparedProcessId,
+        long preparedCreatedAtUtcTicks,
+        uint pipeClientProcessId,
+        uint retainedProcessId,
+        long retainedCreatedAtUtcTicks) =>
+        preparedProcessId != 0
+        && preparedCreatedAtUtcTicks >= DateTime.UnixEpoch.Ticks
+        && preparedCreatedAtUtcTicks <= DateTime.MaxValue.Ticks
+        && pipeClientProcessId == preparedProcessId
+        && retainedProcessId == preparedProcessId
+        && retainedCreatedAtUtcTicks == preparedCreatedAtUtcTicks;
+
+    internal static bool HasResultRelayBinding(
+        uint capturedProcessId,
+        long capturedCreatedAtUtcTicks,
+        uint resultProcessId,
+        long resultCreatedAtUtcTicks) =>
+        capturedProcessId != 0
+        && capturedCreatedAtUtcTicks >= DateTime.UnixEpoch.Ticks
+        && capturedCreatedAtUtcTicks <= DateTime.MaxValue.Ticks
+        && resultProcessId == capturedProcessId
+        && resultCreatedAtUtcTicks == capturedCreatedAtUtcTicks;
+
+    internal static bool HasFailureResultRelayBinding(
+        uint capturedProcessId,
+        long capturedCreatedAtUtcTicks,
+        bool relayReadyReceived,
+        uint resultProcessId,
+        long resultCreatedAtUtcTicks,
+        bool resultValidated) =>
+        HasResultRelayBinding(
+            capturedProcessId,
+            capturedCreatedAtUtcTicks,
+            resultProcessId,
+            resultCreatedAtUtcTicks)
+        || (!relayReadyReceived
+            && capturedProcessId != 0
+            && resultProcessId == capturedProcessId
+            && !resultValidated
+            && resultCreatedAtUtcTicks == 0
+            && (capturedCreatedAtUtcTicks == 0
+                || (capturedCreatedAtUtcTicks >= DateTime.UnixEpoch.Ticks
+                    && capturedCreatedAtUtcTicks <= DateTime.MaxValue.Ticks)));
+
+    private static void ValidateCapturedRelayProcess(
+        SafeProcessHandle process,
+        uint expectedProcessId,
+        long expectedCreatedAtUtcTicks,
+        string expectedExecutablePath,
+        string expectedExecutableSha256)
+    {
+        var actualProcessId = GetProcessId(process);
+        if (actualProcessId == 0)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(
+                error,
+                $"Could not read retained source-token relay PID; Win32 error {error}.");
+        }
+        var wait = WaitForSingleObject(process, milliseconds: 0);
+        if (wait != WaitTimeout)
+        {
+            throw wait == WaitObject0
+                ? new InvalidOperationException(
+                    $"Source-token relay PID {expectedProcessId} exited before binding validation.")
+                : new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not validate source-token relay PID {expectedProcessId} liveness.");
+        }
+
+        var actualCreatedAtUtcTicks = ReadProcessCreationUtcTicks(process);
+        if (!HasCapturedRelayBinding(
+                expectedProcessId,
+                expectedCreatedAtUtcTicks,
+                expectedProcessId,
+                actualProcessId,
+                actualCreatedAtUtcTicks))
+        {
+            throw new InvalidDataException(
+                $"The retained source-token relay does not match prepared PID {expectedProcessId} and its creation time.");
+        }
+
+        ValidateCapturedProcessImageAndHash(
+            process,
+            expectedProcessId,
+            "source-token relay",
+            expectedExecutablePath,
+            expectedExecutableSha256);
+    }
+
+    private static void ValidateCapturedProcessImageAndHash(
+        SafeProcessHandle process,
+        uint processId,
+        string role,
+        string expectedExecutablePath,
+        string expectedExecutableSha256)
+    {
+        var path = new char[32_768];
+        var pathLength = checked((uint)path.Length);
+        if (!QueryFullProcessImageName(
+                process,
+                flags: 0,
+                path,
+                ref pathLength)
+            || pathLength == 0
+            || pathLength >= path.Length)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(
+                error,
+                $"Could not read {role} PID {processId} image path; Win32 error {error}.");
+        }
+
+        var actualPath = Path.GetFullPath(
+            new string(path, 0, checked((int)pathLength)));
+        if (!string.Equals(
+                actualPath,
+                expectedExecutablePath,
+                StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(
+                Sha256File(actualPath),
+                expectedExecutableSha256,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"{role} PID {processId} does not run the exact protected helper image and hash.");
+        }
+    }
+
+    private static void ValidateSourceServiceAndProcessRunning(
+        SafeServiceHandle manager,
+        string sourceServiceName,
+        SafeProcessHandle retainedSourceProcess,
+        uint sourceProcessId,
+        long expectedCreatedAtUtcTicks)
+    {
+        using var sourceService = OpenService(
+            manager,
+            sourceServiceName,
+            ServiceQueryStatus);
+        if (sourceService.IsInvalid)
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(
+                error,
+                $"Could not open source Station service '{sourceServiceName}' for pre-action validation; Win32 error {error}.");
+        }
+
+        var status = QueryStatus(sourceService, sourceServiceName);
+        if (status.ServiceType != ServiceWin32OwnProcess
+            || status.CurrentState != ServiceRunning
+            || status.ProcessId != sourceProcessId)
+        {
+            throw new InvalidOperationException(
+                $"Source Station service '{sourceServiceName}' is not Running as exact own-process PID {sourceProcessId} before the action.");
+        }
+
+        WindowsProcessAccessLease.ValidateExactProcessHandle(
+            retainedSourceProcess,
+            sourceProcessId,
+            expectedCreatedAtUtcTicks,
+            "pre-action source Station");
+    }
+
+    private static void WriteProtocolByte(Stream stream, byte value)
+    {
+        stream.WriteByte(value);
+        stream.Flush();
+    }
+
+    private static void WriteRelayCaptureAcknowledgement(
+        Stream stream,
+        long createdAtUtcTicks)
+    {
+        if (createdAtUtcTicks < DateTime.UnixEpoch.Ticks
+            || createdAtUtcTicks > DateTime.MaxValue.Ticks)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(createdAtUtcTicks),
+                "The runner-captured relay creation time is outside the valid UTC tick range.");
+        }
+
+        var frame = new byte[RelayCaptureAcknowledgementFrameBytes];
+        frame[0] = RelayCaptureAcknowledgement;
+        BinaryPrimitives.WriteInt64LittleEndian(
+            frame.AsSpan(1, sizeof(long)),
+            createdAtUtcTicks);
+        using var deadline = new CancellationTokenSource(TransitionTimeout);
+        try
+        {
+            stream.WriteAsync(frame, deadline.Token).AsTask().GetAwaiter().GetResult();
+            stream.FlushAsync(deadline.Token).GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            throw new TimeoutException(
+                "The service-token bridge could not send its relay-capture acknowledgement before the deadline.");
+        }
+    }
+
     private static void ReadExactlyWithTimeout(
         Stream stream,
         Memory<byte> buffer,
@@ -835,7 +1744,7 @@ internal static class WindowsServiceTokenTestBridge
         catch (OperationCanceledException)
         {
             throw new TimeoutException(
-                "The service-token bridge did not send its complete nonce before the deadline.");
+                "The service-token bridge did not complete its bounded protocol frame before the deadline.");
         }
     }
 
@@ -907,6 +1816,16 @@ internal static class WindowsServiceTokenTestBridge
                 && !result.HelperIdentityValidated
                 && !result.SourceServiceValidated
                 && !result.SourceProcessValidated
+                && HasNoRelayProcess(result)
+                && !result.SourceTokenValidated
+                && !result.ControlPipeConnected
+                && !result.ReceiptReceived,
+            "runner-coordination" =>
+                result.FailureReason == "connect-and-grant"
+                && result.HelperIdentityValidated
+                && !result.SourceServiceValidated
+                && !result.SourceProcessValidated
+                && HasNoRelayProcess(result)
                 && !result.SourceTokenValidated
                 && !result.ControlPipeConnected
                 && !result.ReceiptReceived,
@@ -915,50 +1834,68 @@ internal static class WindowsServiceTokenTestBridge
                 && result.HelperIdentityValidated
                 && !result.SourceServiceValidated
                 && !result.SourceProcessValidated
+                && HasNoRelayProcess(result)
                 && !result.SourceTokenValidated
                 && !result.ControlPipeConnected
                 && !result.ReceiptReceived,
             "source-process" =>
                 result.FailureReason is "open-process"
-                    or "process-liveness"
-                    or "process-creation"
-                    or "process-image"
-                && result.HelperIdentityValidated
-                && result.SourceServiceValidated
-                && !result.SourceProcessValidated
-                && !result.SourceTokenValidated
-                && !result.ControlPipeConnected
-                && !result.ReceiptReceived,
-            "source-token" =>
-                result.FailureReason == "open-source-token"
-                && result.HelperIdentityValidated
-                && result.SourceServiceValidated
-                && result.SourceProcessValidated
-                && !result.SourceTokenValidated
-                && !result.ControlPipeConnected
-                && !result.ReceiptReceived,
-            "source-executable" =>
-                result.FailureReason == "source-executable"
-                && HasValidatedSourceTokenOnly(result),
-            "post-validation-source" =>
-                result.FailureReason is "source-service-post-validation"
-                    or "process-liveness-post-validation"
-                && HasValidatedSourceTokenOnly(result),
-            "control-pipe" =>
-                result.FailureReason == "control-pipe"
-                && HasValidatedSourceTokenOnly(result),
-            "receipt" =>
-                result.FailureReason == "receipt"
+                    or "process-validation"
+                ? result.HelperIdentityValidated
+                  && result.SourceServiceValidated
+                  && !result.SourceProcessValidated
+                  && HasNoRelayProcess(result)
+                  && !result.SourceTokenValidated
+                  && !result.ControlPipeConnected
+                  && !result.ReceiptReceived
+                : result.FailureReason is "open-weak-process"
+                    or "weak-process-validation"
+                  && HasValidatedRelayBeforeReceipt(result),
+            "source-relay" =>
+                result.FailureReason is "create-source-token-relay"
+                    or "relay-creation-time"
+                    or "relay-observation"
+                    or "relay-validation"
+                    or "relay-ready"
+                    or "source-service-before-relay-resume"
+                    or "source-process-before-relay-resume"
+                    or "resume-source-token-relay"
+                    or "source-token-relay-exit"
                 && result.HelperIdentityValidated
                 && result.SourceServiceValidated
                 && result.SourceProcessValidated
-                && result.SourceTokenValidated
-                && result.ControlPipeConnected
+                && (result.FailureReason switch
+                {
+                    "create-source-token-relay" => HasNoRelayProcess(result),
+                    "relay-observation" or "relay-creation-time" =>
+                        HasReportedWithoutCreationTime(result),
+                    "relay-validation" =>
+                        HasObservedUnvalidatedRelayProcess(result),
+                    _ => HasValidatedRelayProcess(result)
+                })
+                && !result.SourceTokenValidated
+                && !result.ControlPipeConnected
                 && !result.ReceiptReceived,
             "post-receipt-source" =>
                 result.FailureReason is "source-service-post-receipt"
-                    or "process-liveness-post-receipt"
+                    or "process-validation-post-receipt"
                 && HasEveryValidationFlag(result),
+            "source-relay-cleanup" =>
+                result.FailureReason == "terminate-job-and-wait"
+                && result.HelperIdentityValidated
+                && result.SourceServiceValidated
+                && result.SourceProcessValidated
+                && ((HasReportedUnvalidatedRelayProcess(result)
+                     && !result.SourceTokenValidated
+                     && !result.ControlPipeConnected
+                     && !result.ReceiptReceived)
+                    || (HasValidatedRelayProcess(result)
+                        && ((!result.SourceTokenValidated
+                             && !result.ControlPipeConnected
+                             && !result.ReceiptReceived)
+                            || (result.SourceTokenValidated
+                                && result.ControlPipeConnected
+                                && result.ReceiptReceived)))),
             "none" =>
                 result.FailureReason == "none"
                 && result.Win32Error == 0
@@ -967,11 +1904,47 @@ internal static class WindowsServiceTokenTestBridge
         };
     }
 
-    private static bool HasValidatedSourceTokenOnly(BridgeResult result) =>
+    private static bool HasNoRelayProcess(BridgeResult result) =>
+        result.RelayProcessId == 0
+        && result.RelayProcessCreatedAtUtcTicks == 0
+        && !result.RelayProcessValidated;
+
+    private static bool HasValidatedRelayProcess(BridgeResult result) =>
+        result.RelayProcessId > 0
+        && result.RelayProcessCreatedAtUtcTicks >= DateTime.UnixEpoch.Ticks
+        && result.RelayProcessCreatedAtUtcTicks <= DateTime.MaxValue.Ticks
+        && result.RelayProcessValidated;
+
+    private static bool HasObservedRelayProcess(BridgeResult result) =>
+        result.RelayProcessId > 0
+        && result.RelayProcessCreatedAtUtcTicks >= DateTime.UnixEpoch.Ticks
+        && result.RelayProcessCreatedAtUtcTicks <= DateTime.MaxValue.Ticks;
+
+    private static bool HasReportedRelayProcess(BridgeResult result) =>
+        result.RelayProcessId > 0
+        && (result.RelayProcessCreatedAtUtcTicks == 0
+            || (result.RelayProcessCreatedAtUtcTicks >= DateTime.UnixEpoch.Ticks
+                && result.RelayProcessCreatedAtUtcTicks <= DateTime.MaxValue.Ticks));
+
+    private static bool HasReportedWithoutCreationTime(BridgeResult result) =>
+        result.RelayProcessId > 0
+        && result.RelayProcessCreatedAtUtcTicks == 0
+        && !result.RelayProcessValidated;
+
+    private static bool HasObservedUnvalidatedRelayProcess(BridgeResult result) =>
+        HasObservedRelayProcess(result)
+        && !result.RelayProcessValidated;
+
+    private static bool HasReportedUnvalidatedRelayProcess(BridgeResult result) =>
+        HasReportedRelayProcess(result)
+        && !result.RelayProcessValidated;
+
+    private static bool HasValidatedRelayBeforeReceipt(BridgeResult result) =>
         result.HelperIdentityValidated
         && result.SourceServiceValidated
         && result.SourceProcessValidated
-        && result.SourceTokenValidated
+        && HasValidatedRelayProcess(result)
+        && !result.SourceTokenValidated
         && !result.ControlPipeConnected
         && !result.ReceiptReceived;
 
@@ -979,6 +1952,7 @@ internal static class WindowsServiceTokenTestBridge
         result.HelperIdentityValidated
         && result.SourceServiceValidated
         && result.SourceProcessValidated
+        && HasValidatedRelayProcess(result)
         && result.SourceTokenValidated
         && result.ControlPipeConnected
         && result.ReceiptReceived;
@@ -1309,8 +2283,7 @@ internal static class WindowsServiceTokenTestBridge
 
     private static void ProtectOneShotServiceObject(
         SafeServiceHandle service,
-        string serviceName,
-        string bridgeServiceSid)
+        string serviceName)
     {
         var currentSid = WindowsIdentity.GetCurrent().User
                          ?? throw new InvalidOperationException(
@@ -1319,8 +2292,7 @@ internal static class WindowsServiceTokenTestBridge
         var administratorsSid = new SecurityIdentifier(
             WellKnownSidType.BuiltinAdministratorsSid,
             null);
-        var helperSid = new SecurityIdentifier(bridgeServiceSid);
-        var dacl = new RawAcl(GenericAcl.AclRevision, capacity: 4);
+        var dacl = new RawAcl(GenericAcl.AclRevision, capacity: 3);
         foreach (var sid in new[] { systemSid, administratorsSid, currentSid }.Distinct())
         {
             dacl.InsertAce(dacl.Count, new CommonAce(
@@ -1332,13 +2304,6 @@ internal static class WindowsServiceTokenTestBridge
                 opaque: null));
         }
 
-        dacl.InsertAce(dacl.Count, new CommonAce(
-            AceFlags.None,
-            AceQualifier.AccessAllowed,
-            checked((int)(DeleteAccess | ServiceQueryConfig | ServiceQueryStatus)),
-            helperSid,
-            isCallback: false,
-            opaque: null));
         var descriptor = new RawSecurityDescriptor(
             ControlFlags.DiscretionaryAclPresent
             | ControlFlags.DiscretionaryAclProtected,
@@ -1511,7 +2476,13 @@ internal static class WindowsServiceTokenTestBridge
 
     private static void DeleteBridgeRoot(string bridgeRoot)
     {
-        if (!Directory.Exists(bridgeRoot))
+        FileAttributes rootAttributes;
+        try
+        {
+            rootAttributes = File.GetAttributes(bridgeRoot);
+        }
+        catch (Exception exception) when (exception is FileNotFoundException
+                                           or DirectoryNotFoundException)
         {
             return;
         }
@@ -1522,7 +2493,18 @@ internal static class WindowsServiceTokenTestBridge
         {
             try
             {
-                DeleteBridgeDirectoryWithoutFollowingReparsePoints(bridgeRoot);
+                if ((rootAttributes & FileAttributes.Directory) != 0)
+                {
+                    DeleteBridgeDirectoryWithoutFollowingReparsePoints(bridgeRoot);
+                }
+                else
+                {
+                    if ((rootAttributes & FileAttributes.ReparsePoint) == 0)
+                    {
+                        File.SetAttributes(bridgeRoot, FileAttributes.Normal);
+                    }
+                    File.Delete(bridgeRoot);
+                }
                 return;
             }
             catch (Exception exception) when (exception is IOException
@@ -1570,6 +2552,8 @@ internal static class WindowsServiceTokenTestBridge
         Directory.Delete(directory.FullName, recursive: false);
     }
 
+    internal sealed record HelperBundleFile(long Length, string Sha256);
+
     [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
     private sealed record BridgeRequest(
         string HelperServiceName,
@@ -1580,6 +2564,11 @@ internal static class WindowsServiceTokenTestBridge
         string SourceExecutablePath,
         string SourceExecutableSha256,
         string ExpectedSourceServiceSid,
+        string RunnerSid,
+        string HelperBundleRoot,
+        string HelperExecutablePath,
+        string HelperExecutableSha256,
+        string CoordinationPipeName,
         string ControlPipeName,
         string ResultPath);
 
@@ -1587,9 +2576,12 @@ internal static class WindowsServiceTokenTestBridge
     private sealed record BridgeResult(
         string Nonce,
         uint SourceProcessId,
+        uint RelayProcessId,
+        long RelayProcessCreatedAtUtcTicks,
         bool HelperIdentityValidated,
         bool SourceServiceValidated,
         bool SourceProcessValidated,
+        bool RelayProcessValidated,
         bool SourceTokenValidated,
         bool ControlPipeConnected,
         bool ReceiptReceived,
@@ -1755,6 +2747,25 @@ internal static class WindowsServiceTokenTestBridge
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint GetProcessId(SafeProcessHandle process);
+
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "QueryFullProcessImageNameW",
+        CharSet = CharSet.Unicode,
+        ExactSpelling = true,
+        SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryFullProcessImageName(
+        SafeProcessHandle process,
+        uint flags,
+        [Out] char[] executablePath,
+        ref uint executablePathLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetNamedPipeClientProcessId(
+        SafePipeHandle pipe,
+        out uint clientProcessId);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(

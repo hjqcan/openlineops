@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Pipes;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -11,6 +12,68 @@ namespace OpenLineOps.Agent.Tests;
 [SupportedOSPlatform("windows")]
 public sealed class WindowsServiceTokenTestHelperContractTests
 {
+    [Fact]
+    public void HelperBundleInventoryRejectsMutationAndUnexpectedFiles()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "openlineops-helper-inventory-" + Guid.NewGuid().ToString("N"));
+        var source = Path.Combine(root, "source");
+        var mutated = Path.Combine(root, "mutated");
+        var extended = Path.Combine(root, "extended");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(source, "runtime"));
+            File.WriteAllText(
+                Path.Combine(source, "helper.exe"),
+                "entry",
+                Encoding.UTF8);
+            File.WriteAllText(
+                Path.Combine(source, "runtime", "dependency.dll"),
+                "dependency",
+                Encoding.UTF8);
+
+            var mutatedInventory = WindowsServiceTokenTestBridge.CopyHelperBundle(
+                source,
+                mutated);
+            WindowsServiceTokenTestBridge.VerifyHelperBundle(
+                mutated,
+                mutatedInventory);
+            File.AppendAllText(
+                Path.Combine(mutated, "runtime", "dependency.dll"),
+                "changed",
+                Encoding.UTF8);
+            Assert.Throws<InvalidDataException>(() =>
+                WindowsServiceTokenTestBridge.VerifyHelperBundle(
+                    mutated,
+                    mutatedInventory));
+
+            var extendedInventory = WindowsServiceTokenTestBridge.CopyHelperBundle(
+                source,
+                extended);
+            File.WriteAllText(
+                Path.Combine(extended, "version.dll"),
+                "unexpected",
+                Encoding.UTF8);
+            Assert.Throws<InvalidDataException>(() =>
+                WindowsServiceTokenTestBridge.VerifyHelperBundle(
+                    extended,
+                    extendedInventory));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
     [Fact]
     public void BridgeTreeOwnerCanonicalizationPreservesAccessRules()
     {
@@ -53,7 +116,7 @@ public sealed class WindowsServiceTokenTestHelperContractTests
     }
 
     [Fact]
-    public void SourceProcessAccessLeaseGrantsOnlyBridgeQueryAndWaitAndRestoresDacl()
+    public void SourceProcessAccessLeaseGrantsOnlyRelayCreationQueryAndWaitAndRestoresDacl()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -67,73 +130,26 @@ public sealed class WindowsServiceTokenTestHelperContractTests
             WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
                 "OpenLineOpsTokenBridge-" + Guid.NewGuid().ToString("N")));
         var before = WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle);
-        var tokenBefore = WindowsTokenAccessLease.ReadDaclSddl(process.SafeHandle);
 
-        using (WindowsProcessAccessLease.Acquire(
+        using (var lease = WindowsProcessAccessLease.Prepare(
                    process.SafeHandle,
                    processId,
                    createdAtUtcTicks,
                    bridgeServiceSid))
         {
+            lease.ApplyRequired();
             Assert.True(
-                WindowsProcessAccessLease.HasExactQueryAndWaitAce(
+                WindowsProcessAccessLease.HasExactRelayCreationAce(
                     process.SafeHandle,
                     bridgeServiceSid));
             Assert.NotEqual(
                 before,
                 WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle));
-            Assert.Equal(
-                tokenBefore,
-                WindowsTokenAccessLease.ReadDaclSddl(process.SafeHandle));
         }
 
         Assert.Equal(before, WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle));
-        Assert.Equal(tokenBefore, WindowsTokenAccessLease.ReadDaclSddl(process.SafeHandle));
         Assert.False(
-            WindowsProcessAccessLease.HasExactQueryAndWaitAce(
-                process.SafeHandle,
-                bridgeServiceSid));
-    }
-
-    [Fact]
-    public void SourceTokenAccessLeaseGrantsOnlyBridgeQueryAndDuplicateAndRestoresDacl()
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        using var process = Process.GetCurrentProcess();
-        var processId = checked((uint)process.Id);
-        var createdAtUtcTicks = process.StartTime.ToUniversalTime().Ticks;
-        var bridgeServiceSid = new SecurityIdentifier(
-            WindowsStationServiceIdentityReader.ServiceSidFromNameRequired(
-                "OpenLineOpsTokenBridge-" + Guid.NewGuid().ToString("N")));
-        var before = WindowsTokenAccessLease.ReadDaclSddl(process.SafeHandle);
-        var processBefore = WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle);
-
-        using (WindowsTokenAccessLease.Acquire(
-                   process.SafeHandle,
-                   processId,
-                   createdAtUtcTicks,
-                   bridgeServiceSid))
-        {
-            Assert.True(
-                WindowsTokenAccessLease.HasExactQueryAndDuplicateAce(
-                    process.SafeHandle,
-                    bridgeServiceSid));
-            Assert.NotEqual(
-                before,
-                WindowsTokenAccessLease.ReadDaclSddl(process.SafeHandle));
-            Assert.Equal(
-                processBefore,
-                WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle));
-        }
-
-        Assert.Equal(before, WindowsTokenAccessLease.ReadDaclSddl(process.SafeHandle));
-        Assert.Equal(processBefore, WindowsProcessAccessLease.ReadDaclSddl(process.SafeHandle));
-        Assert.False(
-            WindowsTokenAccessLease.HasExactQueryAndDuplicateAce(
+            WindowsProcessAccessLease.HasExactRelayCreationAce(
                 process.SafeHandle,
                 bridgeServiceSid));
     }
@@ -161,23 +177,25 @@ public sealed class WindowsServiceTokenTestHelperContractTests
 
         try
         {
-            first = WindowsProcessAccessLease.Acquire(
+            first = WindowsProcessAccessLease.Prepare(
                 process.SafeHandle,
                 processId,
                 createdAtUtcTicks,
                 firstSid);
-            second = WindowsProcessAccessLease.Acquire(
+            first.ApplyRequired();
+            second = WindowsProcessAccessLease.Prepare(
                 process.SafeHandle,
                 processId,
                 createdAtUtcTicks,
                 secondSid);
+            second.ApplyRequired();
             Assert.IsType<InvalidDataException>(Record.Exception(first.Dispose));
             Assert.False(
-                WindowsProcessAccessLease.HasExactQueryAndWaitAce(
+                WindowsProcessAccessLease.HasExactRelayCreationAce(
                     process.SafeHandle,
                     firstSid));
             Assert.True(
-                WindowsProcessAccessLease.HasExactQueryAndWaitAce(
+                WindowsProcessAccessLease.HasExactRelayCreationAce(
                     process.SafeHandle,
                     secondSid));
 
@@ -202,16 +220,16 @@ public sealed class WindowsServiceTokenTestHelperContractTests
     {
         const string nonce = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         const uint processId = 42;
-        const string valid =
-            "{\"nonce\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"sourceProcessId\":42,\"helperIdentityValidated\":true,\"sourceServiceValidated\":true,\"sourceProcessValidated\":true,\"sourceTokenValidated\":true,\"controlPipeConnected\":true,\"receiptReceived\":true,\"failurePhase\":\"none\",\"failureReason\":\"none\",\"win32Error\":0}";
+        var valid = SuccessResultDocument(nonce, processId);
 
         WindowsServiceTokenTestBridge.ValidateResultDocument(
-            Encoding.UTF8.GetBytes(valid),
+            valid,
             nonce,
             processId);
+        var validText = Encoding.UTF8.GetString(valid);
         Assert.Throws<JsonException>(() =>
             WindowsServiceTokenTestBridge.ValidateResultDocument(
-                Encoding.UTF8.GetBytes(valid.Replace(
+                Encoding.UTF8.GetBytes(validText.Replace(
                     "\"failurePhase\":\"none\"",
                     "\"failurePhase\":\"none\",\"failurePhase\":\"none\"",
                     StringComparison.Ordinal)),
@@ -219,25 +237,302 @@ public sealed class WindowsServiceTokenTestHelperContractTests
                 processId));
         Assert.Throws<JsonException>(() =>
             WindowsServiceTokenTestBridge.ValidateResultDocument(
-                Encoding.UTF8.GetBytes(valid.Insert(1, "\"success\":true,")),
+                Encoding.UTF8.GetBytes(validText.Insert(1, "\"success\":true,")),
+                nonce,
+                processId));
+
+        foreach (var invalid in new[]
+                 {
+                     MutateResult(valid, result => result["failurePhase"] = "source-process"),
+                     MutateResult(valid, result => result["receiptReceived"] = false),
+                     MutateResult(valid, result => result["relayProcessId"] = 0u),
+                     MutateResult(valid, result =>
+                         result["relayProcessCreatedAtUtcTicks"] = 0L),
+                     MutateResult(valid, result =>
+                         result["relayProcessCreatedAtUtcTicks"] = DateTime.MaxValue.Ticks + 1L),
+                     MutateResult(valid, result => result["relayProcessValidated"] = false),
+                     MutateResult(valid, result => result["sourceProcessId"] = processId + 1)
+                 })
+        {
+            Assert.Throws<InvalidDataException>(() =>
+                WindowsServiceTokenTestBridge.ValidateResultDocument(
+                    invalid,
+                    nonce,
+                    processId));
+        }
+
+        var createFailure = RelayFailureResultDocument(
+            nonce,
+            processId,
+            "create-source-token-relay",
+            relayWasCreated: false);
+        WindowsServiceTokenTestBridge.ValidateResultDocument(
+            createFailure,
+            nonce,
+            processId);
+        Assert.Throws<InvalidDataException>(() =>
+            WindowsServiceTokenTestBridge.ValidateResultDocument(
+                MutateResult(createFailure, result =>
+                {
+                    result["relayProcessId"] = 43u;
+                    result["relayProcessCreatedAtUtcTicks"] = 638000000000000000L;
+                    result["relayProcessValidated"] = true;
+                }),
+                nonce,
+                processId));
+
+        var postCreateFailure = RelayFailureResultDocument(
+            nonce,
+            processId,
+            "source-token-relay-exit",
+            relayWasCreated: true);
+        WindowsServiceTokenTestBridge.ValidateResultDocument(
+            postCreateFailure,
+            nonce,
+            processId);
+        Assert.Throws<InvalidDataException>(() =>
+            WindowsServiceTokenTestBridge.ValidateResultDocument(
+                MutateResult(postCreateFailure, result =>
+                {
+                    result["relayProcessId"] = 0u;
+                    result["relayProcessCreatedAtUtcTicks"] = 0L;
+                    result["relayProcessValidated"] = false;
+                }),
+                nonce,
+                processId));
+
+        foreach (var completedBeforeCleanupFailure in new[] { false, true })
+        {
+            var cleanupFailure = ResultDocument(nonce, processId, result =>
+            {
+                result["sourceTokenValidated"] = completedBeforeCleanupFailure;
+                result["controlPipeConnected"] = completedBeforeCleanupFailure;
+                result["receiptReceived"] = completedBeforeCleanupFailure;
+                result["failurePhase"] = "source-relay-cleanup";
+                result["failureReason"] = "terminate-job-and-wait";
+                result["win32Error"] = 5;
+            });
+            WindowsServiceTokenTestBridge.ValidateResultDocument(
+                cleanupFailure,
+                nonce,
+                processId);
+            Assert.Throws<InvalidDataException>(() =>
+                WindowsServiceTokenTestBridge.ValidateResultDocument(
+                    MutateResult(cleanupFailure, result =>
+                        result["failureReason"] = "source-token-relay-exit"),
+                    nonce,
+                    processId));
+            Assert.Throws<InvalidDataException>(() =>
+                WindowsServiceTokenTestBridge.ValidateResultDocument(
+                    MutateResult(cleanupFailure, result =>
+                        result["receiptReceived"] = !completedBeforeCleanupFailure),
+                    nonce,
+                    processId));
+        }
+
+        var reportedBeforeBindingCleanupFailure = ResultDocument(
+            nonce,
+            processId,
+            result =>
+            {
+                result["relayProcessCreatedAtUtcTicks"] = 0L;
+                result["relayProcessValidated"] = false;
+                result["sourceTokenValidated"] = false;
+                result["controlPipeConnected"] = false;
+                result["receiptReceived"] = false;
+                result["failurePhase"] = "source-relay-cleanup";
+                result["failureReason"] = "terminate-job-and-wait";
+                result["win32Error"] = 5;
+            });
+        WindowsServiceTokenTestBridge.ValidateResultDocument(
+            reportedBeforeBindingCleanupFailure,
+            nonce,
+            processId);
+        Assert.Throws<InvalidDataException>(() =>
+            WindowsServiceTokenTestBridge.ValidateResultDocument(
+                MutateResult(reportedBeforeBindingCleanupFailure, result =>
+                {
+                    result["sourceTokenValidated"] = true;
+                    result["controlPipeConnected"] = true;
+                    result["receiptReceived"] = true;
+                }),
                 nonce,
                 processId));
         Assert.Throws<InvalidDataException>(() =>
             WindowsServiceTokenTestBridge.ValidateResultDocument(
-                Encoding.UTF8.GetBytes(valid.Replace(
-                    "\"failurePhase\":\"none\"",
-                    "\"failurePhase\":\"source-process\"",
-                    StringComparison.Ordinal)),
+                MutateResult(reportedBeforeBindingCleanupFailure, result =>
+                    result["relayProcessValidated"] = true),
                 nonce,
                 processId));
-        Assert.Throws<InvalidDataException>(() =>
+    }
+
+    [Fact]
+    public void BridgeResultProtocolAcceptsEveryBoundedFailurePhaseAndReason()
+    {
+        const string nonce = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const uint sourceProcessId = 52;
+        var contracts = new[]
+        {
+            new FailureContract("helper-identity", "helper-identity", false, false, false, 0, false),
+            new FailureContract("runner-coordination", "connect-and-grant", true, false, false, 0, false),
+            new FailureContract("source-service", "source-service", true, false, false, 0, false),
+            new FailureContract("source-process", "open-process", true, true, false, 0, false),
+            new FailureContract("source-process", "process-validation", true, true, false, 0, false),
+            new FailureContract("source-process", "open-weak-process", true, true, true, 2, false),
+            new FailureContract("source-process", "weak-process-validation", true, true, true, 2, false),
+            new FailureContract("source-relay", "create-source-token-relay", true, true, true, 0, false),
+            new FailureContract("source-relay", "relay-observation", true, true, true, 3, false),
+            new FailureContract("source-relay", "relay-creation-time", true, true, true, 3, false),
+            new FailureContract("source-relay", "relay-validation", true, true, true, 1, false),
+            new FailureContract("source-relay", "relay-ready", true, true, true, 2, false),
+            new FailureContract("source-relay", "source-service-before-relay-resume", true, true, true, 2, false),
+            new FailureContract("source-relay", "source-process-before-relay-resume", true, true, true, 2, false),
+            new FailureContract("source-relay", "resume-source-token-relay", true, true, true, 2, false),
+            new FailureContract("source-relay", "source-token-relay-exit", true, true, true, 2, false),
+            new FailureContract("post-receipt-source", "source-service-post-receipt", true, true, true, 2, true),
+            new FailureContract("post-receipt-source", "process-validation-post-receipt", true, true, true, 2, true)
+        };
+
+        foreach (var contract in contracts)
+        {
+            var document = ResultDocument(nonce, sourceProcessId, result =>
+            {
+                result["helperIdentityValidated"] = contract.HelperIdentityValidated;
+                result["sourceServiceValidated"] = contract.SourceServiceValidated;
+                result["sourceProcessValidated"] = contract.SourceProcessValidated;
+                result["relayProcessId"] = contract.RelayState == 0 ? 0u : 43u;
+                result["relayProcessCreatedAtUtcTicks"] =
+                    contract.RelayState is 0 or 3
+                        ? 0L
+                        : 638000000000000000L;
+                result["relayProcessValidated"] = contract.RelayState == 2;
+                result["sourceTokenValidated"] = contract.Completed;
+                result["controlPipeConnected"] = contract.Completed;
+                result["receiptReceived"] = contract.Completed;
+                result["failurePhase"] = contract.Phase;
+                result["failureReason"] = contract.Reason;
+                result["win32Error"] = 5;
+            });
+
             WindowsServiceTokenTestBridge.ValidateResultDocument(
-                Encoding.UTF8.GetBytes(valid.Replace(
-                    "\"receiptReceived\":true",
-                    "\"receiptReceived\":false",
-                    StringComparison.Ordinal)),
+                document,
                 nonce,
-                processId));
+                sourceProcessId);
+        }
+
+        foreach (var reason in new[] { "relay-observation", "relay-creation-time" })
+        {
+            var unreachableCreatedAtResult = ResultDocument(
+                nonce,
+                sourceProcessId,
+                result =>
+                {
+                    result["relayProcessValidated"] = false;
+                    result["sourceTokenValidated"] = false;
+                    result["controlPipeConnected"] = false;
+                    result["receiptReceived"] = false;
+                    result["failurePhase"] = "source-relay";
+                    result["failureReason"] = reason;
+                    result["win32Error"] = 5;
+                });
+            Assert.Throws<InvalidDataException>(() =>
+                WindowsServiceTokenTestBridge.ValidateResultDocument(
+                    unreachableCreatedAtResult,
+                    nonce,
+                    sourceProcessId));
+        }
+    }
+
+    [Theory]
+    [InlineData(44u, 638000000000000000L)]
+    [InlineData(43u, 638000000000000001L)]
+    public void CapturedRelayBindingRejectsMismatchedPidOrCreationTime(
+        uint resultProcessId,
+        long resultCreatedAtUtcTicks)
+    {
+        Assert.True(WindowsServiceTokenTestBridge.HasCapturedRelayBinding(
+            preparedProcessId: 43u,
+            preparedCreatedAtUtcTicks: 638000000000000000L,
+            pipeClientProcessId: 43u,
+            retainedProcessId: 43u,
+            retainedCreatedAtUtcTicks: 638000000000000000L));
+        Assert.False(WindowsServiceTokenTestBridge.HasCapturedRelayBinding(
+            preparedProcessId: resultProcessId,
+            preparedCreatedAtUtcTicks: resultCreatedAtUtcTicks,
+            pipeClientProcessId: 43u,
+            retainedProcessId: 43u,
+            retainedCreatedAtUtcTicks: 638000000000000000L));
+    }
+
+    [Theory]
+    [InlineData(44u, 638000000000000000L)]
+    [InlineData(43u, 638000000000000001L)]
+    public void ResultRelayBindingRejectsMismatchedPidOrCreationTime(
+        uint resultProcessId,
+        long resultCreatedAtUtcTicks)
+    {
+        Assert.True(WindowsServiceTokenTestBridge.HasResultRelayBinding(
+            capturedProcessId: 43u,
+            capturedCreatedAtUtcTicks: 638000000000000000L,
+            resultProcessId: 43u,
+            resultCreatedAtUtcTicks: 638000000000000000L));
+        Assert.False(WindowsServiceTokenTestBridge.HasResultRelayBinding(
+            capturedProcessId: 43u,
+            capturedCreatedAtUtcTicks: 638000000000000000L,
+            resultProcessId,
+            resultCreatedAtUtcTicks));
+    }
+
+    [Fact]
+    public void FailureResultRelayBindingAllowsPidOnlyBeforeRelayReady()
+    {
+        const uint processId = 43;
+        const long createdAtUtcTicks = 638000000000000000L;
+
+        Assert.True(WindowsServiceTokenTestBridge.HasFailureResultRelayBinding(
+            processId,
+            createdAtUtcTicks,
+            relayReadyReceived: false,
+            processId,
+            resultCreatedAtUtcTicks: 0,
+            resultValidated: false));
+        Assert.False(WindowsServiceTokenTestBridge.HasFailureResultRelayBinding(
+            processId,
+            createdAtUtcTicks,
+            relayReadyReceived: true,
+            processId,
+            resultCreatedAtUtcTicks: 0,
+            resultValidated: false));
+        Assert.True(WindowsServiceTokenTestBridge.HasFailureResultRelayBinding(
+            processId,
+            createdAtUtcTicks,
+            relayReadyReceived: true,
+            processId,
+            createdAtUtcTicks,
+            resultValidated: false));
+        Assert.False(WindowsServiceTokenTestBridge.HasFailureResultRelayBinding(
+            processId,
+            createdAtUtcTicks,
+            relayReadyReceived: false,
+            resultProcessId: processId + 1,
+            resultCreatedAtUtcTicks: 0,
+            resultValidated: false));
+    }
+
+    [Fact]
+    public void AuthenticatedPipeClientRightsExcludeAdministrativeAndInstanceCreationRights()
+    {
+        var rights = WindowsServiceTokenTestBridge.AuthenticatedPipeClientRights;
+        Assert.Equal(
+            PipeAccessRights.ReadWrite | PipeAccessRights.Synchronize,
+            rights);
+        Assert.NotEqual(PipeAccessRights.FullControl, rights);
+        Assert.Equal(
+            (PipeAccessRights)0,
+            rights & (PipeAccessRights.ChangePermissions
+                      | PipeAccessRights.TakeOwnership
+                      | PipeAccessRights.Delete
+                      | PipeAccessRights.CreateNewInstance));
     }
 
     [Fact]
@@ -265,7 +560,7 @@ public sealed class WindowsServiceTokenTestHelperContractTests
                 "OpenLineOpsTokenBridge-" + Guid.NewGuid().ToString("N")));
 
         Assert.Throws<InvalidOperationException>(() =>
-            WindowsProcessAccessLease.Acquire(
+            WindowsProcessAccessLease.Prepare(
                 processHandle,
                 processId,
                 createdAtUtcTicks,
@@ -382,4 +677,72 @@ public sealed class WindowsServiceTokenTestHelperContractTests
                 AccessControlSections.Access);
         return security.GetSecurityDescriptorSddlForm(AccessControlSections.Access);
     }
+
+    private static byte[] SuccessResultDocument(string nonce, uint sourceProcessId) =>
+        ResultDocument(nonce, sourceProcessId, result => { });
+
+    private sealed record FailureContract(
+        string Phase,
+        string Reason,
+        bool HelperIdentityValidated,
+        bool SourceServiceValidated,
+        bool SourceProcessValidated,
+        int RelayState,
+        bool Completed);
+
+    private static byte[] RelayFailureResultDocument(
+        string nonce,
+        uint sourceProcessId,
+        string failureReason,
+        bool relayWasCreated) =>
+        ResultDocument(nonce, sourceProcessId, result =>
+        {
+            result["relayProcessId"] = relayWasCreated ? 43u : 0u;
+            result["relayProcessCreatedAtUtcTicks"] = relayWasCreated
+                ? 638000000000000000L
+                : 0L;
+            result["relayProcessValidated"] = relayWasCreated;
+            result["sourceTokenValidated"] = false;
+            result["controlPipeConnected"] = false;
+            result["receiptReceived"] = false;
+            result["failurePhase"] = "source-relay";
+            result["failureReason"] = failureReason;
+        });
+
+    private static byte[] MutateResult(
+        byte[] document,
+        Action<Dictionary<string, object?>> mutation)
+    {
+        var result = JsonSerializer.Deserialize<Dictionary<string, object?>>(document)
+                     ?? throw new InvalidDataException("The result fixture is null.");
+        mutation(result);
+        return JsonSerializer.SerializeToUtf8Bytes(result);
+    }
+
+    private static byte[] ResultDocument(
+        string nonce,
+        uint sourceProcessId,
+        Action<Dictionary<string, object?>> mutation)
+    {
+        var result = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["nonce"] = nonce,
+            ["sourceProcessId"] = sourceProcessId,
+            ["relayProcessId"] = 43u,
+            ["relayProcessCreatedAtUtcTicks"] = 638000000000000000L,
+            ["helperIdentityValidated"] = true,
+            ["sourceServiceValidated"] = true,
+            ["sourceProcessValidated"] = true,
+            ["relayProcessValidated"] = true,
+            ["sourceTokenValidated"] = true,
+            ["controlPipeConnected"] = true,
+            ["receiptReceived"] = true,
+            ["failurePhase"] = "none",
+            ["failureReason"] = "none",
+            ["win32Error"] = 0
+        };
+        mutation(result);
+        return JsonSerializer.SerializeToUtf8Bytes(result);
+    }
+
 }

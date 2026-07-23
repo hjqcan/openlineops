@@ -1499,6 +1499,8 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "tests/OpenLineOps.WindowsServiceToken.TestHelper/OneShotWindowsServiceWorker.cs",
             "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsNative.cs",
             "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsServiceTokenTransferOperation.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestHelper/SourceTokenRelayOperation.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestHelper/SourceTokenRelayProcess.cs",
             "docs/development-execution-plan.md",
             "eng/stage-release-artifacts.ps1",
             "eng/verify-ci-workflow-actions.ps1",

@@ -605,6 +605,7 @@ function New-MinimalReleaseCandidate {
     param(
         [Parameter(Mandatory = $true)][string] $Name,
         [string[]] $ExtraSourceEntries = @(),
+        [string] $OmitSourceEntry = "",
         [string] $ProvenanceVersion,
         [string] $ProvenanceMutation,
         [string] $DependencyInventoryVersion,
@@ -656,6 +657,8 @@ function New-MinimalReleaseCandidate {
         "tests/OpenLineOps.WindowsServiceToken.TestHelper/OneShotWindowsServiceWorker.cs",
         "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsNative.cs",
         "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsServiceTokenTransferOperation.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestHelper/SourceTokenRelayOperation.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestHelper/SourceTokenRelayProcess.cs",
         "docs/development-execution-plan.md",
         "eng/stage-release-artifacts.ps1",
         "eng/verify-ci-workflow-actions.ps1",
@@ -693,6 +696,15 @@ function New-MinimalReleaseCandidate {
         "apps/desktop/scripts/production-closure-e2e.mjs",
         "docs/headless-runner.md"
     )
+    if (-not [string]::IsNullOrEmpty($OmitSourceEntry)) {
+        $sourceEntryCount = $sourceEntries.Count
+        $sourceEntries = @($sourceEntries | Where-Object {
+                $_ -cne $OmitSourceEntry
+            })
+        if ($sourceEntries.Count -ne ($sourceEntryCount - 1)) {
+            throw "Fixture source entry '$OmitSourceEntry' is not present exactly once."
+        }
+    }
     if ($OmitServiceTokenTestHelperSource) {
         $sourceEntries = @($sourceEntries | Where-Object {
                 -not $_.StartsWith(
@@ -989,6 +1001,22 @@ Assert-InspectionFails `
     -Root $missingServiceTokenHelperSourceRoot `
     -Name "missing-service-token-helper-source" `
     -ExpectedPattern "missing expected entry: tests/OpenLineOps\.WindowsServiceToken\.TestHelper/"
+
+foreach ($relaySourceFile in @(
+        "SourceTokenRelayOperation.cs",
+        "SourceTokenRelayProcess.cs")) {
+    $relaySourceEntry =
+        "tests/OpenLineOps.WindowsServiceToken.TestHelper/$relaySourceFile"
+    $fixtureName =
+        "missing-" + [System.IO.Path]::GetFileNameWithoutExtension($relaySourceFile).ToLowerInvariant()
+    $missingRelaySourceRoot = New-MinimalReleaseCandidate `
+        -Name $fixtureName `
+        -OmitSourceEntry $relaySourceEntry
+    Assert-InspectionFails `
+        -Root $missingRelaySourceRoot `
+        -Name $fixtureName `
+        -ExpectedPattern ([regex]::Escape("missing expected entry: $relaySourceEntry"))
+}
 
 $removedAgentContainerSettingRoot = New-MinimalReleaseCandidate `
     -Name "removed-agent-container-setting" `
