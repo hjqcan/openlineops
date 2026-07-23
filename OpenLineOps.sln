@@ -219,7 +219,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PythonScript", "lib\pythons
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NetDevPack", "lib\NetDevPack\src\NetDevPack\NetDevPack.csproj", "{F34375AD-76A4-41FC-BEE0-70178291C7B5}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenLineOps.WindowsServiceToken.TestHelper", "tests\OpenLineOps.WindowsServiceToken.TestHelper\OpenLineOps.WindowsServiceToken.TestHelper.csproj", "{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenLineOps.WindowsServiceToken.TestRelay", "tests\OpenLineOps.WindowsServiceToken.TestRelay\OpenLineOps.WindowsServiceToken.TestRelay.csproj", "{EB2FEAB3-607A-45A6-9DC1-BBFBFB72EC40}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

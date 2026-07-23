@@ -254,40 +254,40 @@ if (Test-Path -LiteralPath $resolvedWorkRoot) {
 }
 New-Item -ItemType Directory -Path $resolvedWorkRoot -Force | Out-Null
 
-$serviceTokenHelperGuardDefinitions = @(
+$serviceTokenTestRelayGuardDefinitions = @(
     (Get-FunctionDefinition -Ast $stageAst -Name "Get-RelativePathUnderDirectory").Extent.Text,
     (Get-FunctionDefinition -Ast $stageAst -Name "Test-PortableExecutableContainsAsciiMarker").Extent.Text,
-    (Get-FunctionDefinition -Ast $stageAst -Name "Assert-NoTestOnlyServiceTokenHelper").Extent.Text
+    (Get-FunctionDefinition -Ast $stageAst -Name "Assert-NoTestOnlyServiceTokenRelay").Extent.Text
 ) -join [Environment]::NewLine
-$serviceTokenHelperGuard = [scriptblock]::Create(
+$serviceTokenTestRelayGuard = [scriptblock]::Create(
     "param(`$Root, `$ArtifactKind)" + [Environment]::NewLine +
-    $serviceTokenHelperGuardDefinitions + [Environment]::NewLine +
-    "Assert-NoTestOnlyServiceTokenHelper -Root `$Root -ArtifactKind `$ArtifactKind")
-$serviceTokenHelperPayloadFixtures = @(
+    $serviceTokenTestRelayGuardDefinitions + [Environment]::NewLine +
+    "Assert-NoTestOnlyServiceTokenRelay -Root `$Root -ArtifactKind `$ArtifactKind")
+$serviceTokenTestRelayPayloadFixtures = @(
     [ordered]@{
         Name = "case-varied-directory"
-        RelativePath = "WINDOWS-SERVICE-TOKEN-TEST-HELPER/renamed-host.exe"
+        RelativePath = "WINDOWS-SERVICE-TOKEN-TEST-RELAY/renamed-relay.exe"
         IncludeBinaryIdentity = $false
     },
     [ordered]@{
         Name = "case-varied-file-prefix"
-        RelativePath = "openlineops.windowsservicetoken.testhelper.renamed.bin"
+        RelativePath = "openlineops.windowsservicetoken.testrelay.renamed.bin"
         IncludeBinaryIdentity = $false
     },
     [ordered]@{
         Name = "renamed-binary-identity"
-        RelativePath = "support/renamed-host.bin"
+        RelativePath = "support/renamed-relay.bin"
         IncludeBinaryIdentity = $true
     })
-foreach ($fixture in $serviceTokenHelperPayloadFixtures) {
-    $fixtureRoot = Join-Path $resolvedWorkRoot ("service-token-helper-" + $fixture.Name)
+foreach ($fixture in $serviceTokenTestRelayPayloadFixtures) {
+    $fixtureRoot = Join-Path $resolvedWorkRoot ("service-token-test-relay-" + $fixture.Name)
     $fixturePath = Join-Path $fixtureRoot $fixture.RelativePath
     New-Item -ItemType Directory -Path (Split-Path $fixturePath -Parent) -Force | Out-Null
     if ($fixture.IncludeBinaryIdentity) {
         $portableExecutable = [System.IO.File]::ReadAllBytes(
             (Join-Path $env:SystemRoot "System32/where.exe"))
         $identityMarker = [System.Text.Encoding]::ASCII.GetBytes(
-            "OpenLineOps.WindowsServiceToken.TestHelper")
+            "OpenLineOps.WindowsServiceToken.TestRelay")
         $payload = [byte[]]::new($portableExecutable.Length + $identityMarker.Length)
         [System.Buffer]::BlockCopy(
             $portableExecutable,
@@ -306,18 +306,18 @@ foreach ($fixture in $serviceTokenHelperPayloadFixtures) {
     else {
         [System.IO.File]::WriteAllText(
             $fixturePath,
-            "test-only-helper-sentinel",
+            "test-only-test-relay-sentinel",
             [System.Text.UTF8Encoding]::new($false))
     }
     $failure = $null
     try {
-        & $serviceTokenHelperGuard $fixtureRoot "agent"
+        & $serviceTokenTestRelayGuard $fixtureRoot "agent"
     }
     catch {
         $failure = $_.Exception.Message
     }
-    if ($failure -notmatch "contains the test-only Windows service-token helper") {
-        throw "Release staging accepted the $($fixture.Name) test-only service-token helper fixture."
+    if ($failure -notmatch "contains the test-only Windows service-token Test Relay") {
+        throw "Release staging accepted the $($fixture.Name) test-only Windows service-token Test Relay fixture."
     }
 }
 

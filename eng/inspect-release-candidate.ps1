@@ -640,13 +640,13 @@ function Test-SensitiveSourceArchiveEntries {
     }
 }
 
-function Test-NoTestOnlyServiceTokenHelperEntries {
+function Test-NoTestOnlyServiceTokenRelayEntries {
     param(
         [Parameter(Mandatory = $true)]$Archive,
         [Parameter(Mandatory = $true)][string] $ArchiveName
     )
 
-    $forbiddenAssemblyPrefix = "OpenLineOps.WindowsServiceToken.TestHelper"
+    $forbiddenAssemblyPrefix = "OpenLineOps.WindowsServiceToken.TestRelay"
     foreach ($entry in @($Archive.Entries)) {
         $entryName = $entry.FullName
         $normalizedName = $entryName.Replace([char]92, [char]47).TrimEnd('/')
@@ -659,7 +659,7 @@ function Test-NoTestOnlyServiceTokenHelperEntries {
         $hasForbiddenDirectory = @($segments | Where-Object {
                 [string]::Equals(
                     $_,
-                    "windows-service-token-test-helper",
+                    "windows-service-token-test-relay",
                     [System.StringComparison]::OrdinalIgnoreCase)
             }).Count -gt 0
         $containsForbiddenBinaryIdentity = -not $entryName.EndsWith(
@@ -673,7 +673,7 @@ function Test-NoTestOnlyServiceTokenHelperEntries {
                 $forbiddenAssemblyPrefix,
                 [System.StringComparison]::OrdinalIgnoreCase) `
             -or $containsForbiddenBinaryIdentity) {
-            Add-Failure "$ArchiveName contains the test-only Windows service-token helper in a deployable artifact: $entryName"
+            Add-Failure "$ArchiveName contains the test-only Windows service-token Test Relay in a deployable artifact: $entryName"
         }
     }
 }
@@ -1492,15 +1492,14 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "Directory.Build.props",
             "OpenLineOps.sln",
             "OpenLineOps.slnx",
-            "tests/OpenLineOps.WindowsServiceToken.TestHelper/OpenLineOps.WindowsServiceToken.TestHelper.csproj",
-            "tests/OpenLineOps.WindowsServiceToken.TestHelper/Program.cs",
-            "tests/OpenLineOps.WindowsServiceToken.TestHelper/TokenTransferProtocol.cs",
-            "tests/OpenLineOps.WindowsServiceToken.TestHelper/AtomicTokenTransferResult.cs",
-            "tests/OpenLineOps.WindowsServiceToken.TestHelper/OneShotWindowsServiceWorker.cs",
-            "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsNative.cs",
-            "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsServiceTokenTransferOperation.cs",
-            "tests/OpenLineOps.WindowsServiceToken.TestHelper/SourceTokenRelayOperation.cs",
-            "tests/OpenLineOps.WindowsServiceToken.TestHelper/SourceTokenRelayProcess.cs",
+            "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestBridge.cs",
+            "tests/OpenLineOps.Agent.Tests/WindowsSourceTokenRelayProcess.cs",
+            "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestRelayContractTests.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj",
+            "tests/OpenLineOps.WindowsServiceToken.TestRelay/Program.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestRelay/RelayProtocol.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestRelay/WindowsNative.cs",
+            "tests/OpenLineOps.WindowsServiceToken.TestRelay/SourceTokenRelayOperation.cs",
             "docs/development-execution-plan.md",
             "eng/stage-release-artifacts.ps1",
             "eng/verify-ci-workflow-actions.ps1",
@@ -1575,7 +1574,7 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
                     -ArchiveName $artifactByKind[$kind].fileName
             }
             else {
-                Test-NoTestOnlyServiceTokenHelperEntries `
+                Test-NoTestOnlyServiceTokenRelayEntries `
                     -Archive $archive `
                     -ArchiveName $artifactByKind[$kind].fileName
             }

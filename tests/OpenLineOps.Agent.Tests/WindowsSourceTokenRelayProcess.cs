@@ -7,10 +7,23 @@ using System.Security.Principal;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
-namespace OpenLineOps.WindowsServiceToken.TestHelper;
+namespace OpenLineOps.Agent.Tests;
+
+internal sealed record WindowsSourceTokenRelayRequest(
+    string RequestPath,
+    string Nonce,
+    uint SourceProcessId,
+    long SourceProcessCreatedAtUtcTicks,
+    string SourceExecutablePath,
+    string SourceExecutableSha256,
+    string ExpectedSourceServiceSid,
+    string RelayBundleRoot,
+    string RelayExecutablePath,
+    string RelayExecutableSha256,
+    string ControlPipeName);
 
 [SupportedOSPlatform("windows")]
-internal sealed class SourceTokenRelayProcess : IDisposable
+internal sealed class WindowsSourceTokenRelayProcess : IDisposable
 {
     private const uint CreateNoWindow = 0x08000000;
     private const uint CreateSuspendedFlag = 0x00000004;
@@ -29,15 +42,15 @@ internal sealed class SourceTokenRelayProcess : IDisposable
     private const nuint ProcThreadAttributeParentProcess = 0x00020000;
     private const nuint ProcThreadAttributeJobList = 0x0002000D;
 
-    private readonly SafeRelayProcessHandle _process;
+    private readonly SafeProcessHandle _process;
     private readonly SafeThreadHandle _thread;
     private readonly SafeJobHandle _job;
     private bool _disposed;
     private bool _validated;
     private bool _resumed;
 
-    private SourceTokenRelayProcess(
-        SafeRelayProcessHandle process,
+    private WindowsSourceTokenRelayProcess(
+        SafeProcessHandle process,
         SafeThreadHandle thread,
         SafeJobHandle job,
         uint processId)
@@ -52,38 +65,37 @@ internal sealed class SourceTokenRelayProcess : IDisposable
 
     public long CreatedAtUtcTicks { get; private set; }
 
-    public static SourceTokenRelayProcess CreateSuspended(
-        WindowsServiceTokenTransferRequest request,
-        SafeProcessHandle sourceProcess)
+    public static WindowsSourceTokenRelayProcess CreateSuspended(
+        WindowsSourceTokenRelayRequest request,
+        SafeProcessHandle sourceProcess,
+        SecurityIdentifier runnerSid)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(sourceProcess);
+        ArgumentNullException.ThrowIfNull(runnerSid);
         if (!Environment.Is64BitProcess)
         {
             throw new PlatformNotSupportedException(
-                "The source-token relay helper requires its staged win-x64 process.");
+                "The source-token relay controller requires a win-x64 test process.");
+        }
+        if (sourceProcess.IsInvalid || sourceProcess.IsClosed)
+        {
+            throw new ArgumentException(
+                "The source-token relay requires a live create-only parent handle.",
+                nameof(sourceProcess));
         }
 
-        var helperServiceSid = new SecurityIdentifier(
-            WindowsNative.DeriveServiceSid(request.HelperServiceName, "helper"));
-        var runnerSid = new SecurityIdentifier(request.RunnerSid);
         SafeJobHandle? job = null;
-        SafeRelayProcessHandle? process = null;
+        SafeProcessHandle? process = null;
         SafeThreadHandle? thread = null;
         var processCreated = false;
-        var processInformation = new ProcessInformation();
+        var processId = 0u;
         try
         {
             job = CreateRelayJob();
-            using var attributes = new ProcessThreadAttributeList(
-                sourceProcess,
-                job);
-            using var processSecurity = new ProcessSecurityDescriptor(
-                helperServiceSid,
-                runnerSid);
+            using var attributes = new ProcessThreadAttributeList(sourceProcess, job);
+            using var processSecurity = new ProcessSecurityDescriptor(runnerSid);
             using var environment = CreateEnvironmentBlock();
-            process = new SafeRelayProcessHandle();
-            thread = new SafeThreadHandle();
             var startup = new StartupInfoEx
             {
                 StartupInfo = new StartupInfo
@@ -93,13 +105,13 @@ internal sealed class SourceTokenRelayProcess : IDisposable
                 AttributeList = attributes.Handle
             };
             var commandLine = (
-                QuoteCommandLineArgument(request.HelperExecutablePath)
-                + " --relay-request "
+                QuoteCommandLineArgument(request.RelayExecutablePath)
+                + " --request "
                 + QuoteCommandLineArgument(request.RequestPath)
                 + '\0').ToCharArray();
             var processAttributes = processSecurity.Attributes;
             if (!CreateProcess(
-                    request.HelperExecutablePath,
+                    request.RelayExecutablePath,
                     commandLine,
                     ref processAttributes,
                     IntPtr.Zero,
@@ -109,20 +121,19 @@ internal sealed class SourceTokenRelayProcess : IDisposable
                     | CreateUnicodeEnvironment
                     | ExtendedStartupInfoPresent,
                     environment.Handle,
-                    request.HelperBundleRoot,
+                    request.RelayBundleRoot,
                     ref startup,
-                    out processInformation))
+                    out var processInformation))
             {
                 throw NativeFailure(
                     "Could not create the suspended source-token relay from the exact Station parent process");
             }
 
             processCreated = true;
-            process.Adopt(processInformation.Process);
-            thread.Adopt(processInformation.Thread);
-            processInformation.Process = IntPtr.Zero;
-            processInformation.Thread = IntPtr.Zero;
-            if (processInformation.ProcessId == 0
+            processId = processInformation.ProcessId;
+            process = new SafeProcessHandle(processInformation.Process, ownsHandle: true);
+            thread = new SafeThreadHandle(processInformation.Thread);
+            if (processId == 0
                 || processInformation.ThreadId == 0
                 || process.IsInvalid
                 || thread.IsInvalid)
@@ -131,14 +142,14 @@ internal sealed class SourceTokenRelayProcess : IDisposable
                     "CreateProcess returned incomplete source-token relay handles.");
             }
 
-            var relay = new SourceTokenRelayProcess(
+            var relay = new WindowsSourceTokenRelayProcess(
                 process,
                 thread,
                 job,
-                processInformation.ProcessId);
-            process = null!;
-            thread = null!;
-            job = null!;
+                processId);
+            process = null;
+            thread = null;
+            job = null;
             return relay;
         }
         catch (Exception creationFailure)
@@ -150,7 +161,7 @@ internal sealed class SourceTokenRelayProcess : IDisposable
                     ? TerminateJobAndWait(
                         job,
                         process,
-                        processInformation.ProcessId,
+                        processId,
                         "failed suspended source-token relay creation")
                     : new InvalidDataException(
                         "CreateProcess succeeded without a live exact relay process handle, so relay termination cannot be proven.");
@@ -161,9 +172,8 @@ internal sealed class SourceTokenRelayProcess : IDisposable
                 throw;
             }
 
-            throw new SourceTokenRelayCreationException(
+            throw new AggregateException(
                 "Source-token relay creation failed and its exact job/process cleanup also failed.",
-                processInformation.ProcessId,
                 creationFailure,
                 cleanupFailure);
         }
@@ -175,80 +185,57 @@ internal sealed class SourceTokenRelayProcess : IDisposable
         }
     }
 
-    public void BindCreatedAtUtcTicks(long expectedCreatedAtUtcTicks)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        if (expectedCreatedAtUtcTicks < DateTime.UnixEpoch.Ticks
-            || expectedCreatedAtUtcTicks > DateTime.MaxValue.Ticks)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(expectedCreatedAtUtcTicks),
-                "The runner-captured relay creation time is outside the valid UTC tick range.");
-        }
-        if (_validated || _resumed || CreatedAtUtcTicks != 0)
-        {
-            throw new InvalidOperationException(
-                $"Source-token relay PID {ProcessId} creation time cannot be rebound.");
-        }
-
-        var actualCreatedAtUtcTicks = ReadCreatedAtUtcTicks(_process);
-        if (actualCreatedAtUtcTicks != expectedCreatedAtUtcTicks)
-        {
-            throw new InvalidDataException(
-                $"Source-token relay PID {ProcessId} creation time does not match the runner-retained process.");
-        }
-
-        CreatedAtUtcTicks = actualCreatedAtUtcTicks;
-    }
-
-    public void ValidateCreated(WindowsServiceTokenTransferRequest request)
+    public void ValidateCreated(WindowsSourceTokenRelayRequest request)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(request);
-        if (_resumed)
+        if (_resumed || _validated)
         {
             throw new InvalidOperationException(
-                $"Source-token relay PID {ProcessId} cannot be validated after resume.");
-        }
-        if (_validated)
-        {
-            throw new InvalidOperationException(
-                $"Source-token relay PID {ProcessId} was already validated.");
+                $"Source-token relay PID {ProcessId} cannot be initially validated in its current state.");
         }
 
-        var wait = WaitForSingleObject(_process, milliseconds: 0);
-        if (wait == WaitObject0)
-        {
-            throw new InvalidOperationException(
-                $"Suspended source-token relay PID {ProcessId} exited before validation.");
-        }
-        if (wait == WaitFailed)
-        {
-            throw NativeFailure(
-                $"Could not inspect suspended source-token relay PID {ProcessId} before validation");
-        }
-        if (wait != WaitTimeout)
-        {
-            throw new InvalidOperationException(
-                $"Suspended source-token relay PID {ProcessId} returned unexpected wait status 0x{wait:x8} before validation.");
-        }
-
-        ValidateProcessImage(
+        EnsureNotExited("before validation");
+        CreatedAtUtcTicks = ReadCreatedAtUtcTicks(_process);
+        WindowsServiceTokenTestBridge.ValidateCapturedProcessImageAndHash(
             _process,
-            request.HelperExecutablePath,
-            request.HelperExecutableSha256);
-        if (!IsProcessInJob(_process, _job, out var assignedToJob))
-        {
-            throw NativeFailure(
-                "Could not validate the source-token relay containment job");
-        }
-        if (!assignedToJob)
+            ProcessId,
+            "source-token relay",
+            request.RelayExecutablePath,
+            request.RelayExecutableSha256);
+        ValidateJobMembership();
+        _validated = true;
+    }
+
+    public void ValidateRunning(WindowsSourceTokenRelayRequest request)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(request);
+        if (!_validated)
         {
             throw new InvalidOperationException(
-                "The source-token relay was not atomically assigned to its kill-on-close job.");
+                $"Source-token relay PID {ProcessId} was not initially validated.");
         }
 
-        _validated = true;
+        EnsureNotExited("during validation");
+        var actualProcessId = GetProcessId(_process);
+        if (actualProcessId != ProcessId)
+        {
+            throw new InvalidDataException(
+                $"Retained source-token relay handle changed from PID {ProcessId} to PID {actualProcessId}.");
+        }
+        if (ReadCreatedAtUtcTicks(_process) != CreatedAtUtcTicks)
+        {
+            throw new InvalidDataException(
+                $"Retained source-token relay PID {ProcessId} changed creation time.");
+        }
+        WindowsServiceTokenTestBridge.ValidateCapturedProcessImageAndHash(
+            _process,
+            ProcessId,
+            "source-token relay",
+            request.RelayExecutablePath,
+            request.RelayExecutableSha256);
+        ValidateJobMembership();
     }
 
     public void Resume()
@@ -262,58 +249,71 @@ internal sealed class SourceTokenRelayProcess : IDisposable
         if (!_validated)
         {
             throw new InvalidOperationException(
-                $"Source-token relay PID {ProcessId} cannot be resumed before created-process validation.");
+                $"Source-token relay PID {ProcessId} cannot be resumed before validation.");
         }
 
-        Exception? resumeFailure = null;
         var previousSuspendCount = ResumeThread(_thread);
         if (previousSuspendCount == uint.MaxValue)
         {
-            resumeFailure = NativeFailure(
-                "Could not resume the validated source-token relay thread");
+            throw NativeFailure("Could not resume the validated source-token relay thread");
         }
-        else if (previousSuspendCount != 1)
+        if (previousSuspendCount != 1)
         {
-            resumeFailure = new InvalidOperationException(
+            var failure = new InvalidOperationException(
                 $"The source-token relay initial thread had suspend count {previousSuspendCount}, not exactly 1.");
-        }
-
-        if (resumeFailure is not null)
-        {
             var cleanupFailure = TerminateJobAndWait(
                 _job,
                 _process,
                 ProcessId,
                 "source-token relay resume failure");
             throw cleanupFailure is null
-                ? resumeFailure
+                ? failure
                 : new AggregateException(
-                    "The source-token relay could not resume and its exact job/process cleanup also failed.",
-                    resumeFailure,
+                    "The source-token relay had an invalid suspend count and cleanup also failed.",
+                    failure,
                     cleanupFailure);
         }
 
         _resumed = true;
     }
 
-    public async Task WaitForSuccessfulExitAsync(
-        TimeSpan timeout,
-        CancellationToken cancellationToken)
+    public void EnsureRunning(string phase)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var wait = WaitForSingleObject(_process, milliseconds: 0);
+        if (wait == WaitTimeout)
+        {
+            return;
+        }
+        if (wait == WaitObject0)
+        {
+            var exitCode = ReadExitCode(_process);
+            throw new InvalidOperationException(
+                $"Source-token relay PID {ProcessId} exited with code {exitCode} {phase}.");
+        }
+        if (wait == WaitFailed)
+        {
+            throw NativeFailure(
+                $"Could not inspect source-token relay PID {ProcessId} {phase}");
+        }
+
+        throw new InvalidOperationException(
+            $"Source-token relay PID {ProcessId} returned unexpected wait status 0x{wait:x8} {phase}.");
+    }
+
+    public void WaitForSuccessfulExit(TimeSpan timeout)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (!_resumed)
         {
             throw new InvalidOperationException(
-                $"Source-token relay PID {ProcessId} cannot be awaited before it is resumed.");
+                $"Source-token relay PID {ProcessId} cannot be awaited before resume.");
         }
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(
-            timeout,
-            TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
 
         var deadline = Stopwatch.StartNew();
         while (deadline.Elapsed < timeout)
         {
-            cancellationToken.ThrowIfCancellationRequested();
             var wait = WaitForSingleObject(_process, milliseconds: 25);
             if (wait == WaitObject0)
             {
@@ -336,8 +336,6 @@ internal sealed class SourceTokenRelayProcess : IDisposable
                 throw new InvalidOperationException(
                     $"Source-token relay PID {ProcessId} returned unexpected wait status 0x{wait:x8}.");
             }
-
-            await Task.Delay(10, cancellationToken).ConfigureAwait(false);
         }
 
         throw new TimeoutException(
@@ -378,104 +376,40 @@ internal sealed class SourceTokenRelayProcess : IDisposable
         }
     }
 
-    private static Exception? TerminateJobAndWait(
-        SafeJobHandle? job,
-        SafeRelayProcessHandle process,
-        uint processId,
-        string context)
+    private void EnsureNotExited(string phase)
     {
-        var failures = new List<Exception>();
-        var initialWait = WaitForSingleObject(process, milliseconds: 0);
-        if (initialWait == WaitObject0)
+        var wait = WaitForSingleObject(_process, milliseconds: 0);
+        if (wait == WaitTimeout)
         {
-            job?.Dispose();
-            return null;
+            return;
         }
-        if (initialWait == WaitFailed)
+        if (wait == WaitObject0)
         {
-            failures.Add(NativeFailure(
-                $"Could not inspect exact source-token relay PID {processId} before cleanup during {context}"));
+            throw new InvalidOperationException(
+                $"Suspended source-token relay PID {ProcessId} exited {phase}.");
         }
-        else if (initialWait != WaitTimeout)
+        if (wait == WaitFailed)
         {
-            failures.Add(new InvalidOperationException(
-                $"Exact source-token relay PID {processId} returned unexpected initial wait status 0x{initialWait:x8} during {context}."));
+            throw NativeFailure(
+                $"Could not inspect suspended source-token relay PID {ProcessId} {phase}");
         }
 
-        if (job is not null && !job.IsInvalid && !job.IsClosed)
-        {
-            if (TerminateJobObject(job, 70))
-            {
-                var jobWait = WaitForSingleObject(process, 10_000);
-                if (jobWait == WaitObject0)
-                {
-                    job.Dispose();
-                    return null;
-                }
-                if (jobWait == WaitFailed)
-                {
-                    failures.Add(NativeFailure(
-                        $"Could not wait for exact source-token relay PID {processId} after job termination during {context}"));
-                }
-                else if (jobWait == WaitTimeout)
-                {
-                    failures.Add(new TimeoutException(
-                        $"Exact source-token relay PID {processId} did not terminate within 10 seconds after job termination during {context}."));
-                }
-                else
-                {
-                    failures.Add(new InvalidOperationException(
-                        $"Exact source-token relay PID {processId} returned unexpected post-job wait status 0x{jobWait:x8} during {context}."));
-                }
-            }
-            else
-            {
-                failures.Add(NativeFailure(
-                    $"Could not terminate the source-token relay job for PID {processId} during {context}"));
-            }
-        }
-        else
-        {
-            failures.Add(new InvalidOperationException(
-                $"The source-token relay job for PID {processId} was unavailable during {context}."));
-        }
+        throw new InvalidOperationException(
+            $"Suspended source-token relay PID {ProcessId} returned unexpected wait status 0x{wait:x8} {phase}.");
+    }
 
-        if (!TerminateProcess(process, 70))
+    private void ValidateJobMembership()
+    {
+        if (!IsProcessInJob(_process, _job, out var assignedToJob))
         {
-            failures.Add(NativeFailure(
-                $"Could not directly terminate exact source-token relay PID {processId} during {context}"));
+            throw NativeFailure(
+                "Could not validate the source-token relay containment job");
         }
-
-        job?.Dispose();
-        var finalWait = WaitForSingleObject(process, 10_000);
-        if (finalWait == WaitObject0)
+        if (!assignedToJob)
         {
-            return null;
+            throw new InvalidOperationException(
+                "The source-token relay was not atomically assigned to its kill-on-close job.");
         }
-        if (finalWait == WaitFailed)
-        {
-            failures.Add(NativeFailure(
-                $"Could not perform the final wait for exact source-token relay PID {processId} during {context}"));
-        }
-        else if (finalWait == WaitTimeout)
-        {
-            failures.Add(new TimeoutException(
-                $"Exact source-token relay PID {processId} did not terminate within 10 seconds after direct termination and job close during {context}."));
-        }
-        else
-        {
-            failures.Add(new InvalidOperationException(
-                $"Exact source-token relay PID {processId} returned unexpected final wait status 0x{finalWait:x8} during {context}."));
-        }
-
-        return failures.Count switch
-        {
-            0 => null,
-            1 => failures[0],
-            _ => new AggregateException(
-                $"Multiple exact source-token relay cleanup operations failed during {context}.",
-                failures)
-        };
     }
 
     private static SafeJobHandle CreateRelayJob()
@@ -545,7 +479,7 @@ internal sealed class SourceTokenRelayProcess : IDisposable
         return '"' + value + '"';
     }
 
-    private static long ReadCreatedAtUtcTicks(SafeRelayProcessHandle process)
+    private static long ReadCreatedAtUtcTicks(SafeProcessHandle process)
     {
         if (!GetProcessTimes(process, out var created, out _, out _, out _))
         {
@@ -555,47 +489,7 @@ internal sealed class SourceTokenRelayProcess : IDisposable
         return DateTime.FromFileTimeUtc(created.ToLong()).Ticks;
     }
 
-    private static void ValidateProcessImage(
-        SafeRelayProcessHandle process,
-        string expectedPath,
-        string expectedSha256)
-    {
-        var path = new char[32_768];
-        var length = checked((uint)path.Length);
-        if (!QueryFullProcessImageName(process, flags: 0, path, ref length)
-            || length == 0
-            || length >= path.Length)
-        {
-            throw NativeFailure("Could not read the source-token relay executable path");
-        }
-
-        var actualPath = Path.GetFullPath(new string(path, 0, checked((int)length)));
-        if (!string.Equals(actualPath, expectedPath, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException(
-                $"Source-token relay image '{actualPath}' is not '{expectedPath}'.");
-        }
-
-        using var stream = new FileStream(
-            actualPath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read | FileShare.Delete,
-            128 * 1024,
-            FileOptions.SequentialScan);
-        WindowsNative.ValidateCanonicalSourceExecutableHandle(
-            stream.SafeFileHandle,
-            expectedPath);
-        var actualSha256 = Convert.ToHexStringLower(
-            System.Security.Cryptography.SHA256.HashData(stream));
-        if (!string.Equals(actualSha256, expectedSha256, StringComparison.Ordinal))
-        {
-            throw new InvalidDataException(
-                "The source-token relay executable hash changed before resume.");
-        }
-    }
-
-    private static uint ReadExitCode(SafeRelayProcessHandle process)
+    private static uint ReadExitCode(SafeProcessHandle process)
     {
         if (!GetExitCodeProcess(process, out var exitCode))
         {
@@ -608,6 +502,76 @@ internal sealed class SourceTokenRelayProcess : IDisposable
         }
 
         return exitCode;
+    }
+
+    private static Exception? TerminateJobAndWait(
+        SafeJobHandle? job,
+        SafeProcessHandle process,
+        uint processId,
+        string context)
+    {
+        var wait = WaitForSingleObject(process, milliseconds: 0);
+        if (wait == WaitObject0)
+        {
+            job?.Dispose();
+            return null;
+        }
+
+        var failures = new List<Exception>();
+        if (wait == WaitFailed)
+        {
+            failures.Add(NativeFailure(
+                $"Could not inspect exact source-token relay PID {processId} during {context}"));
+        }
+        else if (wait != WaitTimeout)
+        {
+            failures.Add(new InvalidOperationException(
+                $"Exact source-token relay PID {processId} returned unexpected wait status 0x{wait:x8} during {context}."));
+        }
+
+        if (job is not null && !job.IsInvalid && !job.IsClosed)
+        {
+            if (!TerminateJobObject(job, 70))
+            {
+                failures.Add(NativeFailure(
+                    $"Could not terminate the source-token relay job for PID {processId} during {context}"));
+            }
+        }
+        else
+        {
+            failures.Add(new InvalidOperationException(
+                $"The source-token relay job for PID {processId} was unavailable during {context}."));
+        }
+
+        job?.Dispose();
+        var finalWait = WaitForSingleObject(process, 10_000);
+        if (finalWait != WaitObject0)
+        {
+            if (!TerminateProcess(process, 70))
+            {
+                failures.Add(NativeFailure(
+                    $"Could not directly terminate exact source-token relay PID {processId} during {context}"));
+            }
+            finalWait = WaitForSingleObject(process, 10_000);
+        }
+
+        if (finalWait != WaitObject0)
+        {
+            failures.Add(finalWait == WaitFailed
+                ? NativeFailure(
+                    $"Could not wait for exact source-token relay PID {processId} during {context}")
+                : new TimeoutException(
+                    $"Exact source-token relay PID {processId} did not terminate during {context}."));
+        }
+
+        return failures.Count switch
+        {
+            0 => null,
+            1 => failures[0],
+            _ => new AggregateException(
+                $"Source-token relay PID {processId} cleanup had multiple failures during {context}.",
+                failures)
+        };
     }
 
     private static Win32Exception NativeFailure(string message)
@@ -809,9 +773,7 @@ internal sealed class SourceTokenRelayProcess : IDisposable
     {
         private IntPtr _descriptor;
 
-        public ProcessSecurityDescriptor(
-            SecurityIdentifier owner,
-            SecurityIdentifier runnerSid)
+        public ProcessSecurityDescriptor(SecurityIdentifier runnerSid)
         {
             var dacl = new RawAcl(GenericAcl.AclRevision, capacity: 1);
             dacl.InsertAce(0, new CommonAce(
@@ -824,8 +786,8 @@ internal sealed class SourceTokenRelayProcess : IDisposable
             var descriptor = new RawSecurityDescriptor(
                 ControlFlags.DiscretionaryAclPresent
                 | ControlFlags.DiscretionaryAclProtected,
-                owner,
-                owner,
+                runnerSid,
+                runnerSid,
                 systemAcl: null,
                 dacl);
             var bytes = new byte[descriptor.BinaryLength];
@@ -868,16 +830,8 @@ internal sealed class SourceTokenRelayProcess : IDisposable
         public ProcessEnvironmentBlock(string environment)
         {
             var bytes = Encoding.Unicode.GetBytes(environment);
-            try
-            {
-                _handle = Marshal.AllocHGlobal(bytes.Length);
-                Marshal.Copy(bytes, 0, _handle, bytes.Length);
-            }
-            catch
-            {
-                Dispose();
-                throw;
-            }
+            _handle = Marshal.AllocHGlobal(bytes.Length);
+            Marshal.Copy(bytes, 0, _handle, bytes.Length);
         }
 
         public IntPtr Handle => _handle;
@@ -895,24 +849,11 @@ internal sealed class SourceTokenRelayProcess : IDisposable
 
     private sealed class SafeThreadHandle : SafeHandleZeroOrMinusOneIsInvalid
     {
-        public SafeThreadHandle()
+        public SafeThreadHandle(IntPtr handle)
             : base(ownsHandle: true)
         {
+            SetHandle(handle);
         }
-
-        public void Adopt(IntPtr value) => SetHandle(value);
-
-        protected override bool ReleaseHandle() => CloseHandle(handle);
-    }
-
-    private sealed class SafeRelayProcessHandle : SafeHandleZeroOrMinusOneIsInvalid
-    {
-        public SafeRelayProcessHandle()
-            : base(ownsHandle: true)
-        {
-        }
-
-        public void Adopt(IntPtr value) => SetHandle(value);
 
         protected override bool ReleaseHandle() => CloseHandle(handle);
     }
@@ -949,15 +890,8 @@ internal sealed class SourceTokenRelayProcess : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsProcessInJob(
-        SafeRelayProcessHandle process,
-        SafeJobHandle job,
-        [MarshalAs(UnmanagedType.Bool)] out bool result);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool IsProcessInJob(
         SafeProcessHandle process,
-        IntPtr job,
+        SafeJobHandle job,
         [MarshalAs(UnmanagedType.Bool)] out bool result);
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -1004,58 +938,36 @@ internal sealed class SourceTokenRelayProcess : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint ResumeThread(SafeThreadHandle thread);
 
-    [DllImport(
-        "kernel32.dll",
-        EntryPoint = "QueryFullProcessImageNameW",
-        CharSet = CharSet.Unicode,
-        ExactSpelling = true,
-        SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool QueryFullProcessImageName(
-        SafeRelayProcessHandle process,
-        uint flags,
-        [Out] char[] executablePath,
-        ref uint executablePathLength);
-
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetProcessTimes(
-        SafeRelayProcessHandle process,
+        SafeProcessHandle process,
         out NativeFileTime creationTime,
         out NativeFileTime exitTime,
         out NativeFileTime kernelTime,
         out NativeFileTime userTime);
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetProcessId(SafeProcessHandle process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(
-        SafeRelayProcessHandle process,
+        SafeProcessHandle process,
         uint milliseconds);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetExitCodeProcess(
-        SafeRelayProcessHandle process,
+        SafeProcessHandle process,
         out uint exitCode);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool TerminateProcess(
-        SafeRelayProcessHandle process,
+        SafeProcessHandle process,
         uint exitCode);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
-}
-
-internal sealed class SourceTokenRelayCreationException(
-    string message,
-    uint processId,
-    Exception creationFailure,
-    Exception cleanupFailure)
-    : AggregateException(message, creationFailure, cleanupFailure)
-{
-    public uint ProcessId { get; } = processId;
-
-    public Exception CleanupFailure { get; } = cleanupFailure;
 }

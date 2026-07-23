@@ -613,11 +613,11 @@ function New-MinimalReleaseCandidate {
         [switch] $BackslashDesktopEntry,
         [switch] $WrongCaseDesktopEntry,
         [switch] $TamperAgentBundle,
-        [switch] $IncludeServiceTokenTestHelperInAgent,
-        [switch] $IncludeRenamedServiceTokenTestHelperDirectoryInAgent,
-        [switch] $IncludeRenamedServiceTokenTestHelperBinaryInAgent,
-        [switch] $IncludeUnmanifestedServiceTokenTestHelperBinary,
-        [switch] $OmitServiceTokenTestHelperSource,
+        [switch] $IncludeServiceTokenTestRelayInAgent,
+        [switch] $IncludeRenamedServiceTokenTestRelayDirectoryInAgent,
+        [switch] $IncludeRenamedServiceTokenTestRelayBinaryInAgent,
+        [switch] $IncludeUnmanifestedServiceTokenTestRelayBinary,
+        [switch] $OmitServiceTokenTestRelaySource,
         [switch] $ExposeRemovedAgentContainerSetting,
         [switch] $OmitAgentSafetyExecutablePath,
         [switch] $OmitAgentStationSystemId,
@@ -650,15 +650,14 @@ function New-MinimalReleaseCandidate {
         "Directory.Build.props",
         "OpenLineOps.sln",
         "OpenLineOps.slnx",
-        "tests/OpenLineOps.WindowsServiceToken.TestHelper/OpenLineOps.WindowsServiceToken.TestHelper.csproj",
-        "tests/OpenLineOps.WindowsServiceToken.TestHelper/Program.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestHelper/TokenTransferProtocol.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestHelper/AtomicTokenTransferResult.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestHelper/OneShotWindowsServiceWorker.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsNative.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestHelper/WindowsServiceTokenTransferOperation.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestHelper/SourceTokenRelayOperation.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestHelper/SourceTokenRelayProcess.cs",
+        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestBridge.cs",
+        "tests/OpenLineOps.Agent.Tests/WindowsSourceTokenRelayProcess.cs",
+        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestRelayContractTests.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/Program.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/RelayProtocol.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/WindowsNative.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/SourceTokenRelayOperation.cs",
         "docs/development-execution-plan.md",
         "eng/stage-release-artifacts.ps1",
         "eng/verify-ci-workflow-actions.ps1",
@@ -705,10 +704,10 @@ function New-MinimalReleaseCandidate {
             throw "Fixture source entry '$OmitSourceEntry' is not present exactly once."
         }
     }
-    if ($OmitServiceTokenTestHelperSource) {
+    if ($OmitServiceTokenTestRelaySource) {
         $sourceEntries = @($sourceEntries | Where-Object {
                 -not $_.StartsWith(
-                    "tests/OpenLineOps.WindowsServiceToken.TestHelper/",
+                    "tests/OpenLineOps.WindowsServiceToken.TestRelay/",
                     [System.StringComparison]::Ordinal)
             })
     }
@@ -734,23 +733,23 @@ function New-MinimalReleaseCandidate {
         "LICENSE.txt",
         "THIRD-PARTY-NOTICES.md")
     $agentFileSourceOverrides = @{}
-    if ($IncludeServiceTokenTestHelperInAgent) {
-        $helperPath = "OpenLineOps.WindowsServiceToken.TestHelper.exe"
-        $agentFiles += $helperPath
-        $agentFileSourceOverrides[$helperPath] =
-            $script:ServiceTokenHelperFixtureExecutablePath
+    if ($IncludeServiceTokenTestRelayInAgent) {
+        $relayPath = "OpenLineOps.WindowsServiceToken.TestRelay.exe"
+        $agentFiles += $relayPath
+        $agentFileSourceOverrides[$relayPath] =
+            $script:ServiceTokenTestRelayFixtureExecutablePath
     }
-    if ($IncludeRenamedServiceTokenTestHelperDirectoryInAgent) {
-        $helperPath = "WINDOWS-SERVICE-TOKEN-TEST-HELPER/bridge-host.exe"
-        $agentFiles += $helperPath
-        $agentFileSourceOverrides[$helperPath] =
-            $script:ServiceTokenHelperFixtureExecutablePath
+    if ($IncludeRenamedServiceTokenTestRelayDirectoryInAgent) {
+        $relayPath = "WINDOWS-SERVICE-TOKEN-TEST-RELAY/renamed-relay.exe"
+        $agentFiles += $relayPath
+        $agentFileSourceOverrides[$relayPath] =
+            $script:ServiceTokenTestRelayFixtureExecutablePath
     }
-    if ($IncludeRenamedServiceTokenTestHelperBinaryInAgent) {
-        $helperPath = "support/bridge-host.bin"
-        $agentFiles += $helperPath
-        $agentFileSourceOverrides[$helperPath] =
-            $script:ServiceTokenHelperFixtureExecutablePath
+    if ($IncludeRenamedServiceTokenTestRelayBinaryInAgent) {
+        $relayPath = "support/renamed-relay.bin"
+        $agentFiles += $relayPath
+        $agentFileSourceOverrides[$relayPath] =
+            $script:ServiceTokenTestRelayFixtureExecutablePath
     }
 
     New-TestWindowsBundleZip `
@@ -860,10 +859,10 @@ function New-MinimalReleaseCandidate {
         }
     }
 
-    if ($IncludeUnmanifestedServiceTokenTestHelperBinary) {
-        $unmanifestedPath = Join-Path $root "agent/renamed-host.bin"
+    if ($IncludeUnmanifestedServiceTokenTestRelayBinary) {
+        $unmanifestedPath = Join-Path $root "agent/unmanifested-relay.bin"
         Copy-Item `
-            -LiteralPath $script:ServiceTokenHelperFixtureExecutablePath `
+            -LiteralPath $script:ServiceTokenTestRelayFixtureExecutablePath `
             -Destination $unmanifestedPath
     }
 
@@ -925,30 +924,30 @@ function Assert-InspectionFails {
 $ResolvedWorkRoot = Resolve-RepoPath $WorkRoot
 Assert-UnderRepoRoot $ResolvedWorkRoot
 New-CleanDirectory $ResolvedWorkRoot
-$serviceTokenHelperFixtureOutput = Join-Path `
+$serviceTokenTestRelayFixtureOutput = Join-Path `
     $ResolvedWorkRoot `
-    "service-token-helper-fixture"
-$serviceTokenHelperFixtureProject = Resolve-RepoPath `
-    "tests/OpenLineOps.WindowsServiceToken.TestHelper/OpenLineOps.WindowsServiceToken.TestHelper.csproj"
-$serviceTokenHelperBuildOutput = @(& dotnet build `
-        $serviceTokenHelperFixtureProject `
+    "service-token-test-relay-fixture"
+$serviceTokenTestRelayFixtureProject = Resolve-RepoPath `
+    "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj"
+$serviceTokenTestRelayBuildOutput = @(& dotnet build `
+        $serviceTokenTestRelayFixtureProject `
         --configuration Release `
         --runtime win-x64 `
         --self-contained true `
-        --output $serviceTokenHelperFixtureOutput `
+        --output $serviceTokenTestRelayFixtureOutput `
         -p:DebugSymbols=false `
         -p:DebugType=None 2>&1)
 if ($LASTEXITCODE -ne 0) {
-    Write-Host ($serviceTokenHelperBuildOutput | Out-String)
-    throw "Could not build the real Windows service-token helper payload fixture."
+    Write-Host ($serviceTokenTestRelayBuildOutput | Out-String)
+    throw "Could not build the real Windows service-token Test Relay payload fixture."
 }
-$script:ServiceTokenHelperFixtureExecutablePath = Join-Path `
-    $serviceTokenHelperFixtureOutput `
-    "OpenLineOps.WindowsServiceToken.TestHelper.exe"
+$script:ServiceTokenTestRelayFixtureExecutablePath = Join-Path `
+    $serviceTokenTestRelayFixtureOutput `
+    "OpenLineOps.WindowsServiceToken.TestRelay.exe"
 if (-not (Test-Path `
-        -LiteralPath $script:ServiceTokenHelperFixtureExecutablePath `
+        -LiteralPath $script:ServiceTokenTestRelayFixtureExecutablePath `
         -PathType Leaf)) {
-    throw "The real Windows service-token helper payload fixture is missing its executable."
+    throw "The real Windows service-token Test Relay payload fixture is missing its executable."
 }
 
 $positiveRoot = New-MinimalReleaseCandidate -Name "positive"
@@ -962,53 +961,58 @@ Assert-InspectionFails `
     -Name "tampered-agent-bundle" `
     -ExpectedPattern "bundle (size|hash) mismatch for 'OpenLineOps\.Agent\.exe'"
 
-$serviceTokenHelperLeakRoot = New-MinimalReleaseCandidate `
-    -Name "test-only-service-token-helper-leak" `
-    -IncludeServiceTokenTestHelperInAgent
+$serviceTokenTestRelayLeakRoot = New-MinimalReleaseCandidate `
+    -Name "test-only-service-token-test-relay-leak" `
+    -IncludeServiceTokenTestRelayInAgent
 Assert-InspectionFails `
-    -Root $serviceTokenHelperLeakRoot `
-    -Name "test-only-service-token-helper-leak" `
-    -ExpectedPattern "test-only Windows service-token helper in a deployable artifact"
+    -Root $serviceTokenTestRelayLeakRoot `
+    -Name "test-only-service-token-test-relay-leak" `
+    -ExpectedPattern "test-only Windows service-token Test Relay in a deployable artifact"
 
-$renamedServiceTokenHelperLeakRoot = New-MinimalReleaseCandidate `
-    -Name "renamed-test-only-service-token-helper-directory-leak" `
-    -IncludeRenamedServiceTokenTestHelperDirectoryInAgent
+$renamedServiceTokenTestRelayLeakRoot = New-MinimalReleaseCandidate `
+    -Name "renamed-test-only-service-token-test-relay-directory-leak" `
+    -IncludeRenamedServiceTokenTestRelayDirectoryInAgent
 Assert-InspectionFails `
-    -Root $renamedServiceTokenHelperLeakRoot `
-    -Name "renamed-test-only-service-token-helper-directory-leak" `
-    -ExpectedPattern "test-only Windows service-token helper in a deployable artifact"
+    -Root $renamedServiceTokenTestRelayLeakRoot `
+    -Name "renamed-test-only-service-token-test-relay-directory-leak" `
+    -ExpectedPattern "test-only Windows service-token Test Relay in a deployable artifact"
 
-$renamedServiceTokenHelperBinaryLeakRoot = New-MinimalReleaseCandidate `
-    -Name "renamed-test-only-service-token-helper-binary-leak" `
-    -IncludeRenamedServiceTokenTestHelperBinaryInAgent
+$renamedServiceTokenTestRelayBinaryLeakRoot = New-MinimalReleaseCandidate `
+    -Name "renamed-test-only-service-token-test-relay-binary-leak" `
+    -IncludeRenamedServiceTokenTestRelayBinaryInAgent
 Assert-InspectionFails `
-    -Root $renamedServiceTokenHelperBinaryLeakRoot `
-    -Name "renamed-test-only-service-token-helper-binary-leak" `
-    -ExpectedPattern "test-only Windows service-token helper in a deployable artifact"
+    -Root $renamedServiceTokenTestRelayBinaryLeakRoot `
+    -Name "renamed-test-only-service-token-test-relay-binary-leak" `
+    -ExpectedPattern "test-only Windows service-token Test Relay in a deployable artifact"
 
-$unmanifestedServiceTokenHelperBinaryLeakRoot = New-MinimalReleaseCandidate `
-    -Name "unmanifested-test-only-service-token-helper-binary-leak" `
-    -IncludeUnmanifestedServiceTokenTestHelperBinary
+$unmanifestedServiceTokenTestRelayBinaryLeakRoot = New-MinimalReleaseCandidate `
+    -Name "unmanifested-test-only-service-token-test-relay-binary-leak" `
+    -IncludeUnmanifestedServiceTokenTestRelayBinary
 Assert-InspectionFails `
-    -Root $unmanifestedServiceTokenHelperBinaryLeakRoot `
-    -Name "unmanifested-test-only-service-token-helper-binary-leak" `
+    -Root $unmanifestedServiceTokenTestRelayBinaryLeakRoot `
+    -Name "unmanifested-test-only-service-token-test-relay-binary-leak" `
     -ExpectedPattern "unmanifested file"
 
-$missingServiceTokenHelperSourceRoot = New-MinimalReleaseCandidate `
-    -Name "missing-service-token-helper-source" `
-    -OmitServiceTokenTestHelperSource
+$missingServiceTokenTestRelaySourceRoot = New-MinimalReleaseCandidate `
+    -Name "missing-service-token-test-relay-source" `
+    -OmitServiceTokenTestRelaySource
 Assert-InspectionFails `
-    -Root $missingServiceTokenHelperSourceRoot `
-    -Name "missing-service-token-helper-source" `
-    -ExpectedPattern "missing expected entry: tests/OpenLineOps\.WindowsServiceToken\.TestHelper/"
+    -Root $missingServiceTokenTestRelaySourceRoot `
+    -Name "missing-service-token-test-relay-source" `
+    -ExpectedPattern "missing expected entry: tests/OpenLineOps\.WindowsServiceToken\.TestRelay/"
 
-foreach ($relaySourceFile in @(
-        "SourceTokenRelayOperation.cs",
-        "SourceTokenRelayProcess.cs")) {
-    $relaySourceEntry =
-        "tests/OpenLineOps.WindowsServiceToken.TestHelper/$relaySourceFile"
+foreach ($relaySourceEntry in @(
+        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestBridge.cs",
+        "tests/OpenLineOps.Agent.Tests/WindowsSourceTokenRelayProcess.cs",
+        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestRelayContractTests.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/Program.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/RelayProtocol.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/WindowsNative.cs",
+        "tests/OpenLineOps.WindowsServiceToken.TestRelay/SourceTokenRelayOperation.cs")) {
     $fixtureName =
-        "missing-" + [System.IO.Path]::GetFileNameWithoutExtension($relaySourceFile).ToLowerInvariant()
+        "missing-test-relay-source-" +
+        [System.IO.Path]::GetFileNameWithoutExtension($relaySourceEntry).ToLowerInvariant()
     $missingRelaySourceRoot = New-MinimalReleaseCandidate `
         -Name $fixtureName `
         -OmitSourceEntry $relaySourceEntry
@@ -1123,7 +1127,7 @@ Assert-InspectionFails `
 
 $windowsCanonicalAliasRoot = New-MinimalReleaseCandidate `
     -Name "windows-canonical-alias-path" `
-    -ExtraSourceEntries @("windows-service-token-test-helper./bridge-host.exe")
+    -ExtraSourceEntries @("windows-service-token-test-relay./renamed-relay.exe")
 Assert-InspectionFails `
     -Root $windowsCanonicalAliasRoot `
     -Name "windows-canonical-alias-path" `

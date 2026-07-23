@@ -531,13 +531,13 @@ function Assert-AgentBundleConfiguration {
     }
 }
 
-function Assert-NoTestOnlyServiceTokenHelper {
+function Assert-NoTestOnlyServiceTokenRelay {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
         [Parameter(Mandatory = $true)][string] $ArtifactKind
     )
 
-    $forbiddenAssemblyPrefix = "OpenLineOps.WindowsServiceToken.TestHelper"
+    $forbiddenAssemblyPrefix = "OpenLineOps.WindowsServiceToken.TestRelay"
     foreach ($entry in Get-ChildItem -LiteralPath $Root -Force -Recurse) {
         $relativePath = (Get-RelativePathUnderDirectory `
                 -Root $Root `
@@ -546,7 +546,7 @@ function Assert-NoTestOnlyServiceTokenHelper {
         $hasForbiddenDirectory = @($segments | Where-Object {
                 [string]::Equals(
                     $_,
-                    "windows-service-token-test-helper",
+                    "windows-service-token-test-relay",
                     [System.StringComparison]::OrdinalIgnoreCase)
             }).Count -gt 0
         $containsForbiddenBinaryIdentity = -not $entry.PSIsContainer `
@@ -558,7 +558,7 @@ function Assert-NoTestOnlyServiceTokenHelper {
                 $forbiddenAssemblyPrefix,
                 [System.StringComparison]::OrdinalIgnoreCase) `
             -or $containsForbiddenBinaryIdentity) {
-            throw "The $ArtifactKind release payload contains the test-only Windows service-token helper: $relativePath"
+            throw "The $ArtifactKind release payload contains the test-only Windows service-token Test Relay: $relativePath"
         }
     }
 }
@@ -617,7 +617,7 @@ function Test-PortableExecutableContainsAsciiMarker {
     }
 }
 
-function Assert-NoProductionServiceTokenHelperReference {
+function Assert-NoProductionServiceTokenRelayReference {
     foreach ($projectRoot in @("modules", "shared", "src", "tools", "samples")) {
         foreach ($project in Get-ChildItem `
                      -LiteralPath (Resolve-RepoPath $projectRoot) `
@@ -625,9 +625,9 @@ function Assert-NoProductionServiceTokenHelperReference {
                      -File `
                      -Recurse) {
             if ((Get-Content -LiteralPath $project.FullName -Raw).IndexOf(
-                    "OpenLineOps.WindowsServiceToken.TestHelper",
+                    "OpenLineOps.WindowsServiceToken.TestRelay",
                     [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                throw "Production project '$($project.FullName)' references the test-only Windows service-token helper."
+                throw "Production project '$($project.FullName)' references the test-only Windows service-token Test Relay."
             }
         }
     }
@@ -1121,7 +1121,7 @@ if ($SignWindowsPackages) {
 
 New-CleanDirectory $resolvedArtifactsRoot
 New-CleanDirectory $resolvedWorkRoot
-Assert-NoProductionServiceTokenHelperReference
+Assert-NoProductionServiceTokenRelayReference
 
 $safeVersion = $Version -replace "[^A-Za-z0-9._-]", "_"
 
@@ -1353,7 +1353,7 @@ $archives = @(
 
 foreach ($archive in $archives) {
     if ($archive.Kind -cne "source") {
-        Assert-NoTestOnlyServiceTokenHelper `
+        Assert-NoTestOnlyServiceTokenRelay `
             -Root $archive.Source `
             -ArtifactKind $archive.Kind
     }

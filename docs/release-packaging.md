@@ -170,14 +170,21 @@ administrator operations; release static gates, executable tests, staging, and
 candidate inspection require both commands and their packaged deployment
 instructions.
 
-The Windows service-token E2E helper is test infrastructure, not a product
+The Windows service-token Test Relay is test infrastructure, not a product
 runtime. Its source is present only as ordinary test source in the open-source
 `source` artifact so the repository remains fully buildable. Its executable,
-assembly prefix, and `windows-service-token-test-helper` staging directory are
-forbidden from every API, Agent, Runner, Desktop, Plugin Host, Script Worker,
-and sample-plugin artifact. Release staging rejects such a leak before archive
-creation, candidate inspection independently rejects a fully re-manifested and
-re-hashed leak, and the helper project is not publishable.
+`OpenLineOps.WindowsServiceToken.TestRelay` assembly prefix, and
+`windows-service-token-test-relay` staging directory are forbidden from every
+API, Agent, Runner, Desktop, Plugin Host, Script Worker and sample-plugin
+artifact. Release staging rejects such a leak before archive creation,
+candidate inspection independently rejects a fully re-manifested and re-hashed
+leak, and the Test Relay project is neither packable nor publishable. The
+test-only runner creates it directly from a fully validated Station parent with
+`PROCESS_CREATE_PROCESS`, `CompareObjectHandles`,
+`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` and a private
+`PROC_THREAD_ATTRIBUTE_JOB_LIST`; no Test Relay executable belongs to a release
+candidate.
+
 See `docs/station-agent-deployment.md` and
 `docs/headless-runner.md` for deployment and invocation.
 

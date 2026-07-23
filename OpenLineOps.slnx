@@ -109,7 +109,7 @@
     <Project Path="tests/OpenLineOps.Topology.Tests/OpenLineOps.Topology.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Traceability.Tests/OpenLineOps.Traceability.Tests.csproj" />
     <Project Path="tests/OpenLineOps.VendorTestHelper.Tests/OpenLineOps.VendorTestHelper.Tests.csproj" />
-    <Project Path="tests/OpenLineOps.WindowsServiceToken.TestHelper/OpenLineOps.WindowsServiceToken.TestHelper.csproj" />
+    <Project Path="tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj" />
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/OpenLineOps.BoundedContext.Scaffolder/OpenLineOps.BoundedContext.Scaffolder.csproj" />

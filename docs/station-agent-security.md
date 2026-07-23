@@ -36,94 +36,71 @@ independent service-SID configuration value that can drift from the SCM name.
 
 An external test process is not allowed to open a production Station token with
 `TOKEN_DUPLICATE`, and the test harness never reads or modifies the token DACL.
-The Windows process E2E uses a separate, self-contained test-only helper service.
-Each invocation creates a random virtual service account named
-`NT SERVICE\<random-service-name>` with `SERVICE_SID_TYPE_UNRESTRICTED`. Its
-unique account SID is also its service SID, so the capability is not shared with
-the LocalService account. The helper requires that SID as its exact token user
-without depending on Windows also enumerating the same virtual-account SID as a
-duplicate `TokenGroups` entry. The SERVICE well-known SID `S-1-5-6` remains
-enabled and the helper SID must not appear in `TokenRestrictedSids`. The
-protected service object admits only fixed
-administrative owners. The bridge root separates immutable `helper/` and
-`protocol/` trees from a dedicated `result/` tree. Both the helper and Station
-SIDs receive only read/execute/synchronize rights over the immutable trees; the
-Station SID has no result access, and only the helper SID receives bounded
-modify rights inside `result/`. The runner records the exact relative path,
-length and SHA-256 of every file in the complete self-contained helper closure,
-rejects missing, changed and additional files, and rechecks that inventory and
-all ACLs before start, after helper capture, before relay resume and after
-completion.
+The Windows process E2E uses one fixed, self-contained Test Relay and does not
+install another service or virtual account. Before acquiring any creation
+capability, the runner validates the exact Station SCM name and service SID,
+binds the SCM-reported PID to its retained process handle, and verifies creation
+time, liveness, canonical Agent image, SHA-256 and absence from every job. A
+source already in a job is rejected because inherited job policy cannot be
+proven compatible.
 
-The helper first authenticates to a random coordination pipe. The runner binds
-the pipe client to the exact SCM PID and virtual-account SID before granting any
-Station-process access. The pipe deliberately permits identification only: the
-runner can authenticate the helper but cannot act as it. One temporary leading
-process-object ACE then grants the helper SID exactly
-`PROCESS_CREATE_PROCESS` on the retained Station PID. Effective capability is
-proved only when the fixed helper's own primary token opens that process. The
-leading position is a deliberate, short-lived exact-SID exception to
-any broader process deny ACE; no original ACE is reordered or removed, and the
-original DACL is restored byte-for-byte. Query, synchronization, PID, creation
-time, liveness, image/hash and job membership remain runner-only checks through
-its already-retained handle. `PROCESS_CREATE_PROCESS` is used only by the fixed
-helper to create one suspended relay with
-`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`. Windows therefore supplies that relay
-with the Station process token without exporting a token handle. The source
-Station must not already belong to another job. The same `STARTUPINFOEX`
-atomically assigns a private job through `PROC_THREAD_ATTRIBUTE_JOB_LIST`; the
-job has kill-on-close and an active-process limit of one. Breakaway, inherited
-handles, debug rights, process-memory rights, token duplication and dynamic
-privilege changes are forbidden.
+The runner creates a protected bridge root owned by its exact SID. LocalSystem,
+Administrators and that runner SID receive full control; the exact Station
+service SID receives only inherited read/execute/synchronize rights. The root
+contains an immutable `relay/` bundle and strict `protocol/request.json`; there
+is no writable result channel. Before native creation, before resume and after
+successful completion, the runner rejects reparse/device entries, unexpected
+owners or ACL rules, and every missing, changed or additional file using an
+exact relative path, length and SHA-256 inventory.
 
-Immediately after native process creation, before subsequent relay validation
-can fail, the helper reports only the observed relay PID over the
-authenticated coordination pipe. The runner immediately retains that exact
-suspended-process handle, reads its authoritative creation time, validates the
-protected image/hash, and returns the creation time in its capture
-acknowledgement. The helper independently reads creation time from its original
-native process handle and requires an exact match before validating the
-relay image and containment job, closing its sole
-`PROCESS_CREATE_PROCESS` handle and emitting a distinct ready marker. The runner
-revalidates the exact Station SCM binding, retained PID, creation time,
-liveness, image/hash and job membership, then revalidates the complete immutable helper
-inventory and ACLs, restores and bytewise revalidates the original Station
-process DACL, creates the control pipe, and only then acknowledges resume. Consequently
-neither the temporary ACE nor an already-open creation handle spans the
-impersonated test action.
-The PID-opened runner handle remains provisional until that ready marker, or a
-bounded helper result containing the independently bound creation time,
-confirms the same process object. Before confirmation the runner never
-terminates through that handle; it closes the provisional handle and relies on
-closure of the helper-owned, non-inheritable kill-on-close job to terminate the
-actual relay.
+The only source-process capability acquired for relay creation is a
+non-inheritable `PROCESS_CREATE_PROCESS` handle. `CompareObjectHandles` must
+prove that it refers to the same kernel process object as the already-retained
+Station handle; access denial or comparison failure stops the E2E. The runner
+passes this handle only to
+`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` while creating the fixed relay
+suspended. The same `STARTUPINFOEX` supplies a private job through
+`PROC_THREAD_ATTRIBUTE_JOB_LIST`, atomically containing the relay before its
+only thread can run. The job is non-inheritable, kill-on-close and limited to
+one active process. The relay process object's protected DACL grants the runner
+only terminate, query and synchronize rights for later opens. The runner retains
+the exact native process handle returned by creation. The create-only Station
+handle is closed immediately after `CreateProcess` returns, before relay
+validation, resume, pipe impersonation or the protected test action.
 
-Running under the inherited identity, the relay proves primary restricted
-LocalService, the service-logon SID, no Administrators group, and the exact
-Station SID enabled in the normal group set and present in the restricted SID
-set. It then opens the
-frozen Agent image by canonical non-reparse handle, verifies both executable
-hashes, and connects to a random single-instance control pipe whose protected
-DACL grants the Station SID only read/write/synchronize client rights. The runner
-uses `GetNamedPipeClientProcessId` and requires that pipe client to equal the
-already authenticated, retained relay PID before reading the 256-bit nonce.
-`RunAsClient` independently revalidates the Station identity, and an exact
-one-byte receipt completes the protocol.
+While the relay remains suspended, the runner binds its retained handle to the
+exact PID and creation time, validates the canonical Test Relay image and hash,
+and verifies membership in the exact private job. It then repeats the Station
+SCM/PID/time/image/hash/job checks and the complete bridge inventory and ACL
+checks. Only after those facts remain stable is the relay resumed.
 
-The helper's unique kill-on-close job removes the relay even if the helper is
-terminated. Normal and failure cleanup still retain exact process handles,
-terminate and wait only those PIDs, delete and await deletion of the helper
-service, restore and revalidate the original Station process DACL, and delete the
-bridge tree. A gate hard-fails if any termination or restoration proof is
-missing. The runner and helper never open or modify the Station token; the relay
-queries only its non-transferable current-process token pseudo-handle to prove
-identity, and no token handle crosses a process boundary. No arbitrary command
-is accepted, and no debug
-privilege or LocalSystem broker is used. The helper binary is
-rejected from every deployable release artifact; only its buildable test source
-may appear in the source archive. The bounded result binds the source and relay
-PIDs, relay creation time, validation flags, finite failure reason, and optional
-numeric Win32 error; it never serializes exception text, tokens, or credentials.
+Running with the parent Station identity supplied by Windows, the relay uses
+only its non-transferable current-process token pseudo-handle to prove a primary,
+unlinked, restricted `NT AUTHORITY\LocalService` token with no Administrators
+SID, the enabled service-logon SID, and the exact Station SID both enabled in
+`TokenGroups` and present in `TokenRestrictedSids`. It opens the frozen Agent
+and Test Relay executables by canonical non-reparse file handles and verifies
+their SHA-256 values. The relay then connects to a random, single-instance
+control pipe whose protected DACL grants only the exact Station SID
+read/write/synchronize client rights.
+
+The runner uses `GetNamedPipeClientProcessId` to bind that connection to the
+retained relay PID, verifies the exact Station identity through `RunAsClient`,
+and requires the request's 256-bit nonce. The protected test action runs only
+under that independently revalidated impersonated identity. One exact `0xA5`
+receipt completes the relay protocol; the relay repeats its token and image
+checks before exiting, and any captured test-action failure is then rethrown.
+A successful protocol revalidates the frozen bundle and ACL before removal. On
+every path the runner terminates and waits the exact one-process job when
+needed, treats an unproven cleanup as failure, and removes the bridge tree.
+
+This boundary never opens, duplicates, copies or exports a Station token; reads
+or changes a token DACL; reads or changes the Station process DACL; enables
+`SeDebugPrivilege`; uses handle inheritance, breakaway, a LocalSystem broker or
+an arbitrary command; or falls back to a broader access mask or alternate
+protocol. The Test Relay executable and its test-only staging directory are
+rejected from every deployable release artifact. Only its buildable source may
+appear in the source archive.
 
 ## Station-local IPC
 

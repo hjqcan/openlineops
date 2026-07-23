@@ -3,7 +3,7 @@ using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Security.Principal;
 
-namespace OpenLineOps.WindowsServiceToken.TestHelper;
+namespace OpenLineOps.WindowsServiceToken.TestRelay;
 
 [SupportedOSPlatform("windows")]
 internal static class SourceTokenRelayOperation
@@ -14,7 +14,7 @@ internal static class SourceTokenRelayOperation
 
     public static async Task<int> ExecuteAsync(string requestPath)
     {
-        var request = TokenTransferProtocol.ReadRelayRequest(requestPath);
+        var request = RelayProtocol.ReadRequest(requestPath);
         if (!string.Equals(
                 request.RequestPath,
                 requestPath,
@@ -52,46 +52,48 @@ internal static class SourceTokenRelayOperation
 
         WindowsNative.ValidateCurrentSourceToken(request.ExpectedSourceServiceSid);
         ValidateCurrentRelayExecutable(request);
+        ValidateSourceExecutableFile(request);
         return 0;
     }
 
     private static void ValidateCurrentRelayExecutable(
-        WindowsServiceTokenTransferRequest request)
+        SourceTokenRelayRequest request)
     {
         var processPath = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(processPath)
             || !string.Equals(
                 Path.GetFullPath(processPath),
-                request.HelperExecutablePath,
+                request.RelayExecutablePath,
                 StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidDataException(
-                "The source-token relay is not executing the fixed helper image from its protected bundle.");
+                "The source-token relay is not executing the fixed image from its protected bundle.");
         }
 
         using var stream = new FileStream(
-            request.HelperExecutablePath,
+            request.RelayExecutablePath,
             FileMode.Open,
             FileAccess.Read,
             FileShare.Read | FileShare.Delete,
             128 * 1024,
             FileOptions.SequentialScan);
-        WindowsNative.ValidateCanonicalSourceExecutableHandle(
+        WindowsNative.ValidateCanonicalExecutableHandle(
             stream.SafeFileHandle,
-            request.HelperExecutablePath);
+            request.RelayExecutablePath,
+            "relay");
         var actualSha256 = Convert.ToHexStringLower(SHA256.HashData(stream));
         if (!string.Equals(
                 actualSha256,
-                request.HelperExecutableSha256,
+                request.RelayExecutableSha256,
                 StringComparison.Ordinal))
         {
             throw new InvalidDataException(
-                "The source-token relay helper image hash differs from its protected request.");
+                "The source-token relay image hash differs from its protected request.");
         }
     }
 
     private static void ValidateSourceExecutableFile(
-        WindowsServiceTokenTransferRequest request)
+        SourceTokenRelayRequest request)
     {
         using var stream = new FileStream(
             request.SourceExecutablePath,
@@ -100,9 +102,10 @@ internal static class SourceTokenRelayOperation
             FileShare.Read | FileShare.Delete,
             128 * 1024,
             FileOptions.SequentialScan);
-        WindowsNative.ValidateCanonicalSourceExecutableHandle(
+        WindowsNative.ValidateCanonicalExecutableHandle(
             stream.SafeFileHandle,
-            request.SourceExecutablePath);
+            request.SourceExecutablePath,
+            "source Station");
         var actualSha256 = Convert.ToHexStringLower(SHA256.HashData(stream));
         if (!string.Equals(
                 actualSha256,
