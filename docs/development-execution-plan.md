@@ -249,9 +249,12 @@ also enumerating the same virtual-account SID as a duplicate `TokenGroups`
 entry. The SERVICE well-known SID `S-1-5-6` remains enabled and the helper SID
 must be absent from `TokenRestrictedSids`.
 Before any Station capability exists, a minimal-rights coordination pipe binds
-that exact account SID to the exact SCM helper PID and protected helper hash. A
-scoped leading process-object lease then grants only that SID
-`PROCESS_CREATE_PROCESS` on the exact retained Station PID. This deliberate
+that exact account SID to the exact SCM helper PID and protected helper hash.
+The pipe permits identification, not impersonated resource access. A scoped
+leading process-object lease then grants only that SID
+`PROCESS_CREATE_PROCESS` on the exact retained Station PID, and only the fixed
+helper's primary token proves the temporary capability by opening that process.
+This deliberate
 short-lived exact-SID exception precedes any broader deny ACE without changing
 or removing the original entries; the original DACL is restored byte-for-byte.
 The runner alone validates the Station SCM binding, retained PID, creation time,
