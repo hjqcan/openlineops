@@ -264,10 +264,11 @@ Test Relay suspended through
 `PROC_THREAD_ATTRIBUTE_JOB_LIST` atomically assigns a private, non-inheritable,
 kill-on-close job with an active-process limit of one. The source process being
 in another job is rejected instead of relying on breakaway behavior. The
-relay explicitly uses the empty desktop selector so Windows binds its
-`USER32`-dependent apphost and CoreCLR to the noninteractive window
-station/desktop selected from the inherited LocalService logon session, never
-the interactive test runner's desktop. The create-only Station handle is closed
+relay explicitly binds `Service-0x0-3e5$\Default`, the LocalService
+noninteractive desktop, so its `USER32`-dependent apphost and CoreCLR never use
+the interactive test runner's desktop. Empty, inherited and interactive desktop
+selectors are rejected, and the source Station plus suspended and running relay
+must all remain in Session 0. The create-only Station handle is closed
 immediately when native creation returns, before relay validation, resume, pipe
 impersonation, or any test action.
 

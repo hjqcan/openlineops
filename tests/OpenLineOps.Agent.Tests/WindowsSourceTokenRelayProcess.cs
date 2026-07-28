@@ -25,6 +25,7 @@ internal sealed record WindowsSourceTokenRelayRequest(
 [SupportedOSPlatform("windows")]
 internal sealed class WindowsSourceTokenRelayProcess : IDisposable
 {
+    private const string LocalServiceDesktop = @"Service-0x0-3e5$\Default";
     private const uint CreateNoWindow = 0x08000000;
     private const uint CreateSuspendedFlag = 0x00000004;
     private const uint CreateUnicodeEnvironment = 0x00000400;
@@ -101,7 +102,7 @@ internal sealed class WindowsSourceTokenRelayProcess : IDisposable
                 StartupInfo = new StartupInfo
                 {
                     Size = checked((uint)Marshal.SizeOf<StartupInfoEx>()),
-                    Desktop = string.Empty
+                    Desktop = LocalServiceDesktop
                 },
                 AttributeList = attributes.Handle
             };

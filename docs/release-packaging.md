@@ -182,7 +182,10 @@ leak, and the Test Relay project is neither packable nor publishable. The
 test-only runner creates it directly from a fully validated Station parent with
 `PROCESS_CREATE_PROCESS`, `CompareObjectHandles`,
 `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` and a private
-`PROC_THREAD_ATTRIBUTE_JOB_LIST`; no Test Relay executable belongs to a release
+`PROC_THREAD_ATTRIBUTE_JOB_LIST`. It binds the verified Session-0 LocalService
+parent to `Service-0x0-3e5$\Default` instead of inheriting or automatically
+selecting a desktop; the source Station, suspended relay and running relay must
+all remain in Session 0. No Test Relay executable belongs to a release
 candidate. The handle comparison import is pinned to the documented
 `Kernelbase.dll` runtime module and is exercised by the Windows contract suite
 before any staged service scenario.

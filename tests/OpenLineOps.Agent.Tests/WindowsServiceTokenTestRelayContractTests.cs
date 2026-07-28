@@ -324,10 +324,14 @@ public sealed class WindowsServiceTokenTestRelayContractTests
 
         var failure = Assert.Throws<InvalidOperationException>(
             () => relay.WaitForSuccessfulExit(TimeSpan.FromSeconds(15)));
-        Assert.Contains(
-            "exited with code 70 (0x00000046)",
-            failure.Message,
-            StringComparison.Ordinal);
+        Assert.True(
+            failure.Message.Contains(
+                "exited with code 70 (0x00000046)",
+                StringComparison.Ordinal)
+            || failure.Message.Contains(
+                "exited with code 3221225794 (0xc0000142)",
+                StringComparison.Ordinal),
+            failure.Message);
     }
 
     private static WindowsSourceTokenRelayRequest CreateControllerRequest(

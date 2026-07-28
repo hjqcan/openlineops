@@ -64,16 +64,17 @@ comparison failure stops the E2E. The runner passes this handle only to
 suspended. The same `STARTUPINFOEX` supplies a private job through
 `PROC_THREAD_ATTRIBUTE_JOB_LIST`, atomically containing the relay before its
 only thread can run. The job is non-inheritable, kill-on-close and limited to
-one active process. Its desktop field is the explicit empty string, which
-prevents the interactive test runner's desktop from being inherited and makes
-Windows select the noninteractive window station and desktop for the inherited
-LocalService logon session. This keeps the relay apphost and CoreCLR `USER32`
-initialization inside the same token/session boundary before managed code can
-run. The relay process object's protected DACL grants the runner only terminate,
-query and synchronize rights for later opens. The runner retains the exact
-native process handle returned by creation. The create-only Station handle is
-closed immediately after `CreateProcess` returns, before relay validation,
-resume, pipe impersonation or the protected test action.
+one active process. Its desktop field explicitly names the LocalService
+noninteractive desktop `Service-0x0-3e5$\Default`; an empty selector is
+forbidden because Windows would choose a desktop rather than bind the SCM
+service desktop. The bridge proves that both the source Station and suspended
+and running relay remain in Session 0. This keeps the relay apphost and CoreCLR
+`USER32` initialization inside the same token/session/desktop boundary before
+managed code can run. The relay process object's protected DACL grants the
+runner only terminate, query and synchronize rights for later opens. The runner
+retains the exact native process handle returned by creation. The create-only
+Station handle is closed immediately after `CreateProcess` returns, before
+relay validation, resume, pipe impersonation or the protected test action.
 
 While the relay remains suspended, the runner binds its retained handle to the
 exact PID and creation time, validates the canonical Test Relay image and hash,

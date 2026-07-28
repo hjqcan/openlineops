@@ -290,7 +290,8 @@ foreach ($controllerLiteral in @(
         "CreateSuspendedFlag",
         "CreateUnicodeEnvironment",
         "ExtendedStartupInfoPresent",
-        "Desktop = string.Empty",
+        'private const string LocalServiceDesktop = @"Service-0x0-3e5$\Default";',
+        "Desktop = LocalServiceDesktop",
         "inheritHandles: false",
         "ProcessSecurityDescriptor(runnerSid)",
         "ProcessTerminate | ProcessQueryLimitedInformation | Synchronize",
@@ -305,7 +306,7 @@ foreach ($controllerLiteral in @(
     Assert-ContainsLiteral $relayController $controllerLiteral "The direct Test Relay controller is missing containment boundary '$controllerLiteral'."
 }
 Assert-ForbiddenPattern $relayController 'CREATE_BREAKAWAY_FROM_JOB|CreateBreakawayFromJob|Process\.GetProcessById|OpenProcess\(|WellKnownSidType|BuiltinAdministrators|LocalSystemSid' "The direct Test Relay controller contains breakaway, PID reopen, fallback, or an over-broad process DACL."
-Assert-ForbiddenPattern $relayController 'Desktop\s*=\s*(?:null|@?\"WinSta0)' "The direct Test Relay controller must not inherit or select an interactive desktop."
+Assert-ForbiddenPattern $relayController 'Desktop\s*=\s*(?:null|string\.Empty|@?""|@?"WinSta0)' "The direct Test Relay controller must bind only the explicit LocalService service desktop."
 if ([regex]::Matches($relayController, [regex]::Escape("CreateProcess(")).Count -ne 2) {
     throw "The direct Test Relay controller must contain one CreateProcess call and one P/Invoke declaration."
 }
@@ -419,9 +420,17 @@ foreach ($documentationLiteral in @(
         "PROCESS_CREATE_PROCESS",
         "CompareObjectHandles",
         "PROC_THREAD_ATTRIBUTE_PARENT_PROCESS",
-        "PROC_THREAD_ATTRIBUTE_JOB_LIST")) {
+        "PROC_THREAD_ATTRIBUTE_JOB_LIST",
+        'Service-0x0-3e5$\Default')) {
     Assert-ContainsLiteral $security $documentationLiteral "Station security documentation is missing direct relay boundary '$documentationLiteral'."
     Assert-ContainsLiteral $release $documentationLiteral "Release documentation is missing direct relay boundary '$documentationLiteral'."
+}
+foreach ($bridgeSessionLiteral in @(
+        "ProcessIdToSessionId",
+        'ValidateSessionZero(sourceProcessId, "source Station")',
+        '"suspended source-token relay"',
+        '"running source-token relay"')) {
+    Assert-ContainsLiteral $relayBridge $bridgeSessionLiteral "The direct bridge is missing Session-0 binding '$bridgeSessionLiteral'."
 }
 Assert-ForbiddenPattern $security 'one-shot virtual service|temporary process DACL|WindowsProcessAccessLease|WindowsKernelObjectAccessLease|OpenLineOps\.WindowsServiceToken\.TestHelper' "Station security documentation retains the retired helper-service/source-DACL design."
 Assert-ForbiddenPattern $release 'one-shot virtual service|temporary process DACL|WindowsProcessAccessLease|WindowsKernelObjectAccessLease|OpenLineOps\.WindowsServiceToken\.TestHelper' "Release documentation retains the retired helper-service/source-DACL design."

@@ -224,6 +224,9 @@ internal static class WindowsServiceTokenTestBridge
             }
 
             relay.ValidateCreated(request);
+            ValidateSessionZero(
+                relay.ProcessId,
+                "suspended source-token relay");
             ValidateSourceServiceAndProcessRunning(
                 manager,
                 canonicalSourceServiceName,
@@ -243,6 +246,9 @@ internal static class WindowsServiceTokenTestBridge
             relay.Resume();
             WaitForRelayConnection(controlPipe, relay);
             relay.ValidateRunning(request);
+            ValidateSessionZero(
+                relay.ProcessId,
+                "running source-token relay");
             ValidateRelayControlClient(
                 controlPipe,
                 relay.ProcessId,
@@ -954,11 +960,28 @@ internal static class WindowsServiceTokenTestBridge
                 $"Source Station service '{sourceServiceName}' is not Running as exact own-process PID {sourceProcessId}.");
         }
 
+        ValidateSessionZero(sourceProcessId, "source Station");
         ValidateExactProcessHandle(
             retainedSourceProcess,
             sourceProcessId,
             expectedCreatedAtUtcTicks,
             "retained source Station");
+    }
+
+    private static void ValidateSessionZero(uint processId, string role)
+    {
+        if (!ProcessIdToSessionId(processId, out var sessionId))
+        {
+            var error = Marshal.GetLastPInvokeError();
+            throw new Win32Exception(
+                error,
+                $"Could not read {role} PID {processId} session; Win32 error {error}.");
+        }
+        if (sessionId != 0)
+        {
+            throw new InvalidOperationException(
+                $"{role} PID {processId} belongs to interactive session {sessionId}, not service session 0.");
+        }
     }
 
     internal static void ValidateExactProcessHandle(
@@ -1319,6 +1342,12 @@ internal static class WindowsServiceTokenTestBridge
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint GetProcessId(SafeProcessHandle process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ProcessIdToSessionId(
+        uint processId,
+        out uint sessionId);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(
