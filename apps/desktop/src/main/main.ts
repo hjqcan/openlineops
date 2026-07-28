@@ -73,6 +73,9 @@ import {
   bindActiveProjectStartupWorkspace,
   resolveActiveProjectFile
 } from './backend-project-session.js';
+import {
+  DesktopCloseRequestCoordinator
+} from './desktop-close-request-coordinator.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -81,15 +84,16 @@ let mainWindow: BrowserWindow | null = null;
 let backendProcess: ChildProcessWithoutNullStreams | null = null;
 let backendStartedAtUtc: string | null = null;
 let lastExitCode: number | null = null;
-let closeRequestSequence = 0;
-let pendingCloseRequestId: number | null = null;
-let closeApproved = false;
+let pendingCloseWindow: BrowserWindow | null = null;
+let approvedCloseRequest: { requestId: number; window: BrowserWindow } | null = null;
 let trustedRendererDocumentUrl: string | null = null;
 let activeBackendSession: ActiveBackendSession | null = null;
 let backendStartPromise: Promise<BackendStatus> | null = null;
 let pendingHandshakePath: string | null = null;
 let activeProjectFilePath: string | null = null;
 let backendStatusSequence = 0;
+let applicationQuitting = false;
+const closeRequestCoordinator = new DesktopCloseRequestCoordinator();
 const recentLogs: string[] = [];
 
 const ownsPrimaryInstance = app.requestSingleInstanceLock();
@@ -611,7 +615,7 @@ async function createWindow(): Promise<void> {
     await waitForTrustedDevRenderer(candidateRendererUrl, rendererNonce);
     trustedRendererDocumentUrl = candidateRendererUrl;
   }
-  mainWindow = new BrowserWindow({
+  const ownedWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 1180,
@@ -625,6 +629,7 @@ async function createWindow(): Promise<void> {
       sandbox: true
     }
   });
+  mainWindow = ownedWindow;
 
   const preventUntrustedNavigation = (event: Electron.Event, navigationUrl: string): void => {
     if (!trustedRendererDocumentUrl
@@ -632,33 +637,144 @@ async function createWindow(): Promise<void> {
       event.preventDefault();
     }
   };
-  mainWindow.webContents.on('will-navigate', preventUntrustedNavigation);
-  mainWindow.webContents.on('will-redirect', preventUntrustedNavigation);
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  ownedWindow.webContents.on('will-navigate', preventUntrustedNavigation);
+  ownedWindow.webContents.on('will-redirect', preventUntrustedNavigation);
+  let rendererRecoveryPrompt: Promise<void> | null = null;
+  const releaseOwnedCloseRequest = (): void => {
+    if (pendingCloseWindow === ownedWindow) {
+      closeRequestCoordinator.reset();
+      pendingCloseWindow = null;
+    }
+    if (approvedCloseRequest?.window === ownedWindow) {
+      approvedCloseRequest = null;
+    }
+  };
+  const runRendererRecoveryPrompt = (
+    action: () => Promise<void>
+  ): void => {
+    if (rendererRecoveryPrompt
+        || applicationQuitting
+        || ownedWindow.isDestroyed()) {
+      return;
+    }
+    rendererRecoveryPrompt = action()
+      .catch(error => {
+        appendLog(`Renderer recovery prompt failed: ${
+          error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        rendererRecoveryPrompt = null;
+      });
+  };
+  ownedWindow.webContents.on('unresponsive', () => {
+    runRendererRecoveryPrompt(async () => {
+      const result = await dialog.showMessageBox(ownedWindow, {
+        type: 'warning',
+        title: 'OpenLineOps is not responding',
+        message: 'The Studio editor is not responding.',
+        detail: 'Wait to preserve in-memory work. Force Close may lose unsaved editor changes.',
+        buttons: ['Wait', 'Force Close'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true
+      });
+      if (result.response !== 1
+          || applicationQuitting
+          || ownedWindow.isDestroyed()) {
+        return;
+      }
+      releaseOwnedCloseRequest();
+      ownedWindow.destroy();
+    });
+  });
+  ownedWindow.webContents.on('render-process-gone', (_event, details) => {
+    releaseOwnedCloseRequest();
+    appendLog(`Renderer process exited (${details.reason}); a pending close request was released.`);
+    if (details.reason === 'clean-exit') {
+      return;
+    }
+    runRendererRecoveryPrompt(async () => {
+      const result = await dialog.showMessageBox(ownedWindow, {
+        type: 'error',
+        title: 'OpenLineOps renderer stopped',
+        message: 'The Studio editor process stopped unexpectedly.',
+        detail: 'Reload Studio to reconnect to the current backend. Closing may lose unsaved in-memory changes.',
+        buttons: ['Reload Studio', 'Close Studio'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true
+      });
+      if (applicationQuitting || ownedWindow.isDestroyed()) {
+        return;
+      }
+      if (result.response === 0) {
+        ownedWindow.webContents.reload();
+        return;
+      }
+      ownedWindow.destroy();
+    });
+  });
+  ownedWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
-  mainWindow.on('close', event => {
-    if (closeApproved || !mainWindow || mainWindow.webContents.isDestroyed()) {
+  ownedWindow.on('close', event => {
+    if (ownedWindow.webContents.isDestroyed()) {
+      appendLog('Desktop close bypassed renderer coordination because its WebContents is destroyed.');
+      return;
+    }
+    if (approvedCloseRequest?.window === ownedWindow) {
+      appendLog(`Desktop close request ${approvedCloseRequest.requestId} consumed its one-shot approval.`);
+      approvedCloseRequest = null;
       return;
     }
     event.preventDefault();
-    if (pendingCloseRequestId !== null) {
+    const requestId = closeRequestCoordinator.request(expiredRequestId => {
+      appendLog(`Desktop close request ${expiredRequestId} expired; the window remains open for retry.`);
+      if (pendingCloseWindow === ownedWindow) {
+        pendingCloseWindow = null;
+      }
+      if (!ownedWindow.isDestroyed() && !ownedWindow.webContents.isDestroyed()) {
+        try {
+          ownedWindow.webContents.send('desktop:close-request-expired', expiredRequestId);
+        } catch (error) {
+          appendLog(`Desktop close expiry notification ${expiredRequestId} failed: ${
+            error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    });
+    if (requestId === null) {
+      appendLog('Desktop close ignored because a renderer decision is already pending.');
       return;
     }
-    pendingCloseRequestId = ++closeRequestSequence;
-    mainWindow.webContents.send('desktop:close-requested', pendingCloseRequestId);
+    pendingCloseWindow = ownedWindow;
+    appendLog(`Desktop close request ${requestId} sent to the renderer.`);
+    try {
+      ownedWindow.webContents.send('desktop:close-requested', requestId);
+    } catch (error) {
+      closeRequestCoordinator.reset();
+      pendingCloseWindow = null;
+      appendLog(`Desktop close request ${requestId} could not reach the renderer: ${
+        error instanceof Error ? error.message : String(error)}`);
+    }
   });
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-    pendingCloseRequestId = null;
-    closeApproved = false;
+  ownedWindow.on('closed', () => {
+    if (pendingCloseWindow === ownedWindow) {
+      closeRequestCoordinator.reset();
+      pendingCloseWindow = null;
+    }
+    if (approvedCloseRequest?.window === ownedWindow) {
+      approvedCloseRequest = null;
+    }
+    if (mainWindow === ownedWindow) {
+      mainWindow = null;
+    }
   });
 
   if (!app.isPackaged) {
-    await mainWindow.loadURL(trustedRendererDocumentUrl);
+    await ownedWindow.loadURL(trustedRendererDocumentUrl);
     return;
   }
 
-  await mainWindow.loadFile(packagedRendererPath);
+  await ownedWindow.loadFile(packagedRendererPath);
 }
 
 async function waitForTrustedDevRenderer(rendererUrl: string, nonce: string): Promise<void> {
@@ -711,23 +827,53 @@ ipcMain.handle('desktop:set-active-project-file', (event, projectFilePath: strin
   assertTrustedRendererIpcSender(event);
   activeProjectFilePath = resolveActiveProjectFile(projectFilePath);
 });
+ipcMain.on('desktop:close-request-acknowledged', (event, requestId: number) => {
+  try {
+    assertTrustedRendererIpcSender(event);
+  } catch {
+    return;
+  }
+  if (!Number.isSafeInteger(requestId)
+      || requestId <= 0
+      || !pendingCloseWindow
+      || event.sender !== pendingCloseWindow.webContents) {
+    return;
+  }
+  if (closeRequestCoordinator.acknowledge(requestId)) {
+    appendLog(`Desktop close request ${requestId} acknowledged by the renderer.`);
+  }
+});
 ipcMain.on('desktop:close-response', (event, requestId: number, allowClose: boolean) => {
   try {
     assertTrustedRendererIpcSender(event);
   } catch {
     return;
   }
-  if (!mainWindow
-      || event.sender !== mainWindow.webContents
-      || requestId !== pendingCloseRequestId) {
+  const windowToClose = pendingCloseWindow;
+  if (!Number.isSafeInteger(requestId)
+      || requestId <= 0
+      || typeof allowClose !== 'boolean'
+      || !windowToClose
+      || event.sender !== windowToClose.webContents
+      || !closeRequestCoordinator.complete(requestId)) {
     return;
   }
-  pendingCloseRequestId = null;
+  pendingCloseWindow = null;
+  appendLog(`Desktop close request ${requestId} completed with allowClose=${allowClose}.`);
   if (!allowClose) {
     return;
   }
-  closeApproved = true;
-  mainWindow.close();
+  approvedCloseRequest = { requestId, window: windowToClose };
+  try {
+    windowToClose.close();
+  } catch (error) {
+    if (approvedCloseRequest?.requestId === requestId
+        && approvedCloseRequest.window === windowToClose) {
+      approvedCloseRequest = null;
+    }
+    appendLog(`Approved desktop close request ${requestId} failed: ${
+      error instanceof Error ? error.message : String(error)}`);
+  }
 });
 
 async function startBackend(): Promise<BackendStatus> {
@@ -1239,6 +1385,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  applicationQuitting = true;
   const child = backendProcess;
   clearBackendSession(child ?? undefined);
   backendProcess = null;

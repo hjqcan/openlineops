@@ -182,7 +182,7 @@ test('workbench locks the complete editor and rejects reentrant saves before a d
 test('conflict reload and overwrite stay disabled and guarded while either action is running', () => {
   assert.match(reloadResourceSource, /if \(!beginOperation\('Reload'\)\)[\s\S]*?try \{[\s\S]*?loadExternalProgramResourceCore[\s\S]*?finally \{\s*endOperation\(\)/u);
   assert.doesNotMatch(reloadResourceSource, /await loadResource\(/u);
-  assert.match(workbenchSource, /useEditorDocument\(\{\s*dirty: draft\.dirty,\s*editRevision: draft,\s*busy: busy \|\| resourceLoading,/u);
+  assert.match(workbenchSource, /useEditorDocument\(\{\s*dirty: draft\.dirty,\s*editRevision: draft,\s*busy: busy \|\| resourceLoading \|\| draftTransitionGuard\.state\.pending !== null,/u);
   assert.match(editorWorkspaceSource, /const actionsDisabled = document\.saving \|\| document\.busy/u);
   assert.equal((editorWorkspaceSource.match(/disabled=\{actionsDisabled\}/gu) ?? []).length, 2);
   assert.equal((editorWorkspaceSource.match(/\.catch\(\(\) => undefined\)/gu) ?? []).length >= 2, true);

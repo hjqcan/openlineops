@@ -1174,6 +1174,7 @@ export function TopologyDesigner({
   useEditorDocument({
     dirty: documentDirty,
     editRevision: draftEditRevision,
+    busy,
     canSave: editable,
     save: savePendingEdits,
     revert: revertPendingEdits,

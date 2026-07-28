@@ -355,6 +355,12 @@ $cases = @(
         ExpectedFailure = "trusted main-process ZIP selection"
     },
     [pscustomobject]@{
+        Name = "Desktop close coordination gate"
+        Search = "      - name: Test desktop close coordination`n        working-directory: apps/desktop`n        run: npm run test:desktop-close`n"
+        Replacement = ""
+        ExpectedFailure = "exact-window close acknowledgement, editor waiting, draft decisions, timeout recovery, and stale-request rejection"
+    },
+    [pscustomobject]@{
         Name = "External program directory import gate"
         Search = "npm run test:external-program-directory-import"
         Replacement = "npm run test:trace-artifact-save"

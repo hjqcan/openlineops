@@ -631,6 +631,7 @@ export function EngineeringWorkbench({
   useEditorDocument({
     dirty: draftDirty,
     editRevision: draft,
+    busy,
     canSave: canSaveSource && sourceProblems.length === 0,
     save: saveEngineeringSource,
     revert: revertDraft,

@@ -822,6 +822,7 @@ export function ProcessWorkbench({
   useEditorDocument({
     dirty: draft.dirty,
     editRevision: draft,
+    busy,
     canSave: isBackendHealthy && !busy && !isLoadedDefinitionReadOnly,
     save: () => saveDraft(),
     revert: reloadDraft,

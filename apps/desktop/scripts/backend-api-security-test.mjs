@@ -245,6 +245,7 @@ test('main process applies navigation, window-open, redirect, and every IPC send
     'backend:get-status',
     'backend:start',
     'backend:stop',
+    'desktop:close-request-acknowledged',
     'desktop:close-response',
     'desktop:get-config',
     'desktop:release-external-program-directory-selection',
@@ -274,7 +275,7 @@ test('main process applies navigation, window-open, redirect, and every IPC send
     /event\.senderFrame\?\.url[\s\S]*?event\.sender\.getURL\(\)[\s\S]*?isTrustedRendererIpcContext/);
   assert.ok(
     mainSource.indexOf('await waitForTrustedDevRenderer')
-      < mainSource.indexOf('mainWindow = new BrowserWindow'),
+      < mainSource.indexOf('const ownedWindow = new BrowserWindow'),
     'development renderer proof must succeed before privileged preload creation');
 });
 

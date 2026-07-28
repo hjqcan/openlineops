@@ -322,6 +322,10 @@ Test-ContentContains `
     -Message "Workflow must reject external API credential creation and verify private ACLs before credential reads."
 Test-ContentContains `
     -Content $workflowContent `
+    -Pattern '(?ms)^\s{6}- name:\s*Test desktop close coordination\s*\r?\n\s*working-directory:\s*apps/desktop\s*\r?\n\s*run:\s*npm run test:desktop-close\s*$' `
+    -Message "Workflow must verify exact-window close acknowledgement, editor waiting, draft decisions, timeout recovery, and stale-request rejection."
+Test-ContentContains `
+    -Content $workflowContent `
     -Pattern "npm run test:extension-import-security" `
     -Message "Workflow must verify that Application extension imports accept only a trusted main-process ZIP selection."
 Test-ContentContains `

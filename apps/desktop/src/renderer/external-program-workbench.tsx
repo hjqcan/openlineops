@@ -488,10 +488,16 @@ export function ExternalProgramWorkbench({
     });
     return problems;
   }, [draft, pendingDirectory, productionInputKeys]);
+  const draftTransitionGuard = useDraftTransitionGuard({
+    dirty: draft.dirty,
+    canSave: isBackendHealthy && !busy && !resourceLoading && editorProblems.length === 0,
+    save: () => save(),
+    onError: onMessage
+  });
   useEditorDocument({
     dirty: draft.dirty,
     editRevision: draft,
-    busy: busy || resourceLoading,
+    busy: busy || resourceLoading || draftTransitionGuard.state.pending !== null,
     canSave: isBackendHealthy && !busy && !resourceLoading && editorProblems.length === 0,
     save: () => save(),
     revert: reloadResource,
@@ -500,12 +506,6 @@ export function ExternalProgramWorkbench({
     },
     problems: editorProblems,
     conflict
-  });
-  const draftTransitionGuard = useDraftTransitionGuard({
-    dirty: draft.dirty,
-    canSave: isBackendHealthy && !busy && !resourceLoading && editorProblems.length === 0,
-    save: () => save(),
-    onError: onMessage
   });
   const currentDraftLabel = draft.displayName.trim()
     || draft.resourceId.trim()

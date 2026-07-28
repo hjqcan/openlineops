@@ -144,6 +144,7 @@ async function main() {
         ],
     {
       cwd: packagedMode ? path.dirname(packagedExecutable) : desktopRoot,
+      windowsHide: !packagedMode,
       env: packagedMode
         ? packagedElectronEnvironment(rendererNonce)
         : {
@@ -1656,11 +1657,15 @@ async function main() {
   }
 
   if (packagedMode) {
+    logSmokeMilestone('starting coordinated close and same-package restart');
     await assertPackagedRestartPersistence(
       `UNIT-${openedProject.projectId}`,
       rendererNonce);
+    logSmokeMilestone('same-package restart persistence passed');
     await assertBackendExitFailsClosed();
+    logSmokeMilestone('backend exit fail-closed behavior passed');
     await assertPackagedPrimaryTerminationStopsBackend();
+    logSmokeMilestone('primary-process death cleaned up the backend');
   } else {
     await assertBackendExitFailsClosed();
   }
@@ -1764,6 +1769,7 @@ async function assertPackagedRestartPersistence(productionUnitIdentityValue, ren
     packagedElectronArguments(restartCdpPort),
     {
       cwd: path.dirname(packagedExecutable),
+      windowsHide: false,
       env: packagedElectronEnvironment(rendererNonce)
     },
     'electron-restart');
@@ -1866,34 +1872,114 @@ async function closeElectronForPackagedRestart() {
   }
   const closingCdp = cdp;
   const closingProcess = electronProcess;
-  const stoppedBackend = await withTimeout(
-    evaluate('window.openlineopsDesktop.stopBackend()'),
+  await clickByTestId('nav-programs');
+  await waitForExpression(
+    '(() => Boolean(document.querySelector("[data-testid=\\"external-program-workbench\\"]"))'
+    + ' && document.querySelector("[data-testid=\\"external-program-display-name\\"]")?.disabled === false)()',
+    30000,
+    'Program Resource editor before the coordinated busy close');
+  await setInputByTestId(
+    'external-program-display-name',
+    `Busy close coordination ${Date.now().toString(36)}`);
+  await waitForExpression(
+    'Boolean(document.querySelector("[data-testid=\\"editor-tab-programs\\"] .editor-dirty-badge"))',
     15000,
-    'packaged backend process-tree stop before restart');
-  if (stoppedBackend.isRunning
-      || stoppedBackend.pid !== null
-      || stoppedBackend.apiBaseUrl !== null) {
+    'Program Resource editor to become dirty before its guarded transition');
+  await clickByTestId('refresh-external-program-resources');
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"external-program-draft-transition-dialog\\"]")?.open === true'
+    + ' && document.querySelector("[data-testid=\\"editor-tab-programs\\"]")?.getAttribute("aria-busy") === "true")()',
+    15000,
+    'Program Resource transition to hold a real busy editor');
+  const backendBeforeClose = await getBackendStatus();
+  if (!backendBeforeClose.isRunning
+      || backendBeforeClose.health !== 'Healthy'
+      || !Number.isSafeInteger(backendBeforeClose.pid)
+      || backendBeforeClose.pid <= 0) {
     throw new Error(
-      `Packaged backend did not confirm a complete stop before restart: ${JSON.stringify(stoppedBackend)}`);
+      `Packaged close coordination has no healthy backend identity: ${JSON.stringify(backendBeforeClose)}`);
   }
-  let closeRequestError = null;
+  await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  const closeReadiness = await evaluate(`(() => ({
+    dirtyEditorLabels: Array.from(document.querySelectorAll(
+      '[data-testid="editor-tab-strip"] [role="tab"]'
+    )).filter(tab => tab.querySelector('.editor-dirty-badge')).map(tab => tab.textContent?.trim() ?? ''),
+    busyEditorLabels: Array.from(document.querySelectorAll(
+      '[data-testid="editor-tab-strip"] [role="tab"][aria-busy="true"]'
+    )).map(tab => tab.textContent?.trim() ?? ''),
+    saveAllDisabled: document.querySelector('[data-testid="save-all-editors"]')?.disabled ?? null,
+    unsavedDialogOpen: document.querySelector('[data-testid="unsaved-changes-dialog"]')?.matches(':modal') ?? false,
+    resourceTransitionDialogOpen:
+      document.querySelector('[data-testid="external-program-draft-transition-dialog"]')?.open ?? false
+  }))()`);
+  if (closeReadiness.dirtyEditorLabels.length !== 1
+      || closeReadiness.busyEditorLabels.length !== 1
+      || closeReadiness.saveAllDisabled !== false
+      || closeReadiness.unsavedDialogOpen
+      || !closeReadiness.resourceTransitionDialogOpen) {
+    throw new Error(
+      `Packaged restart did not establish one real busy and dirty editor: ${
+        JSON.stringify(closeReadiness)}`);
+  }
+  logSmokeMilestone(
+    `coordinated close ready with Electron PID ${closingProcess.pid}`
+    + ` and backend PID ${backendBeforeClose.pid}`);
+  const nativeClose = await requestWindowsMainWindowClose(closingProcess.pid);
+  logSmokeMilestone(
+    `native close accepted for HWND ${nativeClose.windowHandle}`
+    + ` (${nativeClose.windowTitle || 'untitled'})`);
+  await waitForExpression(
+    '(() => {'
+    + ' const events = window.__openlineopsSmokeEvents ?? {};'
+    + ' return events["application-close-requested"] === 1'
+    + ' && events["application-close-acknowledged"] === 1'
+    + ' && events["application-close-waiting-for-editors"] >= 1'
+    + ' && !events["application-close-approved"]'
+    + ' && document.querySelector("[data-testid=\\"external-program-draft-transition-dialog\\"]")?.open === true'
+    + ' && document.body.innerText.includes("Closing will continue after the in-progress editor operation finishes");'
+    + ' })()',
+    15000,
+    'one acknowledged close request to wait on the busy Program Resource editor');
+  logSmokeMilestone('close request acknowledged and waiting for the busy editor');
+  let discardClickError = null;
   try {
-    await withTimeout(
-      closingCdp.send('Browser.close'),
-      5000,
-      'packaged Electron browser close before restart');
+    await clickByTestId('external-program-draft-transition-discard');
   } catch (error) {
-    closeRequestError = error;
-  } finally {
-    closingCdp.close();
-    cdp = undefined;
+    discardClickError = error;
   }
-  if (!await waitForChildExit(closingProcess, 15000)) {
+  const exited = await waitForChildExit(closingProcess, 15000);
+  let blockedCloseState = null;
+  if (!exited) {
+    blockedCloseState = await evaluate(`(() => ({
+      message: document.querySelector('.ide-bottom-panel-title > span')?.textContent?.trim() ?? null,
+      unsavedDialogText: document.querySelector('[data-testid="unsaved-changes-dialog"]')?.textContent?.trim() ?? null,
+      resourceTransitionDialogText:
+        document.querySelector('[data-testid="external-program-draft-transition-dialog"]')?.textContent?.trim() ?? null,
+      events: window.__openlineopsSmokeEvents ?? null
+    }))()`).catch(error => ({ diagnosticError: String(error) }));
+  }
+  closingCdp.close();
+  cdp = undefined;
+  if (!exited) {
     throw new Error(
       'Packaged Electron did not exit cleanly before same-package restart.'
-      + (closeRequestError ? ` Browser.close: ${String(closeRequestError)}` : ''));
+      + ` Close readiness: ${JSON.stringify(closeReadiness)}.`
+      + ` Blocked close state: ${JSON.stringify(blockedCloseState)}.`
+      + (discardClickError ? ` Discard transition: ${String(discardClickError)}` : ''));
   }
   electronProcess = undefined;
+  logSmokeMilestone('busy editor settled and the same close request exited Electron');
+  const backendExitDeadline = Date.now() + 20000;
+  while (Date.now() < backendExitDeadline
+      && await isWindowsProcessRunning(backendBeforeClose.pid)) {
+    await delay(100);
+  }
+  if (await isWindowsProcessRunning(backendBeforeClose.pid)) {
+    await killProcessTreeByPid(backendBeforeClose.pid).catch(() => undefined);
+    throw new Error(
+      `Backend PID ${backendBeforeClose.pid} survived the coordinated Studio close.`);
+  }
+  logSmokeMilestone(`coordinated close cleaned up backend PID ${backendBeforeClose.pid}`);
 }
 
 async function assertPackagedPrimaryTerminationStopsBackend() {
@@ -2554,6 +2640,86 @@ async function killProcessTreeByPid(pid) {
     child.once('exit', code => code === 0
       ? resolve()
       : reject(new Error(`taskkill failed with code ${code}: ${errorOutput.trim()}`)));
+  });
+}
+
+async function requestWindowsMainWindowClose(pid) {
+  if (process.platform !== 'win32') {
+    throw new Error('Packaged native-window close inspection requires Windows.');
+  }
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new Error(`Packaged Electron has no valid process identity: ${pid}`);
+  }
+  const powerShellHost = createWindowsPowerShellHost();
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      powerShellHost.executablePath,
+      [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        `$targetProcess = Get-Process -Id ${pid} -ErrorAction Stop; `
+        + '$targetProcess.Refresh(); '
+        + '$windowHandle = [Int64]$targetProcess.MainWindowHandle; '
+        + '$windowTitle = $targetProcess.MainWindowTitle; '
+        + '$accepted = $targetProcess.CloseMainWindow(); '
+        + '[Console]::Out.Write((ConvertTo-Json @{ '
+        + 'accepted = $accepted; windowHandle = $windowHandle; windowTitle = $windowTitle '
+        + '} -Compress)); '
+        + 'if (-not $accepted) { '
+        + `throw 'Process ${pid} did not accept a native close request.' }`
+      ],
+      {
+        env: powerShellHost.environment,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true
+      });
+    let settled = false;
+    let output = '';
+    let errorOutput = '';
+    const settle = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      if (error) {
+        reject(error);
+      } else {
+        try {
+          const result = JSON.parse(output);
+          if (result.accepted !== true
+              || !Number.isSafeInteger(result.windowHandle)
+              || result.windowHandle <= 0
+              || typeof result.windowTitle !== 'string') {
+            throw new Error(
+              `Native close returned an invalid window identity: ${output}`);
+          }
+          resolve(result);
+        } catch (parseError) {
+          reject(parseError);
+        }
+      }
+    };
+    const timeout = setTimeout(() => {
+      child.kill('SIGKILL');
+      settle(new Error(`Timed out requesting a native close for Electron PID ${pid}.`));
+    }, 5000);
+    child.stdout.on('data', chunk => {
+      output += chunk.toString();
+    });
+    child.stderr.on('data', chunk => {
+      errorOutput += chunk.toString();
+    });
+    child.once('error', settle);
+    child.once('exit', code => settle(code === 0
+      ? null
+      : new Error(
+          `Native close request for Electron PID ${pid} failed with code ${code}: ${
+            errorOutput.trim()}`)));
   });
 }
 
@@ -4031,7 +4197,7 @@ async function waitForHttp(url, timeoutMs, description) {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
   if (!response.ok) {
     throw new Error(`GET ${url} returned ${response.status}.`);
   }
@@ -4042,7 +4208,7 @@ async function fetchJson(url) {
 function spawnLogged(command, args, options, label) {
   const child = spawn(command, args, {
     ...options,
-    windowsHide: true,
+    windowsHide: options.windowsHide ?? true,
     stdio: ['ignore', 'pipe', 'pipe']
   });
 
@@ -4179,10 +4345,12 @@ async function cleanup() {
   await stopChild(electronProcess);
   await stopChild(previewProcess);
   if (apiSquatterServer) {
-    await new Promise((resolve, reject) => {
-      apiSquatterServer.close(error => error ? reject(error) : resolve());
-    });
+    const server = apiSquatterServer;
     apiSquatterServer = undefined;
+    await new Promise((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+      server.closeAllConnections();
+    });
   }
   for (const smokeProjectDirectory of new Set(smokeProjectDirectories)) {
     await fs.rm(smokeProjectDirectory, {
@@ -4204,6 +4372,10 @@ async function cleanup() {
     await sampleExtensionArchive.cleanup();
     sampleExtensionArchive = undefined;
   }
+}
+
+function logSmokeMilestone(message) {
+  console.log(`[smoke ${new Date().toISOString()}] ${message}`);
 }
 
 async function startApiSquatter() {
@@ -4280,11 +4452,22 @@ class CdpClient {
 
       socket.addEventListener('open', () => resolve(client), { once: true });
       socket.addEventListener('error', event => reject(event.error ?? new Error('CDP socket error.')), { once: true });
+      socket.addEventListener('error', event => {
+        client.rejectPending(event.error ?? new Error('CDP socket error.'));
+      });
+      socket.addEventListener('close', event => {
+        client.rejectPending(new Error(
+          `CDP socket closed with code ${event.code}${event.reason ? `: ${event.reason}` : '.'}`));
+      });
       socket.addEventListener('message', event => client.handleMessage(event.data));
     });
   }
 
   send(method, params = {}) {
+    if (this.socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error(
+        `Cannot send ${method}; the CDP socket is not open (state ${this.socket.readyState}).`));
+    }
     const id = this.nextId++;
     const payload = JSON.stringify({ id, method, params });
 
@@ -4295,14 +4478,18 @@ class CdpClient {
   }
 
   close() {
-    for (const pending of this.pending.values()) {
-      pending.reject(new Error('CDP socket closed.'));
-    }
-
-    this.pending.clear();
+    this.rejectPending(new Error('CDP socket closed.'));
     if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) {
       this.socket.close();
     }
+  }
+
+  rejectPending(error) {
+    for (const pending of this.pending.values()) {
+      pending.reject(error);
+    }
+
+    this.pending.clear();
   }
 
   handleMessage(data) {

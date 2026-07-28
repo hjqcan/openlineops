@@ -77,6 +77,15 @@ import {
   type EditorTabState
 } from './editor-workspace-model';
 import {
+  beginApplicationCloseRequest,
+  cancelApplicationClose,
+  evaluateApplicationClose,
+  expireApplicationCloseRequest,
+  idleApplicationCloseState,
+  resumeApplicationCloseAfterDraftHandling,
+  type ApplicationCloseState
+} from './application-close-coordinator';
+import {
   loadRuntimeMonitoringProjection,
   type RuntimeMonitoringProjection
 } from './runtime-monitoring-refresh-model';
@@ -132,11 +141,13 @@ interface ProductionRunFormState {
 }
 
 interface PendingUnsavedGuard {
+  guardId: number;
   title: string;
   detail: string;
   documentIds: ReadonlySet<string> | null;
   proceed(): void;
   cancel?(): void;
+  applicationCloseRequestId?: number;
 }
 
 const emptyProductionRunForm: ProductionRunFormState = {
@@ -178,8 +189,18 @@ function App(): React.ReactElement {
   const [pendingUnsavedGuard, setPendingUnsavedGuard] = useState<PendingUnsavedGuard | null>(null);
   const [unsavedGuardBusy, setUnsavedGuardBusy] = useState(false);
   const unsavedGuardPendingRef = useRef(false);
+  const pendingUnsavedGuardRef = useRef<PendingUnsavedGuard | null>(null);
+  const unsavedGuardSequenceRef = useRef(0);
   const unsavedGuardDialogRef = useRef<HTMLDialogElement>(null);
-  useDocumentRegistrySnapshot(documentRegistry);
+  const documentRegistryRevision = useDocumentRegistrySnapshot(documentRegistry);
+  const [applicationCloseState, setApplicationCloseState] =
+    useState<ApplicationCloseState>(idleApplicationCloseState);
+  const applicationCloseStateRef = useRef<ApplicationCloseState>(idleApplicationCloseState);
+  const [applicationCloseEvaluationTick, setApplicationCloseEvaluationTick] = useState(0);
+  const commitApplicationCloseState = useCallback((next: ApplicationCloseState): void => {
+    applicationCloseStateRef.current = next;
+    setApplicationCloseState(next);
+  }, []);
 
   useEffect(() => {
     const dialog = unsavedGuardDialogRef.current;
@@ -580,7 +601,8 @@ function App(): React.ReactElement {
     detail: string,
     proceed: () => void,
     documentIds: ReadonlySet<string> | null = null,
-    cancel?: () => void
+    cancel?: () => void,
+    applicationCloseRequestId?: number
   ) => {
     if (unsavedGuardPendingRef.current) {
       setMessage('Another unsaved-editor decision is already pending.');
@@ -602,16 +624,29 @@ function App(): React.ReactElement {
     }
     setUnsavedGuardBusy(false);
     unsavedGuardPendingRef.current = true;
-    setPendingUnsavedGuard({ title, detail, documentIds, proceed, cancel });
+    const guard: PendingUnsavedGuard = {
+      guardId: ++unsavedGuardSequenceRef.current,
+      title,
+      detail,
+      documentIds,
+      proceed,
+      cancel,
+      applicationCloseRequestId
+    };
+    pendingUnsavedGuardRef.current = guard;
+    setPendingUnsavedGuard(guard);
   }, [documentRegistry]);
 
   const cancelPendingUnsavedGuard = useCallback(() => {
-    if (!pendingUnsavedGuard || unsavedGuardBusy) {
+    if (!pendingUnsavedGuard
+        || pendingUnsavedGuardRef.current?.guardId !== pendingUnsavedGuard.guardId
+        || unsavedGuardBusy) {
       return;
     }
 
     setMessage('Action canceled. Unsaved editor changes remain.');
     unsavedGuardPendingRef.current = false;
+    pendingUnsavedGuardRef.current = null;
     pendingUnsavedGuard.cancel?.();
     setPendingUnsavedGuard(null);
   }, [pendingUnsavedGuard, unsavedGuardBusy]);
@@ -1021,13 +1056,117 @@ function App(): React.ReactElement {
   }, [activateEditor, editorTabState.tabs]);
 
   useEffect(() => desktop.onCloseRequested(requestId => {
-    runWithUnsavedGuard(
-      'Close OpenLineOps?',
-      'Open editors contain unsaved changes.',
-      () => desktop.respondToCloseRequest(requestId, true),
-      null,
-      () => desktop.respondToCloseRequest(requestId, false));
-  }), [runWithUnsavedGuard]);
+    const next = beginApplicationCloseRequest(
+      applicationCloseStateRef.current,
+      requestId,
+      Date.now());
+    commitApplicationCloseState(next);
+    recordSmokeEvent('application-close-requested');
+    desktop.acknowledgeCloseRequest(requestId);
+    recordSmokeEvent('application-close-acknowledged');
+  }), [commitApplicationCloseState]);
+
+  useEffect(() => desktop.onCloseRequestExpired(requestId => {
+    const current = applicationCloseStateRef.current;
+    const next = expireApplicationCloseRequest(current, requestId);
+    if (next === current) {
+      return;
+    }
+    commitApplicationCloseState(next);
+    if (pendingUnsavedGuardRef.current?.applicationCloseRequestId === requestId) {
+      unsavedGuardPendingRef.current = false;
+      pendingUnsavedGuardRef.current = null;
+      setPendingUnsavedGuard(null);
+      setUnsavedGuardBusy(false);
+    }
+    setMessage('The renderer could not acknowledge the close request in time. Close the window again to retry.');
+  }), [commitApplicationCloseState]);
+
+  useEffect(() => {
+    const current = applicationCloseStateRef.current;
+    if (current.phase === 'Idle' || unsavedGuardPendingRef.current) {
+      return;
+    }
+
+    const inFlightDocuments = documentRegistry.entries().filter(
+      ([, document]) => document.busy || document.saving);
+    const evaluation = evaluateApplicationClose(
+      current,
+      {
+        busy: busy || inFlightDocuments.length > 0,
+        dirty: documentRegistry.dirtyEntries().length > 0
+      },
+      Date.now());
+
+    if (evaluation.action === 'None') {
+      return;
+    }
+
+    if (evaluation.action === 'WaitForEditors') {
+      recordSmokeEvent('application-close-waiting-for-editors');
+      setMessage(
+        inFlightDocuments.length > 0
+          ? `Closing will continue after the in-progress editor operation finishes: ${
+              inFlightDocuments.map(([, document]) => document.title).join(', ')}`
+          : 'Closing will continue after the current Studio operation finishes.');
+      const timeout = window.setTimeout(
+        () => setApplicationCloseEvaluationTick(value => value + 1),
+        Math.max(1, evaluation.remainingMilliseconds));
+      return () => window.clearTimeout(timeout);
+    }
+
+    commitApplicationCloseState(evaluation.state);
+    if (evaluation.action === 'Approve') {
+      recordSmokeEvent('application-close-approved');
+      desktop.respondToCloseRequest(evaluation.requestId, true);
+      return;
+    }
+
+    if (evaluation.action === 'DenyEditorWaitTimedOut') {
+      recordSmokeEvent('application-close-editor-wait-timed-out');
+      setMessage('An editor operation did not settle in time. Close was canceled; retry after it finishes.');
+      desktop.respondToCloseRequest(evaluation.requestId, false);
+      return;
+    }
+
+    if (evaluation.action === 'PromptForUnsavedChanges') {
+      recordSmokeEvent('application-close-prompted-for-unsaved-changes');
+      const requestId = evaluation.requestId;
+      runWithUnsavedGuard(
+        'Close OpenLineOps?',
+        'Open editors contain unsaved changes.',
+        () => {
+          const resumed = resumeApplicationCloseAfterDraftHandling(
+            applicationCloseStateRef.current,
+            requestId,
+            Date.now());
+          commitApplicationCloseState(resumed);
+          setMessage('Draft handling completed. Rechecking every editor before closing.');
+        },
+        null,
+        () => {
+          const canceled = cancelApplicationClose(
+            applicationCloseStateRef.current,
+            requestId);
+          if (canceled.action !== 'DenyCanceled') {
+            return;
+          }
+          commitApplicationCloseState(canceled.state);
+          recordSmokeEvent('application-close-canceled');
+          desktop.respondToCloseRequest(requestId, false);
+        },
+        requestId);
+    }
+  }, [
+    applicationCloseEvaluationTick,
+    applicationCloseState,
+    busy,
+    commitApplicationCloseState,
+    documentRegistry,
+    documentRegistryRevision,
+    pendingUnsavedGuard,
+    runWithUnsavedGuard
+  ]);
 
   useEffect(() => {
     if (!activeWorkspace || !activeApplication) {
@@ -1575,17 +1714,22 @@ function App(): React.ReactElement {
               type="button"
               className="button danger"
               onClick={() => {
+                const guard = pendingUnsavedGuard;
                 setUnsavedGuardBusy(true);
                 void documentRegistry
-                  .revertAll(pendingUnsavedGuard.documentIds ?? undefined)
+                  .revertAll(guard.documentIds ?? undefined)
                   .then(success => {
+                    if (pendingUnsavedGuardRef.current?.guardId !== guard.guardId) {
+                      return;
+                    }
                     if (!success) {
                       setUnsavedGuardBusy(false);
                       setMessage('Discard failed. The editor remains open with its draft intact.');
                       return;
                     }
-                    const proceed = pendingUnsavedGuard.proceed;
+                    const proceed = guard.proceed;
                     unsavedGuardPendingRef.current = false;
+                    pendingUnsavedGuardRef.current = null;
                     setPendingUnsavedGuard(null);
                     setUnsavedGuardBusy(false);
                     proceed();
@@ -1600,17 +1744,22 @@ function App(): React.ReactElement {
               type="button"
               className="button primary"
               onClick={() => {
+                const guard = pendingUnsavedGuard;
                 setUnsavedGuardBusy(true);
                 void documentRegistry
-                  .saveAll(pendingUnsavedGuard.documentIds ?? undefined)
+                  .saveAll(guard.documentIds ?? undefined)
                   .then(success => {
+                    if (pendingUnsavedGuardRef.current?.guardId !== guard.guardId) {
+                      return;
+                    }
                     if (!success) {
                       setUnsavedGuardBusy(false);
                       setMessage('Save failed. The editor remains open with its draft intact.');
                       return;
                     }
-                    const proceed = pendingUnsavedGuard.proceed;
+                    const proceed = guard.proceed;
                     unsavedGuardPendingRef.current = false;
+                    pendingUnsavedGuardRef.current = null;
                     setPendingUnsavedGuard(null);
                     setUnsavedGuardBusy(false);
                     proceed();

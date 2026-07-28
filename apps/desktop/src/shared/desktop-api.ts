@@ -103,6 +103,8 @@ export interface OpenLineOpsDesktopApi {
   setActiveProjectFile(projectFilePath: string | null): Promise<void>;
   onBackendStatusChanged(listener: (change: BackendStatusChanged) => void): () => void;
   onCloseRequested(listener: (requestId: number) => void): () => void;
+  onCloseRequestExpired(listener: (requestId: number) => void): () => void;
+  acknowledgeCloseRequest(requestId: number): void;
   respondToCloseRequest(requestId: number, allowClose: boolean): void;
   selectDirectory(options?: SelectDirectoryOptions): Promise<SelectDirectoryResult>;
   selectProjectFile(options?: SelectProjectFileOptions): Promise<SelectDirectoryResult>;

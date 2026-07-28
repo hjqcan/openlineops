@@ -275,6 +275,7 @@ export function DevicesWorkbench({
   useEditorDocument({
     dirty: draftDirty,
     editRevision: draft,
+    busy,
     canSave: canCreate && editorProblems.length === 0,
     save: createBundle,
     revert: revertDraft,

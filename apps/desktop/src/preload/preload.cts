@@ -34,6 +34,14 @@ const desktopApi: OpenLineOpsDesktopApi = {
     ipcRenderer.on('desktop:close-requested', handler);
     return () => ipcRenderer.removeListener('desktop:close-requested', handler);
   },
+  onCloseRequestExpired: (listener: (requestId: number) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, requestId: number): void => listener(requestId);
+    ipcRenderer.on('desktop:close-request-expired', handler);
+    return () => ipcRenderer.removeListener('desktop:close-request-expired', handler);
+  },
+  acknowledgeCloseRequest: (requestId: number) => {
+    ipcRenderer.send('desktop:close-request-acknowledged', requestId);
+  },
   respondToCloseRequest: (requestId: number, allowClose: boolean) => {
     ipcRenderer.send('desktop:close-response', requestId, allowClose);
   },

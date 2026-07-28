@@ -647,9 +647,16 @@ export function ProductionWorkbench({
     message: problem.message,
     targetId: serializeProductionProblemLocation(problem)
   })), [problems]);
+  const draftTransitionGuard = useDraftTransitionGuard({
+    dirty: draft.dirty,
+    canSave: isBackendHealthy && !busy && errorCount === 0,
+    save: () => save(),
+    onError: onMessage
+  });
   useEditorDocument({
     dirty: draft.dirty,
     editRevision: draft,
+    busy: busy || draftTransitionGuard.state.pending !== null,
     canSave: isBackendHealthy && errorCount === 0,
     save: () => save(),
     revert: reloadLine,
@@ -661,12 +668,6 @@ export function ProductionWorkbench({
     },
     problems: editorProblems,
     conflict
-  });
-  const draftTransitionGuard = useDraftTransitionGuard({
-    dirty: draft.dirty,
-    canSave: isBackendHealthy && !busy && errorCount === 0,
-    save: () => save(),
-    onError: onMessage
   });
   const currentDraftLabel = draft.displayName.trim()
     || draft.lineDefinitionId.trim()

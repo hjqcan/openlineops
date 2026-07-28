@@ -138,6 +138,7 @@ export function EditorTabStrip({
             type="button"
             role="tab"
             aria-selected={activeId === tab.id}
+            aria-busy={Boolean(document?.busy || document?.saving)}
             className={activeId === tab.id ? 'ide-editor-tab active' : 'ide-editor-tab'}
             onClick={() => onActivate(tab)}
             data-testid={`editor-tab-${safeTestId(tab.kind)}`}

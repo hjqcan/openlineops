@@ -197,6 +197,10 @@ jobs:
         working-directory: apps/desktop
         run: npm run test:api-credential-security
 
+      - name: Test desktop close coordination
+        working-directory: apps/desktop
+        run: npm run test:desktop-close
+
       - name: Test Application extension import boundary
         working-directory: apps/desktop
         run: npm run test:extension-import-security

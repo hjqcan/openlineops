@@ -31,6 +31,7 @@
     "test:configuration-draft-workspace": "node --test scripts/configuration-draft-workspace-test.mjs",
     "test:runtime-monitoring-fail-closed": "node --test scripts/runtime-monitoring-fail-closed-test.mjs",
     "test:api-credential-security": "npm run build:electron && node --test scripts/api-credential-security-test.mjs scripts/backend-api-security-test.mjs scripts/backend-project-session-test.mjs",
+    "test:desktop-close": "npm run build:electron && node --test scripts/application-close-coordinator-test.mjs scripts/desktop-close-request-coordinator-test.mjs",
     "test:extension-import-security": "npm run build:electron && node --test scripts/application-extension-import-security-test.mjs",
     "test:external-program-directory-import": "npm run build:electron && node --test scripts/external-program-directory-import-security-test.mjs scripts/external-program-directory-selection-test.mjs",
     "test:trace-artifact-save": "npm run build:electron && node --test scripts/trace-artifact-save-test.mjs",
