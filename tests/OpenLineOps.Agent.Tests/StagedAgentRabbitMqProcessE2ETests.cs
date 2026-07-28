@@ -146,6 +146,23 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     }
 
     [Fact]
+    public void RecoveredMaterialArrivalFixtureUsesCanonicalProductionUnitIdentity()
+    {
+        var suffix = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+        var message = CreateRecoveredMaterialArrival(
+            $"agent.fixture.{suffix}",
+            $"station.fixture.{suffix}",
+            new string('a', 64),
+            suffix);
+
+        StationMessageContract.Validate(message);
+        Assert.True(Guid.TryParseExact(message.MaterialId, "D", out var materialId));
+        Assert.Equal(
+            materialId.ToString("D", CultureInfo.InvariantCulture),
+            message.MaterialId);
+    }
+
+    [Fact]
     [SupportedOSPlatform("windows")]
     public void CanonicalServiceSidMatchesWindowsKnownVector()
     {
@@ -295,22 +312,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 stationId,
                 package.PackageContentSha256,
                 suffix);
-            var recoveredMaterialArrival = new MaterialArrived(
-                Guid.NewGuid(),
-                $"material-arrival/scm-e2e/{suffix}",
+            var recoveredMaterialArrival = CreateRecoveredMaterialArrival(
                 agentId,
                 stationId,
-                "project.rabbitmq-e2e",
-                ApplicationId,
-                "snapshot.rabbitmq-e2e",
                 package.PackageContentSha256,
-                StationMaterialKinds.ProductionUnit,
-                $"board-scm-e2e-{suffix}",
-                LineDefinitionId,
-                StationSystemId,
-                StationMaterialArrivalSources.Plc,
-                "plc.scm-e2e",
-                DateTimeOffset.UtcNow);
+                suffix);
             using (var recoveryOutbox = new SqliteStationMaterialArrivalOutboxStore(
                        $"Data Source={sqlitePath};Pooling=False"))
             {
@@ -1000,6 +1006,30 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         {
             return false;
         }
+    }
+
+    private static MaterialArrived CreateRecoveredMaterialArrival(
+        string agentId,
+        string stationId,
+        string packageContentSha256,
+        string suffix)
+    {
+        return new MaterialArrived(
+            Guid.NewGuid(),
+            $"material-arrival/scm-e2e/{suffix}",
+            agentId,
+            stationId,
+            "project.rabbitmq-e2e",
+            ApplicationId,
+            "snapshot.rabbitmq-e2e",
+            packageContentSha256,
+            StationMaterialKinds.ProductionUnit,
+            Guid.NewGuid().ToString("D", CultureInfo.InvariantCulture),
+            LineDefinitionId,
+            StationSystemId,
+            StationMaterialArrivalSources.Plc,
+            "plc.scm-e2e",
+            DateTimeOffset.UtcNow);
     }
 
     [SupportedOSPlatform("windows")]
