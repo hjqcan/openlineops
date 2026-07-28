@@ -3,6 +3,7 @@ using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
+using OpenLineOps.WindowsSecurity;
 
 namespace OpenLineOps.ContentProtection;
 

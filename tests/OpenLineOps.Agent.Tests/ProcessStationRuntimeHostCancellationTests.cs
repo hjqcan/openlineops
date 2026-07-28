@@ -447,7 +447,7 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
 
                 return true;
             },
-            (delay, _) =>
+            retryDelay: (delay, _) =>
             {
                 delays.Add(delay);
                 return ValueTask.CompletedTask;
@@ -474,7 +474,7 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
                 attempts++;
                 throw new Win32Exception(5, "Synthetic persistent profile failure.");
             },
-            static (_, _) => ValueTask.CompletedTask);
+            retryDelay: static (_, _) => ValueTask.CompletedTask);
 
         var exception = await Assert.ThrowsAsync<StationRuntimeIsolationCleanupException>(
             async () => await host.CleanupAsync(
@@ -492,6 +492,48 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
         Assert.Equal(
             5,
             Assert.IsType<Win32Exception>(deletionFailure.InnerException).NativeErrorCode);
+    }
+
+    [Fact]
+    public async Task CleanupRejectsFalseDeletionWhileAnyProfileArtifactRemains()
+    {
+        var deletionAttempts = 0;
+        var probeAttempts = 0;
+        var host = CreateHost(
+            TimeSpan.FromSeconds(30),
+            "OpenLineOps.AgentCleanupArtifactTests",
+            _ =>
+            {
+                deletionAttempts++;
+                return false;
+            },
+            appContainerProfileArtifactsProbe: _ =>
+            {
+                probeAttempts++;
+                return new WindowsAppContainerProfileArtifactState(
+                    PackageRootExists: true,
+                    ProfileDirectoryExists: false,
+                    MappingExists: false,
+                    MappingChildrenExists: false,
+                    StorageExists: false,
+                    StorageChildrenExists: false);
+            },
+            retryDelay: static (_, _) => ValueTask.CompletedTask);
+
+        var exception = await Assert.ThrowsAsync<StationRuntimeIsolationCleanupException>(
+            async () => await host.CleanupAsync(
+                CreateRunningJob(Path.Combine(
+                    _root,
+                    "unused-profile-artifact.pid")).ToSnapshot()));
+
+        Assert.Equal(24, deletionAttempts);
+        Assert.Equal(24, probeAttempts);
+        var cleanupFailure = Assert.IsType<IOException>(exception.InnerException);
+        var deletionFailure = Assert.IsType<IOException>(cleanupFailure.InnerException);
+        Assert.Contains(
+            "deletion reported no profile while lifecycle artifacts remain",
+            deletionFailure.Message,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -554,7 +596,7 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
                 TimeSpan.FromSeconds(30),
                 profileNamespace,
                 WindowsAppContainerIdentity.DeleteProfile,
-                async (delay, cancellationToken) =>
+                retryDelay: async (delay, cancellationToken) =>
                 {
                     launched.TerminateProcessTree();
                     await launched.WaitForExitAsync(cancellationToken);
@@ -582,6 +624,8 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
         TimeSpan timeout,
         string? appContainerProfileNamespace = null,
         Func<string, bool>? deleteAppContainerProfile = null,
+        Func<string, WindowsAppContainerProfileArtifactState>?
+            appContainerProfileArtifactsProbe = null,
         Func<TimeSpan, CancellationToken, ValueTask>? retryDelay = null)
     {
         Directory.CreateDirectory(_root);
@@ -605,6 +649,9 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
             clock: new FixedClock(Now),
             deleteAppContainerProfile:
                 deleteAppContainerProfile ?? WindowsAppContainerIdentity.DeleteProfile,
+            appContainerProfileArtifactsProbe:
+                appContainerProfileArtifactsProbe
+                ?? WindowsAppContainerIdentity.ProbeProfileArtifacts,
             retryDelay: retryDelay ?? (static (delay, cancellationToken) =>
                 new ValueTask(Task.Delay(delay, cancellationToken))));
     }

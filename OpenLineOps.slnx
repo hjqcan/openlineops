@@ -73,6 +73,7 @@
     <Project Path="shared/OpenLineOps.Runtime.Contracts/OpenLineOps.Runtime.Contracts.csproj" />
     <Project Path="shared/OpenLineOps.StationRuntime.Contracts/OpenLineOps.StationRuntime.Contracts.csproj" />
     <Project Path="shared/OpenLineOps.StateMachine.Core/OpenLineOps.StateMachine.Core.csproj" />
+    <Project Path="shared/OpenLineOps.WindowsSecurity/OpenLineOps.WindowsSecurity.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/OpenLineOps.Agent/OpenLineOps.Agent.csproj" />

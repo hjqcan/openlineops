@@ -14,6 +14,7 @@ using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.StationRuntime.Contracts;
+using OpenLineOps.WindowsSecurity;
 
 namespace OpenLineOps.Agent.Infrastructure.Execution;
 
@@ -59,6 +60,8 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
     private readonly StationRuntimePythonScriptSandboxOptions _pythonScriptSandbox;
     private readonly IStationResourceFenceValidator _resourceFenceValidator;
     private readonly Func<string, bool> _deleteAppContainerProfile;
+    private readonly Func<string, WindowsAppContainerProfileArtifactState>
+        _appContainerProfileArtifactsProbe;
     private readonly Func<TimeSpan, CancellationToken, ValueTask> _retryDelay;
 
     public ProcessStationRuntimeHost(
@@ -72,6 +75,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             processLauncher,
             clock,
             WindowsAppContainerIdentity.DeleteProfile,
+            WindowsAppContainerIdentity.ProbeProfileArtifacts,
             static (delay, cancellationToken) =>
                 new ValueTask(Task.Delay(delay, cancellationToken)))
     {
@@ -83,6 +87,8 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         IsolatedProcessLauncher? processLauncher,
         IClock? clock,
         Func<string, bool> deleteAppContainerProfile,
+        Func<string, WindowsAppContainerProfileArtifactState>
+            appContainerProfileArtifactsProbe,
         Func<TimeSpan, CancellationToken, ValueTask> retryDelay)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -90,6 +96,8 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             ?? throw new ArgumentNullException(nameof(resourceFenceValidator));
         _deleteAppContainerProfile = deleteAppContainerProfile
             ?? throw new ArgumentNullException(nameof(deleteAppContainerProfile));
+        _appContainerProfileArtifactsProbe = appContainerProfileArtifactsProbe
+            ?? throw new ArgumentNullException(nameof(appContainerProfileArtifactsProbe));
         _retryDelay = retryDelay ?? throw new ArgumentNullException(nameof(retryDelay));
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ExecutablePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.PluginHostExecutablePath);
@@ -321,19 +329,46 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             try
             {
                 await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+                process.TerminateProcessTree();
+                if (!await WaitForTerminationBoundedAsync(process).ConfigureAwait(false))
+                {
+                    await ObserveOutputBoundedAsync(stdoutTask, stderrTask).ConfigureAwait(false);
+                    return Failure(
+                        ExecutionStatus.Failed,
+                        "Agent.RuntimeProcessTreeTerminationTimedOut",
+                        "Station runtime process tree did not terminate within the bounded shutdown interval.");
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 process.TerminateProcessTree();
-                await WaitForTerminationBoundedAsync(process).ConfigureAwait(false);
+                var processTreeExited = await WaitForTerminationBoundedAsync(process)
+                    .ConfigureAwait(false);
                 await ObserveOutputBoundedAsync(stdoutTask, stderrTask).ConfigureAwait(false);
+                if (!processTreeExited)
+                {
+                    return Failure(
+                        ExecutionStatus.Failed,
+                        "Agent.RuntimeProcessTreeTerminationTimedOut",
+                        "Canceled Station runtime process tree did not terminate within the bounded shutdown interval.");
+                }
+
                 throw;
             }
             catch (OperationCanceledException)
             {
                 process.TerminateProcessTree();
-                await WaitForTerminationBoundedAsync(process).ConfigureAwait(false);
+                var processTreeExited = await WaitForTerminationBoundedAsync(process)
+                    .ConfigureAwait(false);
                 await ObserveOutputBoundedAsync(stdoutTask, stderrTask).ConfigureAwait(false);
+                if (!processTreeExited)
+                {
+                    return Failure(
+                        ExecutionStatus.Failed,
+                        "Agent.RuntimeProcessTreeTerminationTimedOut",
+                        "Timed-out Station runtime process tree did not terminate within the bounded shutdown interval.");
+                }
+
                 return Failure(
                     ExecutionStatus.TimedOut,
                     "Agent.RuntimeTimedOut",
@@ -565,23 +600,31 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
     {
         const int maximumAttempts = 24;
         var retryDelay = TimeSpan.FromMilliseconds(50);
-        Win32Exception? lastError = null;
+        Exception? lastError = null;
         for (var attempt = 1; attempt <= maximumAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                _ = _deleteAppContainerProfile(profileName);
-                return;
+                var deletionReported = _deleteAppContainerProfile(profileName);
+                var artifacts = _appContainerProfileArtifactsProbe(profileName);
+                if (!artifacts.AnyArtifactsExist)
+                {
+                    return;
+                }
+
+                lastError = new InvalidOperationException(
+                    deletionReported
+                        ? $"AppContainer profile '{profileName}' retained lifecycle artifacts after deletion."
+                        : $"AppContainer profile '{profileName}' deletion reported no profile while lifecycle artifacts remain.");
             }
             catch (Win32Exception exception)
             {
                 lastError = exception;
-                if (attempt == maximumAttempts)
-                {
-                    break;
-                }
+            }
 
+            if (attempt < maximumAttempts)
+            {
                 await _retryDelay(retryDelay, cancellationToken).ConfigureAwait(false);
                 retryDelay = TimeSpan.FromMilliseconds(Math.Min(
                     retryDelay.TotalMilliseconds * 2,
@@ -592,7 +635,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         throw new IOException(
             $"Could not delete Station runtime AppContainer profile '{profileName}' "
             + $"after {maximumAttempts} bounded attempts. "
-            + $"Last Win32 error: {lastError?.NativeErrorCode}.",
+            + $"Last failure: {lastError?.Message}.",
             lastError);
     }
 
@@ -1035,27 +1078,42 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         Task<string> stdoutTask,
         Task<string> stderrTask)
     {
+        var combined = Task.WhenAll(stdoutTask, stderrTask);
         try
         {
-            await Task.WhenAll(stdoutTask, stderrTask)
+            await combined
                 .WaitAsync(TimeSpan.FromSeconds(5))
                 .ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is InvalidDataException or TimeoutException)
+        catch (Exception exception) when (exception is InvalidDataException
+                                          or IOException
+                                          or ObjectDisposedException
+                                          or TimeoutException)
         {
             _ = exception;
+            if (!combined.IsCompleted)
+            {
+                _ = combined.ContinueWith(
+                    static completed => _ = completed.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted
+                    | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
         }
     }
 
-    private static async Task WaitForTerminationBoundedAsync(IIsolatedProcess process)
+    private static async Task<bool> WaitForTerminationBoundedAsync(IIsolatedProcess process)
     {
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+            await process.WaitForProcessTreeExitAsync(timeout.Token).ConfigureAwait(false);
+            return true;
         }
         catch (OperationCanceledException)
         {
+            return false;
         }
     }
 

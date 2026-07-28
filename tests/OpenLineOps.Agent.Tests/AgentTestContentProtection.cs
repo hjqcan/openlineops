@@ -1,4 +1,5 @@
 using OpenLineOps.ContentProtection;
+using OpenLineOps.WindowsSecurity;
 
 namespace OpenLineOps.Agent.Tests;
 

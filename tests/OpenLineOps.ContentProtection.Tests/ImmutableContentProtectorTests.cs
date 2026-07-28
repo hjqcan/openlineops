@@ -8,6 +8,7 @@ using System.Security.Principal;
 using System.Text;
 using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
+using OpenLineOps.WindowsSecurity;
 
 namespace OpenLineOps.ContentProtection.Tests;
 

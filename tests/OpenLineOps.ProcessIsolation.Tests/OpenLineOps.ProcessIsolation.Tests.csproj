@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\shared\OpenLineOps.ContentProtection\OpenLineOps.ContentProtection.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.ProcessIsolation\OpenLineOps.ProcessIsolation.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.WindowsSecurity\OpenLineOps.WindowsSecurity.csproj" />
     <ProjectReference Include="..\..\tools\OpenLineOps.VendorTestHelper\OpenLineOps.VendorTestHelper.csproj" />
   </ItemGroup>
 

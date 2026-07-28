@@ -7,6 +7,7 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using OpenLineOps.LeastPrivilegeLauncher;
 using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Runtime.Infrastructure.Scripting;
 
@@ -814,6 +815,60 @@ public sealed class LeastPrivilegeLauncherContractTests
             {
                 WindowsAppContainerIdentity.DeleteProfile(staleProfileName);
             }
+        }
+    }
+
+    [Fact]
+    public void StaleMarkerIsKeptWhenMappingIsMissingButProfileArtifactsRemain()
+    {
+        var markerParent = Path.Combine(
+            Path.GetTempPath(),
+            "openlineops-script-worker-marker-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(markerParent);
+        var profileName = ProfilePrefix + Guid.NewGuid().ToString("N");
+        var markerPath = Path.Combine(
+            markerParent,
+            profileName + MarkerExtension);
+        File.WriteAllText(markerPath, "{}");
+        var deletionAttempts = 0;
+        var probeAttempts = 0;
+        try
+        {
+            var exception = Assert.Throws<IOException>(() =>
+                AppContainerScriptWorkerLauncher.ScavengeStaleProfiles(
+                    markerParent,
+                    candidateProfileName =>
+                        AppContainerScriptWorkerLauncher.DeleteProfileWithRetry(
+                            candidateProfileName,
+                            _ =>
+                            {
+                                deletionAttempts++;
+                                return false;
+                            },
+                            _ =>
+                            {
+                                probeAttempts++;
+                                return new WindowsAppContainerProfileArtifactState(
+                                    PackageRootExists: true,
+                                    ProfileDirectoryExists: true,
+                                    MappingExists: false,
+                                    MappingChildrenExists: false,
+                                    StorageExists: true,
+                                    StorageChildrenExists: true);
+                            },
+                            _ => { })));
+
+            Assert.Equal(20, deletionAttempts);
+            Assert.Equal(20, probeAttempts);
+            Assert.Contains(
+                "lifecycle artifacts remain",
+                Assert.IsType<InvalidOperationException>(exception.InnerException).Message,
+                StringComparison.Ordinal);
+            Assert.True(File.Exists(markerPath));
+        }
+        finally
+        {
+            Directory.Delete(markerParent, recursive: true);
         }
     }
 

@@ -1,11 +1,14 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using OpenLineOps.Devices.Application.Execution;
 using OpenLineOps.Devices.Application.Execution.ExternalPrograms;
 using OpenLineOps.Devices.Domain.Identifiers;
 using OpenLineOps.Devices.Infrastructure.Execution;
 using OpenLineOps.Devices.Infrastructure.Execution.ExternalPrograms;
+using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
@@ -543,6 +546,253 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
     }
 
     [Fact]
+    public async Task ProcessTreeAndDisposeFailuresStillDeleteWorkspaceAndOwnedProfile()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var program = CreateJsonOutputProgram();
+        var route = CreateRoute(
+            ProjectReleaseExternalProgramLaunchKinds.ApplicationExecutable,
+            program.Executable,
+            providerRoute: null,
+            argumentTemplates: program.Arguments);
+        var process = new FailingCleanupIsolatedProcess();
+        var profileDeletionAttempts = 0;
+        string? invocationProfileName = null;
+        try
+        {
+            var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
+                CreateContext(),
+                route,
+                ProviderMustNotRun,
+                AllowFences,
+                CreateHost(
+                    processLauncher: _ => process,
+                    deleteAppContainerProfile: profileName =>
+                    {
+                        invocationProfileName = profileName;
+                        profileDeletionAttempts++;
+                        if (profileDeletionAttempts < 3)
+                        {
+                            throw new Win32Exception(
+                                5,
+                                "Synthetic transient profile deletion failure.");
+                        }
+
+                        return WindowsAppContainerIdentity.DeleteProfile(profileName);
+                    },
+                    appContainerProfileArtifactsProbe:
+                        WindowsAppContainerIdentity.ProbeProfileArtifacts,
+                    cleanupRetryDelay: static (_, _) => ValueTask.CompletedTask));
+
+            Assert.Equal(RuntimeCommandExecutionOutcome.Failed, result.Outcome);
+            Assert.StartsWith(
+                "External program 'resource.external-program' process tree did not terminate",
+                result.Reason,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "Additional cleanup failure: External program "
+                + "'resource.external-program' process isolation cleanup failed",
+                result.Reason,
+                StringComparison.Ordinal);
+            Assert.Contains("IOException: synthetic stream release failure", result.Reason);
+            Assert.Contains("Win32Exception: synthetic Job release failure", result.Reason);
+            Assert.True(process.Disposed);
+            Assert.Equal(3, profileDeletionAttempts);
+            Assert.NotNull(invocationProfileName);
+            Assert.False(WindowsAppContainerIdentity.ProfileExists(invocationProfileName));
+            Assert.Empty(Directory.EnumerateFileSystemEntries(
+                Path.Combine(_hostRoot, "workspaces")));
+        }
+        finally
+        {
+            if (invocationProfileName is not null
+                && WindowsAppContainerIdentity.ProfileExists(invocationProfileName))
+            {
+                _ = WindowsAppContainerIdentity.DeleteProfile(invocationProfileName);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task UnexpectedProcessAndProfileCleanupFailuresReturnOneCombinedFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var program = CreateJsonOutputProgram();
+        var route = CreateRoute(
+            ProjectReleaseExternalProgramLaunchKinds.ApplicationExecutable,
+            program.Executable,
+            providerRoute: null,
+            argumentTemplates: program.Arguments);
+        string? invocationProfileName = null;
+        try
+        {
+            var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
+                CreateContext(),
+                route,
+                ProviderMustNotRun,
+                AllowFences,
+                CreateHost(
+                    processLauncher: _ => throw new FormatException(
+                        "synthetic unexpected process launch failure"),
+                    deleteAppContainerProfile: profileName =>
+                    {
+                        invocationProfileName = profileName;
+                        throw new FormatException(
+                            "synthetic unexpected profile cleanup failure");
+                    }));
+
+            Assert.Equal(RuntimeCommandExecutionOutcome.Failed, result.Outcome);
+            Assert.StartsWith(
+                "External program 'resource.external-program' process isolation "
+                + "failed unexpectedly: FormatException: "
+                + "synthetic unexpected process launch failure",
+                result.Reason,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "Additional cleanup failure: External program "
+                + "'resource.external-program' isolation cleanup failed: "
+                + "app-container-profile=FormatException: "
+                + "synthetic unexpected profile cleanup failure",
+                result.Reason,
+                StringComparison.Ordinal);
+            Assert.NotNull(invocationProfileName);
+            Assert.True(WindowsAppContainerIdentity.ProfileExists(invocationProfileName));
+            Assert.Empty(Directory.EnumerateFileSystemEntries(
+                Path.Combine(_hostRoot, "workspaces")));
+        }
+        finally
+        {
+            if (invocationProfileName is not null
+                && WindowsAppContainerIdentity.ProfileExists(invocationProfileName))
+            {
+                _ = WindowsAppContainerIdentity.DeleteProfile(invocationProfileName);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task FalseProfileDeletionCannotHideRemainingLifecycleArtifacts()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var program = CreateJsonOutputProgram();
+        var route = CreateRoute(
+            ProjectReleaseExternalProgramLaunchKinds.ApplicationExecutable,
+            program.Executable,
+            providerRoute: null,
+            argumentTemplates: program.Arguments);
+        var deletionAttempts = 0;
+        var probeAttempts = 0;
+        string? invocationProfileName = null;
+        try
+        {
+            var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
+                CreateContext(),
+                route,
+                ProviderMustNotRun,
+                AllowFences,
+                CreateHost(
+                    processLauncher: _ => throw new FormatException(
+                        "synthetic launch failure"),
+                    deleteAppContainerProfile: profileName =>
+                    {
+                        invocationProfileName = profileName;
+                        deletionAttempts++;
+                        return false;
+                    },
+                    appContainerProfileArtifactsProbe: _ =>
+                    {
+                        probeAttempts++;
+                        return new WindowsAppContainerProfileArtifactState(
+                            PackageRootExists: true,
+                            ProfileDirectoryExists: false,
+                            MappingExists: false,
+                            MappingChildrenExists: false,
+                            StorageExists: false,
+                            StorageChildrenExists: false);
+                    },
+                    cleanupRetryDelay: static (_, _) => ValueTask.CompletedTask));
+
+            Assert.Equal(RuntimeCommandExecutionOutcome.Failed, result.Outcome);
+            Assert.Equal(24, deletionAttempts);
+            Assert.Equal(24, probeAttempts);
+            Assert.Contains(
+                "deletion reported no profile while lifecycle artifacts remain",
+                result.Reason,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (invocationProfileName is not null)
+            {
+                _ = WindowsAppContainerIdentity.DeleteProfile(invocationProfileName);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task WorkspaceInitializationFailureReturnsFailedAndDeletesPartialWorkspace()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var program = CreateJsonOutputProgram();
+        var route = CreateRoute(
+            ProjectReleaseExternalProgramLaunchKinds.ApplicationExecutable,
+            program.Executable,
+            providerRoute: null,
+            argumentTemplates: program.Arguments);
+        var processLauncherCalled = false;
+
+        var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
+            CreateContext(),
+            route,
+            ProviderMustNotRun,
+            AllowFences,
+            CreateHost(
+                processLauncher: _ =>
+                {
+                    processLauncherCalled = true;
+                    throw new InvalidOperationException(
+                        "Process launcher must not run after workspace initialization fails.");
+                },
+                createIsolationDirectory: path =>
+                {
+                    Directory.CreateDirectory(path);
+                    if (string.Equals(
+                            Path.GetFileName(path),
+                            "output",
+                            StringComparison.Ordinal))
+                    {
+                        throw new IOException(
+                            "synthetic workspace initialization failure");
+                    }
+                }));
+
+        Assert.Equal(RuntimeCommandExecutionOutcome.Failed, result.Outcome);
+        Assert.Contains(
+            "synthetic workspace initialization failure",
+            result.Reason,
+            StringComparison.Ordinal);
+        Assert.False(processLauncherCalled);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(
+            Path.Combine(_hostRoot, "workspaces")));
+    }
+
+    [Fact]
     public async Task ApplicationExecutableStreamingOutputLimitTerminatesProcessAndFreezesBoundedLog()
     {
         var program = CreateLargeOutputProgram();
@@ -701,26 +951,37 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             lastFailure);
     }
 
-    private ExternalProgramHost CreateHost(int maximumStandardOutputBytes = 4 * 1024 * 1024)
+    private ExternalProgramHost CreateHost(
+        int maximumStandardOutputBytes = 4 * 1024 * 1024,
+        Func<IsolatedProcessStartRequest, IIsolatedProcess>? processLauncher = null,
+        Func<string, bool>? deleteAppContainerProfile = null,
+        Func<string, WindowsAppContainerProfileArtifactState>?
+            appContainerProfileArtifactsProbe = null,
+        Func<TimeSpan, CancellationToken, ValueTask>? cleanupRetryDelay = null,
+        Action<string>? createIsolationDirectory = null)
     {
         var options = new ExternalProgramHostOptions
         {
             WorkspaceRootPath = Path.Combine(_hostRoot, "workspaces"),
             EvidenceRootPath = Path.Combine(_hostRoot, "evidence"),
             MaximumStandardOutputBytes = maximumStandardOutputBytes,
-            RequireRestrictedHostIdentity = true,
+            RequireRestrictedHostIdentity = false,
             RequireImmutableContentProtection = false,
             RequireAppContainerIsolation = true,
             AppContainerProfileName = _appContainerProfileName,
-            RestrictedServiceSid = "S-1-5-80-123-456-789-1011-1213"
+            RestrictedServiceSid = null
         };
         return new ExternalProgramHost(
             options,
-            processLauncher: null,
+            processLauncher,
             contentProtector: null,
             policyEnforcer: new ExternalProgramHostPolicyEnforcer(
                 options,
-                new TestHostIdentityReader()));
+                new TestHostIdentityReader()),
+            deleteAppContainerProfile,
+            appContainerProfileArtifactsProbe,
+            cleanupRetryDelay,
+            createIsolationDirectory);
     }
 
     private ProjectReleaseExternalProgramCommandRoute CreateRoute(
@@ -892,6 +1153,52 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             _ = cancellationToken;
             CallCount++;
             throw new InvalidOperationException("External Program Host must not run with a stale fence.");
+        }
+    }
+
+    private sealed class FailingCleanupIsolatedProcess : IIsolatedProcess
+    {
+        public Stream StandardInput { get; } = new MemoryStream();
+
+        public Stream StandardOutput { get; } = new MemoryStream(
+            Encoding.UTF8.GetBytes(
+                "{\"outcome\":\"Passed\",\"metrics\":{\"voltage\":12.5}}"));
+
+        public Stream StandardError { get; } = new MemoryStream();
+
+        public int Id => 42;
+
+        public int ExitCode => 0;
+
+        public bool Disposed { get; private set; }
+
+        public Task WaitForExitAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+
+        public Task WaitForProcessTreeExitAsync(CancellationToken cancellationToken = default)
+        {
+            _ = cancellationToken;
+            return Task.FromException(new OperationCanceledException(
+                "Synthetic process tree termination timeout."));
+        }
+
+        public void TerminateProcessTree()
+        {
+        }
+
+        public void Dispose()
+        {
+            Disposed = true;
+            StandardInput.Dispose();
+            StandardOutput.Dispose();
+            StandardError.Dispose();
+            throw new AggregateException(
+                "Synthetic multiple process isolation release failures.",
+                new IOException("synthetic stream release failure"),
+                new Win32Exception(5, "synthetic Job release failure"));
         }
     }
 

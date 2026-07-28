@@ -9,6 +9,7 @@ using OpenLineOps.Agent.Infrastructure.Transport;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
+using OpenLineOps.WindowsSecurity;
 
 const int hostFailureExitCode = 70;
 string? windowsServiceEventLogSource = null;

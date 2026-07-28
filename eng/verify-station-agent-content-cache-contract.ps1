@@ -44,6 +44,9 @@ $commandLine = Read-RequiredText "src/OpenLineOps.Agent/StationAgentCommandLine.
 $hostOptions = Read-RequiredText "src/OpenLineOps.Agent/StationAgentHostOptions.cs"
 $executableContract = Read-RequiredText "tests/OpenLineOps.Agent.Tests/StationAgentExecutableContractTests.cs"
 $contentProtector = Read-RequiredText "shared/OpenLineOps.ContentProtection/ImmutableContentProtector.cs"
+$contentProtectionProject = Read-RequiredText "shared/OpenLineOps.ContentProtection/OpenLineOps.ContentProtection.csproj"
+$processIsolationProject = Read-RequiredText "shared/OpenLineOps.ProcessIsolation/OpenLineOps.ProcessIsolation.csproj"
+$windowsSecurity = Read-RequiredText "shared/OpenLineOps.WindowsSecurity/WindowsStationServiceIdentityReader.cs"
 $contentProtectorTests = Read-RequiredText "tests/OpenLineOps.ContentProtection.Tests/ImmutableContentProtectorTests.cs"
 $agentStagedE2E = Read-RequiredText "tests/OpenLineOps.Agent.Tests/StagedAgentRabbitMqProcessE2ETests.cs"
 $runnerStagedE2E = Read-RequiredText "tests/OpenLineOps.Runner.Tests/RunnerStagedAgentProcessE2ETests.cs"
@@ -167,11 +170,29 @@ Assert-ContainsLiteral $agentStagedE2E "nestedServiceSidReadOnlyAclVerified" `
     "Staged Agent evidence does not verify nested service-SID read-only cache ACLs."
 Assert-ContainsLiteral $agentStagedE2E "administratorPreSealRecoveryFixtureVerified" `
     "Staged Agent evidence does not bind pre-seal recovery to its administrator fixture."
+Assert-ContainsLiteral $agentStagedE2E "WaitForRestrictedServiceAppContainerProfileLifecycleAsync" `
+    "Staged Agent SCM E2E does not inspect the live restricted-service AppContainer profile."
+Assert-ContainsLiteral $agentStagedE2E "VerifyAppContainerProfileDirectoryLifecycleAccess" `
+    "Staged Agent SCM E2E does not verify the profile directory owner and exact FullControl rule."
+Assert-ContainsLiteral $agentStagedE2E "VerifyAppContainerProfileRegistryLifecycleAccess" `
+    "Staged Agent SCM E2E does not verify all AppContainer registry lifecycle leaves."
+Assert-ContainsLiteral $agentStagedE2E 'mappingPath + "\\Children"' `
+    "Staged Agent SCM E2E does not verify the AppContainer mapping Children leaf."
+Assert-ContainsLiteral $agentStagedE2E 'storagePath + "\\Children"' `
+    "Staged Agent SCM E2E does not verify the AppContainer storage Children leaf."
+Assert-ContainsLiteral $agentStagedE2E "VerifyRestrictedServiceAppContainerProfileRemovedAsync" `
+    "Staged Agent SCM E2E does not prove the AppContainer directory and registry leaves are deleted."
 
-Assert-ContainsLiteral $contentProtector "ReadIsRestrictedToken(identity.AccessToken);" `
+Assert-ContainsLiteral $windowsSecurity "ReadIsRestrictedToken(identity.AccessToken);" `
     "Station service identity validation does not use the native restricted-token predicate."
-Assert-ContainsLiteral $contentProtector "IsTokenRestricted(token);" `
+Assert-ContainsLiteral $windowsSecurity "IsTokenRestricted(token);" `
     "Station service identity validation does not call the Windows restricted-token predicate."
+Assert-ContainsLiteral $contentProtectionProject "OpenLineOps.WindowsSecurity.csproj" `
+    "Content protection does not depend on the neutral Windows security foundation."
+Assert-ContainsLiteral $processIsolationProject "OpenLineOps.WindowsSecurity.csproj" `
+    "Process isolation does not depend on the neutral Windows security foundation."
+Assert-ForbiddenPattern $processIsolationProject "OpenLineOps.ContentProtection" `
+    "Process isolation must not reverse-depend on the higher-level content-protection assembly."
 Assert-ContainsLiteral $contentProtectorTests "WindowsRestrictedTokenPredicateUsesTheNativeSecurityBoundary" `
     "Content protection tests do not exercise the native restricted-token predicate on Windows."
 Assert-ContainsLiteral $runnerStagedE2E "IsRestrictedToken: IsTokenRestricted(token)," `
@@ -234,7 +255,7 @@ Assert-ContainsLiteral $scalarReader "returnedLength != bufferLength" `
 if ($scalarReader -cmatch 'IntPtr\.Zero|ErrorInsufficientBuffer|requiredLength') {
     throw "Agent staged scalar token evidence must call GetTokenInformation with the exact fixed buffer instead of a variable-length sizing probe."
 }
-if ($contentProtector -cmatch 'TokenHasRestrictions') {
+if ($windowsSecurity -cmatch 'TokenHasRestrictions') {
     throw "Station identity validation must not use TokenHasRestrictions as the restricted-token predicate."
 }
 if ($runnerStagedE2E -cmatch 'TokenHasRestrictions') {

@@ -3,13 +3,18 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
 using OpenLineOps.VendorTestHelper;
+using OpenLineOps.WindowsSecurity;
 
 namespace OpenLineOps.ProcessIsolation.Tests;
 
@@ -501,10 +506,566 @@ public sealed class WindowsProcessLauncherTests
         var sid = WindowsAppContainerIdentity.EnsureProfile(profileName);
         var profilePath = WindowsAppContainerIdentity.GetProfileFolderPath(sid);
         Assert.True(Directory.Exists(profilePath));
+        var createdArtifacts = WindowsAppContainerIdentity.ProbeProfileArtifacts(
+            profileName);
+        Assert.True(createdArtifacts.PackageRootExists);
+        Assert.True(createdArtifacts.ProfileDirectoryExists);
+        Assert.True(createdArtifacts.MappingExists);
+        Assert.True(createdArtifacts.MappingChildrenExists);
+        Assert.True(createdArtifacts.StorageExists);
+        Assert.True(createdArtifacts.StorageChildrenExists);
 
-        WindowsAppContainerIdentity.DeleteProfile(profileName);
+        Assert.True(WindowsAppContainerIdentity.DeleteProfile(profileName));
 
         Assert.False(Directory.Exists(profilePath));
+        Assert.False(
+            WindowsAppContainerIdentity.ProbeProfileArtifacts(profileName)
+                .AnyArtifactsExist);
+    }
+
+    [Fact]
+    public void ProfileArtifactProbeDetectsFilesystemOrphanWithoutMapping()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var profileName = "OpenLineOps.Tests.Orphan." + Guid.NewGuid().ToString("N");
+        var packageRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Packages",
+            profileName.ToLowerInvariant());
+        Directory.CreateDirectory(Path.Combine(packageRoot, "AC"));
+        try
+        {
+            var artifacts = WindowsAppContainerIdentity.ProbeProfileArtifacts(
+                profileName);
+            Assert.True(artifacts.PackageRootExists);
+            Assert.True(artifacts.ProfileDirectoryExists);
+            Assert.False(artifacts.MappingExists);
+            Assert.False(artifacts.MappingChildrenExists);
+            Assert.False(artifacts.StorageExists);
+            Assert.False(artifacts.StorageChildrenExists);
+            Assert.True(artifacts.AnyArtifactsExist);
+            Assert.True(WindowsAppContainerIdentity.ProfileExists(profileName));
+        }
+        finally
+        {
+            _ = WindowsAppContainerIdentity.DeleteProfile(profileName);
+            if (Directory.Exists(packageRoot))
+            {
+                Directory.Delete(packageRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void ProfileBootstrapAddsManagerAccessBeforeRequestingWriteOwner()
+    {
+        const uint writeDac = 0x00040000;
+        const uint writeOwner = 0x00080000;
+        var masks = WindowsAppContainerProfileLifecycleAccess
+            .ProfileAccessMasksForTesting();
+
+        Assert.NotEqual(0u, masks.Bootstrap & writeDac);
+        Assert.Equal(0u, masks.Bootstrap & writeOwner);
+        Assert.Equal(0u, masks.Ownership & writeDac);
+        Assert.NotEqual(0u, masks.Ownership & writeOwner);
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void NewProfileConfigurationFailureRollsBackEveryCreatedArtifact()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var profileName = "OpenLineOps.Tests.Rollback." + Guid.NewGuid().ToString("N");
+        var packageRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Packages",
+            profileName.ToLowerInvariant());
+        var currentIdentity = WindowsIdentity.GetCurrent().User
+            ?? throw new InvalidOperationException(
+                "Current Windows identity has no user SID.");
+        try
+        {
+            var exception = Assert.Throws<ProfileConfigurationFailureException>(() =>
+            {
+                using var capabilities = WindowsAppContainerSecurityCapabilities.Create(
+                    new WindowsAppContainerPolicy(
+                        profileName,
+                        NetworkAccessAllowed: false),
+                    checkpoint =>
+                    {
+                        if (checkpoint
+                            != WindowsAppContainerProfileConfigurationCheckpoint.ProfileCreated)
+                        {
+                            return;
+                        }
+
+                        File.WriteAllText(
+                            Path.Combine(packageRoot, "partial-configuration.probe"),
+                            "must be rolled back");
+                        WindowsAppContainerProfileLifecycleAccess
+                            .GrantProfileTreeAccessForTesting(
+                                packageRoot,
+                                currentIdentity,
+                                profileName);
+                        WindowsAppContainerProfileLifecycleAccess
+                            .GrantRegistryAccessForTesting(
+                                WindowsAppContainerProfileLifecycleAccess
+                                    .StorageKeyPath(profileName),
+                                currentIdentity,
+                                profileName,
+                                "injected partial storage");
+                        throw new ProfileConfigurationFailureException();
+                    });
+            });
+
+            Assert.NotNull(exception);
+            Assert.False(WindowsAppContainerIdentity.ProfileExists(profileName));
+            Assert.False(Directory.Exists(packageRoot));
+            using var storage = Registry.CurrentUser.OpenSubKey(
+                WindowsAppContainerProfileLifecycleAccess.StorageKeyPath(profileName),
+                writable: false);
+            Assert.Null(storage);
+        }
+        finally
+        {
+            if (WindowsAppContainerIdentity.ProfileExists(profileName))
+            {
+                _ = WindowsAppContainerIdentity.DeleteProfile(profileName);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task SameProfileConfigurationIsSerializedWithinTheProcess()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var profileName = "OpenLineOps.Tests.Serialized." + Guid.NewGuid().ToString("N");
+        using var firstEntered = new ManualResetEventSlim();
+        using var releaseFirst = new ManualResetEventSlim();
+        using var secondStarted = new ManualResetEventSlim();
+        using var secondEntered = new ManualResetEventSlim();
+        try
+        {
+            var first = Task.Run(() =>
+            {
+                using var capabilities = WindowsAppContainerSecurityCapabilities.Create(
+                    new WindowsAppContainerPolicy(
+                        profileName,
+                        NetworkAccessAllowed: false),
+                    checkpoint =>
+                    {
+                        if (checkpoint
+                            != WindowsAppContainerProfileConfigurationCheckpoint.ConfigurationEntered)
+                        {
+                            return;
+                        }
+
+                        firstEntered.Set();
+                        Assert.True(releaseFirst.Wait(ProcessTimeout));
+                    });
+            });
+            Assert.True(firstEntered.Wait(ProcessTimeout));
+
+            var second = Task.Run(() =>
+            {
+                secondStarted.Set();
+                using var capabilities = WindowsAppContainerSecurityCapabilities.Create(
+                    new WindowsAppContainerPolicy(
+                        profileName,
+                        NetworkAccessAllowed: false),
+                    checkpoint =>
+                    {
+                        if (checkpoint
+                            == WindowsAppContainerProfileConfigurationCheckpoint.ConfigurationEntered)
+                        {
+                            secondEntered.Set();
+                        }
+                    });
+            });
+            Assert.True(secondStarted.Wait(ProcessTimeout));
+            Assert.False(secondEntered.Wait(TimeSpan.FromMilliseconds(250)));
+
+            releaseFirst.Set();
+            await Task.WhenAll(first, second).WaitAsync(ProcessTimeout);
+            Assert.True(secondEntered.IsSet);
+        }
+        finally
+        {
+            releaseFirst.Set();
+            if (WindowsAppContainerIdentity.ProfileExists(profileName))
+            {
+                _ = WindowsAppContainerIdentity.DeleteProfile(profileName);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ProfileDeletionWaitsForActiveSecurityCapabilities()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var profileName = "OpenLineOps.Tests.DeleteLock."
+                          + Guid.NewGuid().ToString("N");
+        WindowsAppContainerSecurityCapabilities? capabilities = null;
+        using var deleteStarted = new ManualResetEventSlim();
+        using var deleteCompleted = new ManualResetEventSlim();
+        try
+        {
+            capabilities = WindowsAppContainerSecurityCapabilities.Create(
+                new WindowsAppContainerPolicy(
+                    profileName,
+                    NetworkAccessAllowed: false));
+            var delete = Task.Run(() =>
+            {
+                deleteStarted.Set();
+                _ = WindowsAppContainerIdentity.DeleteProfile(profileName);
+                deleteCompleted.Set();
+            });
+            Assert.True(deleteStarted.Wait(ProcessTimeout));
+            Assert.False(deleteCompleted.Wait(TimeSpan.FromMilliseconds(250)));
+
+            capabilities.Dispose();
+            capabilities = null;
+            await delete.WaitAsync(ProcessTimeout);
+            Assert.True(deleteCompleted.IsSet);
+            Assert.False(WindowsAppContainerIdentity.ProfileExists(profileName));
+        }
+        finally
+        {
+            capabilities?.Dispose();
+            if (WindowsAppContainerIdentity.ProfileExists(profileName))
+            {
+                _ = WindowsAppContainerIdentity.DeleteProfile(profileName);
+            }
+        }
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void StableProfileTreeGrantsAccessThroughTheValidatedHandles()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = NewPath("profile-stable-handle-root");
+        var nested = Path.Combine(root, "nested");
+        var file = Path.Combine(nested, "profile-file.bin");
+        Directory.CreateDirectory(nested);
+        File.WriteAllBytes(file, [1, 2, 3, 4]);
+        try
+        {
+            var currentIdentity = WindowsIdentity.GetCurrent().User
+                ?? throw new InvalidOperationException(
+                    "Current Windows identity has no user SID.");
+
+            WindowsAppContainerProfileLifecycleAccess
+                .GrantProfileTreeAccessForTesting(
+                    root,
+                    currentIdentity,
+                    "OpenLineOps.Tests.StableHandles");
+
+            foreach (var directory in new[] { root, nested })
+            {
+                var security = new DirectoryInfo(directory).GetAccessControl(
+                    AccessControlSections.Owner | AccessControlSections.Access);
+                Assert.Equal(
+                    currentIdentity.Value,
+                    Assert.IsType<SecurityIdentifier>(
+                        security.GetOwner(typeof(SecurityIdentifier))).Value);
+                var rule = Assert.Single(
+                    security
+                    .GetAccessRules(
+                        includeExplicit: true,
+                        includeInherited: false,
+                        typeof(SecurityIdentifier))
+                    .Cast<FileSystemAccessRule>(),
+                    candidate =>
+                        candidate.IdentityReference is SecurityIdentifier identity
+                        && string.Equals(
+                            identity.Value,
+                            currentIdentity.Value,
+                            StringComparison.Ordinal));
+                Assert.Equal(AccessControlType.Allow, rule.AccessControlType);
+                Assert.Equal(
+                    FileSystemRights.FullControl,
+                    rule.FileSystemRights & FileSystemRights.FullControl);
+                Assert.Equal(
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    rule.InheritanceFlags);
+            }
+
+            var fileSecurity = new FileInfo(file).GetAccessControl(
+                AccessControlSections.Owner | AccessControlSections.Access);
+            Assert.Equal(
+                currentIdentity.Value,
+                Assert.IsType<SecurityIdentifier>(
+                    fileSecurity.GetOwner(typeof(SecurityIdentifier))).Value);
+            var fileRule = Assert.Single(
+                fileSecurity
+                .GetAccessRules(
+                    includeExplicit: true,
+                    includeInherited: false,
+                    typeof(SecurityIdentifier))
+                .Cast<FileSystemAccessRule>(),
+                candidate =>
+                    candidate.IdentityReference is SecurityIdentifier identity
+                    && string.Equals(
+                        identity.Value,
+                        currentIdentity.Value,
+                        StringComparison.Ordinal));
+            Assert.Equal(AccessControlType.Allow, fileRule.AccessControlType);
+            Assert.Equal(
+                FileSystemRights.FullControl,
+                fileRule.FileSystemRights & FileSystemRights.FullControl);
+            Assert.Equal(InheritanceFlags.None, fileRule.InheritanceFlags);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void StableProfileTreeRejectsFilesWithMoreThanOneHardLink()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = NewPath("profile-hard-link-root");
+        var original = Path.Combine(root, "profile-file.bin");
+        var outsideLink = NewPath("profile-hard-link-alias.bin");
+        Directory.CreateDirectory(root);
+        File.WriteAllBytes(original, [1, 2, 3, 4]);
+        try
+        {
+            Assert.True(CreateHardLink(outsideLink, original, IntPtr.Zero));
+            var currentIdentity = WindowsIdentity.GetCurrent().User
+                ?? throw new InvalidOperationException(
+                    "Current Windows identity has no user SID.");
+
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                WindowsAppContainerProfileLifecycleAccess
+                    .GrantProfileTreeAccessForTesting(
+                        root,
+                        currentIdentity,
+                        "OpenLineOps.Tests.HardLink"));
+
+            Assert.Contains(
+                "exactly one hard link",
+                exception.Message,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(outsideLink);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void ProfileLifecycleManagerGetsIdempotentExactLeafAccess()
+    {
+        if (!TryGetStationServiceIdentity(out var stationIdentity))
+        {
+            return;
+        }
+
+        var managerServiceSid = stationIdentity.ServiceSid;
+        var profileName = "OpenLineOps.Tests.Lifecycle." + Guid.NewGuid().ToString("N");
+        try
+        {
+            var appContainerSid = WindowsAppContainerIdentity.EnsureProfile(
+                profileName,
+                managerServiceSid);
+            var managerIdentity = new SecurityIdentifier(managerServiceSid);
+            var profileDirectory = new DirectoryInfo(
+                WindowsAppContainerIdentity.GetProfileFolderPath(appContainerSid));
+            var damagedAccess = profileDirectory.GetAccessControl(
+                AccessControlSections.Access);
+            damagedAccess.PurgeAccessRules(managerIdentity);
+            damagedAccess.AddAccessRule(new FileSystemAccessRule(
+                managerIdentity,
+                FileSystemRights.ReadAndExecute,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            profileDirectory.SetAccessControl(damagedAccess);
+
+            var registryLeafPaths = new[]
+            {
+                WindowsAppContainerProfileLifecycleAccess.MappingKeyPath(
+                    appContainerSid),
+                WindowsAppContainerProfileLifecycleAccess.MappingKeyPath(
+                    appContainerSid) + "\\Children",
+                WindowsAppContainerProfileLifecycleAccess.StorageKeyPath(
+                    profileName),
+                WindowsAppContainerProfileLifecycleAccess.StorageKeyPath(
+                    profileName) + "\\Children"
+            };
+            foreach (var keyPath in registryLeafPaths)
+            {
+                using var damagedKey = Registry.CurrentUser.OpenSubKey(
+                    keyPath,
+                    RegistryKeyPermissionCheck.ReadWriteSubTree,
+                    RegistryRights.FullControl);
+                Assert.NotNull(damagedKey);
+                var damagedRegistryAccess = damagedKey!.GetAccessControl(
+                    AccessControlSections.Access);
+                damagedRegistryAccess.PurgeAccessRules(managerIdentity);
+                damagedRegistryAccess.AddAccessRule(new RegistryAccessRule(
+                    managerIdentity,
+                    RegistryRights.QueryValues,
+                    InheritanceFlags.ContainerInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+                damagedKey.SetAccessControl(damagedRegistryAccess);
+                damagedKey.Flush();
+            }
+
+            Assert.Equal(
+                appContainerSid,
+                WindowsAppContainerIdentity.EnsureProfile(
+                    profileName,
+                    managerServiceSid));
+
+            var directoryRules = profileDirectory.GetAccessControl(
+                    AccessControlSections.Access)
+                .GetAccessRules(
+                    includeExplicit: true,
+                    includeInherited: false,
+                    typeof(SecurityIdentifier))
+                .Cast<FileSystemAccessRule>()
+                .Where(rule =>
+                    rule.IdentityReference is SecurityIdentifier identity
+                    && string.Equals(
+                        identity.Value,
+                        managerIdentity.Value,
+                        StringComparison.Ordinal)
+                    && rule.AccessControlType == AccessControlType.Allow)
+                .ToArray();
+            var directoryRule = Assert.Single(directoryRules);
+            Assert.Equal(
+                managerServiceSid,
+                Assert.IsType<SecurityIdentifier>(
+                    profileDirectory.GetAccessControl(AccessControlSections.Owner)
+                        .GetOwner(typeof(SecurityIdentifier))).Value);
+            Assert.Equal(
+                FileSystemRights.FullControl,
+                directoryRule.FileSystemRights & FileSystemRights.FullControl);
+            Assert.Equal(
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                directoryRule.InheritanceFlags);
+            Assert.Equal(PropagationFlags.None, directoryRule.PropagationFlags);
+
+            foreach (var keyPath in registryLeafPaths)
+            {
+                using var key = Registry.CurrentUser.OpenSubKey(keyPath, writable: false);
+                Assert.NotNull(key);
+                var security = key!.GetAccessControl(
+                    AccessControlSections.Owner | AccessControlSections.Access);
+                Assert.Equal(
+                    managerServiceSid,
+                    Assert.IsType<SecurityIdentifier>(
+                        security.GetOwner(typeof(SecurityIdentifier))).Value);
+                var registryRules = security
+                    .GetAccessRules(
+                        includeExplicit: true,
+                        includeInherited: false,
+                        typeof(SecurityIdentifier))
+                    .Cast<RegistryAccessRule>()
+                    .Where(rule =>
+                        rule.IdentityReference is SecurityIdentifier identity
+                        && string.Equals(
+                            identity.Value,
+                            managerIdentity.Value,
+                            StringComparison.Ordinal)
+                        && rule.AccessControlType == AccessControlType.Allow)
+                    .ToArray();
+                var registryRule = Assert.Single(registryRules);
+                Assert.Equal(
+                    RegistryRights.FullControl,
+                    registryRule.RegistryRights & RegistryRights.FullControl);
+                Assert.Equal(
+                    InheritanceFlags.ContainerInherit,
+                    registryRule.InheritanceFlags);
+                Assert.Equal(PropagationFlags.None, registryRule.PropagationFlags);
+            }
+        }
+        finally
+        {
+            _ = WindowsAppContainerIdentity.DeleteProfile(profileName);
+        }
+
+        Assert.False(WindowsAppContainerIdentity.ProfileExists(profileName));
+    }
+
+    [Fact]
+    public void ProfileLifecycleManagerRejectsBroadIdentityBeforeProfileCreation()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var profileName = "OpenLineOps.Tests.Reject."
+                          + Guid.NewGuid().ToString("N");
+        var broadIdentity = new SecurityIdentifier(
+            WellKnownSidType.WorldSid,
+            domainSid: null).Value;
+
+        var exception = Assert.Throws<ArgumentException>(() =>
+            WindowsAppContainerIdentity.EnsureProfile(profileName, broadIdentity));
+
+        Assert.Contains(
+            "exact canonical Windows service SID",
+            exception.Message,
+            StringComparison.Ordinal);
+        Assert.False(WindowsAppContainerIdentity.ProfileExists(profileName));
+    }
+
+    [Fact]
+    public void ProfileLifecycleManagerRejectsNonCurrentServiceBeforeProfileCreation()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string otherServiceSid = "S-1-5-80-1-2-3-4-5";
+        var profileName = "OpenLineOps.Tests.Mismatch."
+                          + Guid.NewGuid().ToString("N");
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            WindowsAppContainerIdentity.EnsureProfile(
+                profileName,
+                otherServiceSid));
+
+        Assert.Contains(
+            "Station",
+            exception.Message,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.False(WindowsAppContainerIdentity.ProfileExists(profileName));
     }
 
     [Fact]
@@ -657,16 +1218,25 @@ public sealed class WindowsProcessLauncherTests
             return;
         }
 
-        const int repetitions = 50;
+        const int warmupRepetitions = 20;
+        const int measuredRepetitions = 50;
         var hostProcess = Process.GetCurrentProcess();
-        var startingHandles = hostProcess.HandleCount;
-        for (var iteration = 0; iteration < repetitions; iteration++)
+        var startingHandles = 0;
+        for (var iteration = 0;
+             iteration < warmupRepetitions + measuredRepetitions;
+             iteration++)
         {
+            if (iteration == warmupRepetitions)
+            {
+                startingHandles = ReadStabilizedHandleCount(hostProcess);
+            }
+
             var pidFile = NewPath($"child-{iteration.ToString(CultureInfo.InvariantCulture)}.pid");
             int childProcessId;
-            using (var launched = Launch(
-                       ["sandbox-spawn-child-and-exit", pidFile, "60000"],
-                       EnvironmentForChild()))
+            var launched = Launch(
+                ["sandbox-spawn-child-and-exit", pidFile, "60000"],
+                EnvironmentForChild());
+            try
             {
                 launched.StandardInput.Dispose();
                 using var timeout = new CancellationTokenSource(ProcessTimeout);
@@ -674,17 +1244,136 @@ public sealed class WindowsProcessLauncherTests
                 Assert.Equal(0, launched.ExitCode);
                 childProcessId = await ReadProcessIdAsync(pidFile, timeout.Token);
                 Assert.True(IsProcessRunning(childProcessId));
+                Assert.False(launched.IsJobHandleClosed);
+            }
+            finally
+            {
+                launched.Dispose();
+                Assert.True(launched.IsJobHandleClosed);
             }
 
             await AssertProcessExitedAsync(childProcessId);
             File.Delete(pidFile);
         }
 
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        hostProcess.Refresh();
-        var handleGrowth = hostProcess.HandleCount - startingHandles;
+        var handleGrowth = ReadStabilizedHandleCount(hostProcess) - startingHandles;
         Assert.True(handleGrowth <= 2, $"Process handle count grew by {handleGrowth}.");
+    }
+
+    [Fact]
+    public void DisposeAttemptsEveryResourceBeforeReportingAggregateFailure()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var standardInput = new ThrowingDisposeStream(
+            new IOException("synthetic standard input release failure"));
+        var standardOutput = new ThrowingDisposeStream(
+            new NotSupportedException("synthetic standard output release failure"));
+        var standardError = new ThrowingDisposeStream(
+            new InvalidOperationException("synthetic standard error release failure"));
+        var process = Process.GetCurrentProcess();
+        var processHandle = new SafeProcessHandle(process.Handle, ownsHandle: false);
+        var job = WindowsProcessJob.CreateKillOnClose();
+        var isolated = new WindowsIsolatedProcess(
+            process,
+            processHandle,
+            standardInput,
+            standardOutput,
+            standardError,
+            job);
+
+        var failure = Assert.Throws<AggregateException>(isolated.Dispose);
+
+        Assert.Equal(3, failure.Flatten().InnerExceptions.Count);
+        Assert.Equal(1, standardInput.DisposeCalls);
+        Assert.Equal(1, standardOutput.DisposeCalls);
+        Assert.Equal(1, standardError.DisposeCalls);
+        Assert.True(job.IsClosed);
+        Assert.True(processHandle.IsClosed);
+        isolated.Dispose();
+    }
+
+    [Fact]
+    public async Task ConcurrentDisposeWaitsUntilTheFirstReleaseCompletes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var disposeEntered = new ManualResetEventSlim();
+        using var allowDispose = new ManualResetEventSlim();
+        var standardInput = new BlockingDisposeStream(disposeEntered, allowDispose);
+        var process = Process.GetCurrentProcess();
+        var processHandle = new SafeProcessHandle(process.Handle, ownsHandle: false);
+        var job = WindowsProcessJob.CreateKillOnClose();
+        var isolated = new WindowsIsolatedProcess(
+            process,
+            processHandle,
+            standardInput,
+            new MemoryStream(),
+            new MemoryStream(),
+            job);
+        var firstDispose = Task.Run(isolated.Dispose);
+        Assert.True(disposeEntered.Wait(ProcessTimeout));
+        var secondStarted = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondDispose = Task.Run(() =>
+        {
+            secondStarted.SetResult(true);
+            isolated.Dispose();
+        });
+
+        try
+        {
+            await secondStarted.Task.WaitAsync(ProcessTimeout);
+            await Task.Delay(100);
+            Assert.False(secondDispose.IsCompleted);
+        }
+        finally
+        {
+            allowDispose.Set();
+            await Task.WhenAll(firstDispose, secondDispose).WaitAsync(ProcessTimeout);
+        }
+
+        Assert.Equal(1, standardInput.DisposeCalls);
+        Assert.True(job.IsClosed);
+        Assert.True(processHandle.IsClosed);
+    }
+
+    [Fact]
+    public async Task ProcessTreeWaitOutlivesNormallyExitedRootUntilChildExits()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var pidFile = NewPath("normal-root-exit-child.pid");
+        int childProcessId;
+        using (var launched = Launch(
+                   ["sandbox-spawn-child-and-exit", pidFile, "2000"],
+                   EnvironmentForChild()))
+        {
+            launched.StandardInput.Dispose();
+            using var timeout = new CancellationTokenSource(ProcessTimeout);
+            await launched.WaitForExitAsync(timeout.Token);
+            Assert.Equal(0, launched.ExitCode);
+            childProcessId = await ReadProcessIdAsync(pidFile, timeout.Token);
+            Assert.True(IsProcessRunning(childProcessId));
+
+            var processTreeExit = launched.WaitForProcessTreeExitAsync(timeout.Token);
+            await Task.Delay(100, timeout.Token);
+            Assert.False(processTreeExit.IsCompleted);
+            await processTreeExit;
+            Assert.Equal(0u, launched.ActiveProcessCount);
+        }
+
+        await AssertProcessExitedAsync(childProcessId);
+        File.Delete(pidFile);
     }
 
     [Fact]
@@ -708,12 +1397,8 @@ public sealed class WindowsProcessLauncherTests
             Assert.True(IsProcessRunning(childProcessId));
             Assert.True(launched.ActiveProcessCount >= 1);
             launched.TerminateProcessTree();
-            var stopwatch = Stopwatch.StartNew();
-            while (launched.ActiveProcessCount != 0 && stopwatch.Elapsed < ProcessTimeout)
-            {
-                await Task.Delay(25);
-            }
-
+            using var treeTimeout = new CancellationTokenSource(ProcessTimeout);
+            await launched.WaitForProcessTreeExitAsync(treeTimeout.Token);
             Assert.Equal(0u, launched.ActiveProcessCount);
         }
 
@@ -867,6 +1552,21 @@ public sealed class WindowsProcessLauncherTests
         }
     }
 
+    private static int ReadStabilizedHandleCount(Process process)
+    {
+        var minimumHandleCount = int.MaxValue;
+        for (var attempt = 0; attempt < 4; attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            Thread.Sleep(50);
+            process.Refresh();
+            minimumHandleCount = Math.Min(minimumHandleCount, process.HandleCount);
+        }
+
+        return minimumHandleCount;
+    }
+
     private static bool IsProcessRunning(int processId)
     {
         try
@@ -965,6 +1665,47 @@ public sealed class WindowsProcessLauncherTests
 
     private sealed class LaunchCheckpointException : Exception;
 
+    private sealed class ProfileConfigurationFailureException : Exception;
+
+    private sealed class ThrowingDisposeStream(Exception failure) : MemoryStream
+    {
+        public int DisposeCalls { get; private set; }
+
+        protected override void Dispose(bool disposing)
+        {
+            DisposeCalls++;
+            try
+            {
+                throw failure;
+            }
+            finally
+            {
+                base.Dispose(disposing);
+            }
+        }
+    }
+
+    private sealed class BlockingDisposeStream(
+        ManualResetEventSlim disposeEntered,
+        ManualResetEventSlim allowDispose) : MemoryStream
+    {
+        public int DisposeCalls { get; private set; }
+
+        protected override void Dispose(bool disposing)
+        {
+            DisposeCalls++;
+            try
+            {
+                disposeEntered.Set();
+                Assert.True(allowDispose.Wait(ProcessTimeout));
+            }
+            finally
+            {
+                base.Dispose(disposing);
+            }
+        }
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct SecurityAttributes
     {
@@ -979,4 +1720,11 @@ public sealed class WindowsProcessLauncherTests
         [MarshalAs(UnmanagedType.Bool)] bool manualReset,
         [MarshalAs(UnmanagedType.Bool)] bool initialState,
         string? name);
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateHardLink(
+        string fileName,
+        string existingFileName,
+        IntPtr securityAttributes);
 }

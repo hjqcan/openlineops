@@ -369,6 +369,15 @@ internal static class AppContainerScriptWorkerLauncher
 
     private static void ScavengeStaleProfiles(string markerParent)
     {
+        ScavengeStaleProfiles(markerParent, DeleteProfileWithRetry);
+    }
+
+    internal static void ScavengeStaleProfiles(
+        string markerParent,
+        Action<string> deleteProfile)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(markerParent);
+        ArgumentNullException.ThrowIfNull(deleteProfile);
         var markers = Directory
             .EnumerateFiles(
                 markerParent,
@@ -412,7 +421,7 @@ internal static class AppContainerScriptWorkerLauncher
                 var fileName = Path.GetFileName(markerPath);
                 var staleProfileName = fileName[..^MarkerExtension.Length];
                 ValidateGeneratedProfileName(staleProfileName);
-                DeleteProfileWithRetry(staleProfileName);
+                deleteProfile(staleProfileName);
             }
             TryDeleteMarker(markerPath);
         }
@@ -431,19 +440,48 @@ internal static class AppContainerScriptWorkerLauncher
 
     private static void DeleteProfileWithRetry(string profileName)
     {
+        DeleteProfileWithRetry(
+            profileName,
+            WindowsAppContainerIdentity.DeleteProfile,
+            WindowsAppContainerIdentity.ProbeProfileArtifacts,
+            static delay => Thread.Sleep(delay));
+    }
+
+    internal static void DeleteProfileWithRetry(
+        string profileName,
+        Func<string, bool> deleteProfile,
+        Func<string, WindowsAppContainerProfileArtifactState> profileArtifactsProbe,
+        Action<TimeSpan> retryDelay)
+    {
         ValidateGeneratedProfileName(profileName);
+        ArgumentNullException.ThrowIfNull(deleteProfile);
+        ArgumentNullException.ThrowIfNull(profileArtifactsProbe);
+        ArgumentNullException.ThrowIfNull(retryDelay);
         Exception? lastError = null;
         for (var attempt = 0; attempt < 20; attempt++)
         {
             try
             {
-                _ = WindowsAppContainerIdentity.DeleteProfile(profileName);
-                return;
+                var deletionReported = deleteProfile(profileName);
+                var artifacts = profileArtifactsProbe(profileName);
+                if (!artifacts.AnyArtifactsExist)
+                {
+                    return;
+                }
+
+                lastError = new InvalidOperationException(
+                    deletionReported
+                        ? $"AppContainer profile '{profileName}' retained lifecycle artifacts after deletion."
+                        : $"AppContainer profile '{profileName}' deletion reported no profile while lifecycle artifacts remain.");
             }
             catch (Win32Exception exception)
             {
                 lastError = exception;
-                Thread.Sleep(100);
+            }
+
+            if (attempt < 19)
+            {
+                retryDelay(TimeSpan.FromMilliseconds(100));
             }
         }
 

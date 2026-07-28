@@ -8,6 +8,7 @@ using Microsoft.Win32.SafeHandles;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
+using OpenLineOps.WindowsSecurity;
 
 namespace OpenLineOps.Agent.Infrastructure.Packages;
 

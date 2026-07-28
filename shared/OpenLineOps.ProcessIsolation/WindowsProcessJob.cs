@@ -134,6 +134,8 @@ internal sealed class WindowsProcessJob : IDisposable
         }
     }
 
+    public bool IsClosed => _handle.IsClosed;
+
     public TResult UseHandle<TResult>(Func<IntPtr, TResult> action)
     {
         ArgumentNullException.ThrowIfNull(action);

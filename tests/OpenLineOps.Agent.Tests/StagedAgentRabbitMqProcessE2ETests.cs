@@ -31,6 +31,7 @@ using Microsoft.Win32.SafeHandles;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
+using OpenLineOps.Agent.Infrastructure.Execution;
 using OpenLineOps.Agent.Infrastructure.Persistence;
 using OpenLineOps.Agent.Infrastructure.Transport;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
@@ -52,6 +53,7 @@ using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 using OpenLineOps.Runtime.Infrastructure.Time;
 using OpenLineOps.Runtime.Infrastructure.Transport;
+using OpenLineOps.WindowsSecurity;
 using RabbitMQ.Client;
 using CoordinatorApiProgram = OpenLineOpsApi::Program;
 
@@ -108,6 +110,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     private const uint OpenExisting = 3;
     private const uint FileFlagOpenReparsePoint = 0x00200000;
     private const uint FileFlagBackupSemantics = 0x02000000;
+    private const string LocalServiceAppContainerRegistryPrefix =
+        "S-1-5-19\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows"
+        + "\\CurrentVersion\\AppContainer";
 
     [Fact]
     public void RestrictedServiceTokenEvidenceRequiresEveryIdentityBoundary()
@@ -312,6 +317,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 stationId,
                 package.PackageContentSha256,
                 suffix);
+            var externalProgramProfileName = StationRuntimeIsolationProfile.CreateName(
+                $"OpenLineOps.StagedRmq.{suffix}",
+                agentId,
+                stationId,
+                new StationJobId(request.JobId));
             var recoveredMaterialArrival = CreateRecoveredMaterialArrival(
                 agentId,
                 stationId,
@@ -518,6 +528,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 agent,
                 TimeSpan.FromSeconds(30),
                 "Coordinator did not receive StationJobAccepted before the broker outage.");
+            var appContainerProfileLifecycle =
+                await WaitForRestrictedServiceAppContainerProfileLifecycleAsync(
+                    externalProgramProfileName,
+                    agentIdentity.Sid,
+                    agent,
+                    TimeSpan.FromSeconds(10));
 
             stationStore = new SqliteStationJobStore(
                 $"Data Source={sqlitePath};Pooling=False");
@@ -590,6 +606,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             }
             Assert.Null(await coordinationStore.GetCompletionAsync(request.IdempotencyKey));
             Assert.True(offlinePendingOutboxCount > 0);
+            await VerifyRestrictedServiceAppContainerProfileRemovedAsync(
+                appContainerProfileLifecycle,
+                agent,
+                TimeSpan.FromSeconds(30));
             var immutablePackageAccessEvidence =
                 VerifyImmutablePackageProtectionAfterProductionExecution(
                     packageCacheRoot,
@@ -2825,6 +2845,297 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     }
 
     [SupportedOSPlatform("windows")]
+    private static async Task<AppContainerProfileLifecycleProbe>
+        WaitForRestrictedServiceAppContainerProfileLifecycleAsync(
+            string profileName,
+            string managerServiceSid,
+            WindowsAgentProcess agent,
+            TimeSpan timeout)
+    {
+        var managerIdentity = new SecurityIdentifier(
+            WindowsStationServiceIdentityReader.RequireCanonicalServiceSid(
+                managerServiceSid,
+                nameof(managerServiceSid)));
+        var appContainerSid = DeriveAppContainerSid(profileName);
+        var packageRoot = ResolveLocalServiceAppContainerPackageRoot(profileName);
+        var mappingPath =
+            LocalServiceAppContainerRegistryPrefix + "\\Mappings\\" + appContainerSid;
+        var storagePath =
+            LocalServiceAppContainerRegistryPrefix + "\\Storage\\"
+            + profileName.ToLowerInvariant();
+        string[] registryPaths =
+        [
+            mappingPath,
+            mappingPath + "\\Children",
+            storagePath,
+            storagePath + "\\Children"
+        ];
+        var elapsed = Stopwatch.StartNew();
+        Exception? lastFailure = null;
+        while (elapsed.Elapsed < timeout)
+        {
+            if (agent.HasExited)
+            {
+                throw new InvalidOperationException(
+                    "The staged Agent exited before its restricted-service AppContainer profile "
+                    + $"could be inspected (exit code {agent.ExitCode}).");
+            }
+
+            try
+            {
+                VerifyAppContainerProfileDirectoryLifecycleAccess(
+                    packageRoot,
+                    managerIdentity,
+                    profileName,
+                    "package root");
+                VerifyAppContainerProfileDirectoryLifecycleAccess(
+                    Path.Combine(packageRoot, "AC"),
+                    managerIdentity,
+                    profileName,
+                    "AC directory");
+                VerifyAppContainerProfileRegistryLifecycleAccess(
+                    registryPaths,
+                    mappingPath,
+                    profileName,
+                    managerIdentity);
+                return new AppContainerProfileLifecycleProbe(
+                    profileName,
+                    appContainerSid,
+                    packageRoot,
+                    registryPaths);
+            }
+            catch (Exception exception) when (exception is IOException
+                                              or UnauthorizedAccessException
+                                              or InvalidOperationException
+                                              or System.Security.SecurityException
+                                              or Win32Exception)
+            {
+                lastFailure = exception;
+            }
+
+            await Task.Delay(50);
+        }
+
+        throw new TimeoutException(
+            $"The restricted-service AppContainer profile '{profileName}' did not expose "
+            + "its exact directory and four-registry-leaf lifecycle ACLs within the gate bound. "
+            + $"Last inspection failure: {lastFailure?.Message ?? "profile was absent"}",
+            lastFailure);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static async Task VerifyRestrictedServiceAppContainerProfileRemovedAsync(
+        AppContainerProfileLifecycleProbe profile,
+        WindowsAgentProcess agent,
+        TimeSpan timeout)
+    {
+        await WaitUntilAsync(
+            () => Task.FromResult(IsAppContainerProfileRemoved(profile)),
+            agent,
+            timeout,
+            $"Restricted-service AppContainer profile '{profile.ProfileName}' was not fully deleted.");
+        Assert.True(IsAppContainerProfileRemoved(profile));
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static bool IsAppContainerProfileRemoved(
+        AppContainerProfileLifecycleProbe profile)
+    {
+        if (Directory.Exists(profile.PackageRoot))
+        {
+            return false;
+        }
+
+        using var users = RegistryKey.OpenBaseKey(
+            RegistryHive.Users,
+            RegistryView.Default);
+        foreach (var registryPath in profile.RegistryPaths)
+        {
+            using var key = users.OpenSubKey(registryPath, writable: false);
+            if (key is not null)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyAppContainerProfileDirectoryLifecycleAccess(
+        string path,
+        SecurityIdentifier managerIdentity,
+        string profileName,
+        string description)
+    {
+        var directory = new DirectoryInfo(path);
+        directory.Refresh();
+        if (!directory.Exists
+            || (directory.Attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidOperationException(
+                $"AppContainer profile '{profileName}' {description} is absent or redirected.");
+        }
+
+        var security = directory.GetAccessControl(
+            AccessControlSections.Owner | AccessControlSections.Access);
+        if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner
+            || !string.Equals(
+                owner.Value,
+                managerIdentity.Value,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"AppContainer profile '{profileName}' {description} owner is not its exact service SID.");
+        }
+
+        var managerRules = security
+            .GetAccessRules(
+                includeExplicit: true,
+                includeInherited: false,
+                typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .Where(rule =>
+                rule.IdentityReference is SecurityIdentifier identity
+                && string.Equals(
+                    identity.Value,
+                    managerIdentity.Value,
+                    StringComparison.Ordinal))
+            .ToArray();
+        if (managerRules.Length != 1
+            || managerRules[0].AccessControlType != AccessControlType.Allow
+            || (managerRules[0].FileSystemRights & FileSystemRights.FullControl)
+            != FileSystemRights.FullControl
+            || managerRules[0].InheritanceFlags
+            != (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit)
+            || managerRules[0].PropagationFlags != PropagationFlags.None)
+        {
+            throw new InvalidOperationException(
+                $"AppContainer profile '{profileName}' {description} does not grant exactly one "
+                + "explicit inheritable FullControl rule to its exact service SID.");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyAppContainerProfileRegistryLifecycleAccess(
+        IReadOnlyList<string> registryPaths,
+        string mappingPath,
+        string profileName,
+        SecurityIdentifier managerIdentity)
+    {
+        using var users = RegistryKey.OpenBaseKey(
+            RegistryHive.Users,
+            RegistryView.Default);
+        foreach (var registryPath in registryPaths)
+        {
+            using var key = users.OpenSubKey(
+                registryPath,
+                RegistryKeyPermissionCheck.ReadSubTree,
+                RegistryRights.QueryValues | RegistryRights.ReadPermissions)
+                ?? throw new InvalidOperationException(
+                    $"AppContainer profile '{profileName}' registry leaf '{registryPath}' is absent.");
+            var security = key.GetAccessControl(
+                AccessControlSections.Owner | AccessControlSections.Access);
+            if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner
+                || !string.Equals(
+                    owner.Value,
+                    managerIdentity.Value,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"AppContainer profile '{profileName}' registry leaf '{registryPath}' "
+                    + "owner is not its exact service SID.");
+            }
+
+            var managerRules = security
+                .GetAccessRules(
+                    includeExplicit: true,
+                    includeInherited: false,
+                    typeof(SecurityIdentifier))
+                .Cast<RegistryAccessRule>()
+                .Where(rule =>
+                    rule.IdentityReference is SecurityIdentifier identity
+                    && string.Equals(
+                        identity.Value,
+                        managerIdentity.Value,
+                        StringComparison.Ordinal))
+                .ToArray();
+            if (managerRules.Length != 1
+                || managerRules[0].AccessControlType != AccessControlType.Allow
+                || (managerRules[0].RegistryRights & RegistryRights.FullControl)
+                != RegistryRights.FullControl
+                || managerRules[0].InheritanceFlags != InheritanceFlags.ContainerInherit
+                || managerRules[0].PropagationFlags != PropagationFlags.None)
+            {
+                throw new InvalidOperationException(
+                    $"AppContainer profile '{profileName}' registry leaf '{registryPath}' "
+                    + "does not grant exactly one explicit inheritable FullControl rule "
+                    + "to its exact service SID.");
+            }
+
+            if (string.Equals(registryPath, mappingPath, StringComparison.Ordinal)
+                && !string.Equals(
+                    key.GetValue(
+                        "Moniker",
+                        defaultValue: null,
+                        RegistryValueOptions.DoNotExpandEnvironmentNames) as string,
+                    profileName.ToLowerInvariant(),
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"AppContainer profile '{profileName}' mapping moniker is not canonical.");
+            }
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static string ResolveLocalServiceAppContainerPackageRoot(string profileName)
+    {
+        using var profileKey = Registry.LocalMachine.OpenSubKey(
+            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\S-1-5-19",
+            writable: false)
+            ?? throw new InvalidOperationException(
+                "The LocalService profile registry entry is absent.");
+        var rawProfilePath = profileKey.GetValue(
+                "ProfileImagePath",
+                defaultValue: null,
+                RegistryValueOptions.DoNotExpandEnvironmentNames) as string
+            ?? throw new InvalidOperationException(
+                "The LocalService profile registry entry has no ProfileImagePath.");
+        var profilePath = Path.GetFullPath(
+            Environment.ExpandEnvironmentVariables(rawProfilePath));
+        return Path.GetFullPath(Path.Combine(
+            profilePath,
+            "AppData",
+            "Local",
+            "Packages",
+            profileName.ToLowerInvariant()));
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static string DeriveAppContainerSid(string profileName)
+    {
+        var result = DeriveStagedAppContainerSidFromName(
+            profileName,
+            out var sidPointer);
+        if (result < 0 || sidPointer == IntPtr.Zero)
+        {
+            throw new Win32Exception(
+                result & 0xFFFF,
+                $"Could not derive staged AppContainer profile '{profileName}'.");
+        }
+
+        try
+        {
+            return new SecurityIdentifier(sidPointer).Value;
+        }
+        finally
+        {
+            _ = FreeStagedAppContainerSid(sidPointer);
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
     private static async Task WaitUntilAsync(
         Func<Task<bool>> predicate,
         WindowsAgentProcess agent,
@@ -3430,6 +3741,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         uint creationDisposition,
         uint flagsAndAttributes,
         IntPtr templateFile);
+
+    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
+    private static extern int DeriveStagedAppContainerSidFromName(
+        string appContainerName,
+        out IntPtr appContainerSid);
+
+    [DllImport("advapi32.dll")]
+    private static extern IntPtr FreeStagedAppContainerSid(IntPtr sid);
 
     private static void CaptureCleanupFailure(
         List<Exception> failures,
@@ -4063,6 +4382,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         bool OutboxRecoveryVerified,
         bool DurablePublicationVerified,
         bool OrdinaryCiTokenExplicitAccessDenied);
+
+    private sealed record AppContainerProfileLifecycleProbe(
+        string ProfileName,
+        string AppContainerSid,
+        string PackageRoot,
+        IReadOnlyList<string> RegistryPaths);
 
     private sealed record ImmutableContentCacheEvidence(
         bool PackagedProvisionCommandVerified,

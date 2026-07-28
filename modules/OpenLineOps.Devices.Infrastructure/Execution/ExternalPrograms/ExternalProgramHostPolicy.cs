@@ -3,6 +3,7 @@ using System.Security.Principal;
 using OpenLineOps.ContentProtection;
 using OpenLineOps.Devices.Application.Execution.ExternalPrograms;
 using OpenLineOps.ProcessIsolation;
+using OpenLineOps.WindowsSecurity;
 
 namespace OpenLineOps.Devices.Infrastructure.Execution.ExternalPrograms;
 

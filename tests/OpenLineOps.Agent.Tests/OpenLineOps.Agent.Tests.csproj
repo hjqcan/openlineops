@@ -31,6 +31,7 @@
     <ProjectReference Include="..\..\modules\OpenLineOps.Devices.Application\OpenLineOps.Devices.Application.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Processes.Application\OpenLineOps.Processes.Application.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Agent.Contracts\OpenLineOps.Agent.Contracts.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.WindowsSecurity\OpenLineOps.WindowsSecurity.csproj" />
     <ProjectReference Include="..\OpenLineOps.StationRuntime.TestHelper\OpenLineOps.StationRuntime.TestHelper.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.StationRuntime\OpenLineOps.StationRuntime.csproj"
                       ReferenceOutputAssembly="false" />
@@ -58,12 +59,13 @@
     <ItemGroup>
       <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.ContentProtection.dll" />
       <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.ProcessIsolation.dll" />
+      <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.WindowsSecurity.dll" />
       <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.LeastPrivilegeLauncher.dll" />
       <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.LeastPrivilegeLauncher.exe" />
       <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.LeastPrivilegeLauncher.deps.json" />
       <_LauncherTestBundleRootFile Include="$(_LauncherOutputDir)OpenLineOps.LeastPrivilegeLauncher.runtimeconfig.json" />
       <_LauncherTestBundleRootFile Include="$(_ScriptWorkerOutputDir)*.dll"
-                                   Exclude="$(_ScriptWorkerOutputDir)OpenLineOps.ContentProtection.dll;$(_ScriptWorkerOutputDir)OpenLineOps.ProcessIsolation.dll;$(_ScriptWorkerOutputDir)OpenLineOps.LeastPrivilegeLauncher.dll" />
+                                   Exclude="$(_ScriptWorkerOutputDir)OpenLineOps.ContentProtection.dll;$(_ScriptWorkerOutputDir)OpenLineOps.ProcessIsolation.dll;$(_ScriptWorkerOutputDir)OpenLineOps.WindowsSecurity.dll;$(_ScriptWorkerOutputDir)OpenLineOps.LeastPrivilegeLauncher.dll" />
       <_LauncherTestBundleRootFile Include="$(_ScriptWorkerOutputDir)OpenLineOps.ScriptWorker.exe" />
       <_LauncherTestBundleRootFile Include="$(_ScriptWorkerOutputDir)OpenLineOps.ScriptWorker.deps.json" />
       <_LauncherTestBundleRootFile Include="$(_ScriptWorkerOutputDir)OpenLineOps.ScriptWorker.runtimeconfig.json" />

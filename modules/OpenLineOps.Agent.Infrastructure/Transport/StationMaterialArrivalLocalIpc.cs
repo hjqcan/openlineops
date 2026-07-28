@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.ContentProtection;
+using OpenLineOps.WindowsSecurity;
 
 namespace OpenLineOps.Agent.Infrastructure.Transport;
 

@@ -2,6 +2,7 @@ using System.Runtime.Versioning;
 using System.Security.Principal;
 using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
+using OpenLineOps.WindowsSecurity;
 
 namespace OpenLineOps.Agent;
 

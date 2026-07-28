@@ -21,6 +21,7 @@ using OpenLineOps.Agent.Contracts;
 using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Projects.Api.Integrations;
+using OpenLineOps.WindowsSecurity;
 using RabbitMQ.Client;
 
 namespace OpenLineOps.Runner.Tests;

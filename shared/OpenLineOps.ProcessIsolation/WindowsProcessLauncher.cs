@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -16,7 +17,8 @@ public sealed record IsolatedProcessStartRequest(
 public sealed record WindowsAppContainerPolicy(
     string ProfileName,
     bool NetworkAccessAllowed,
-    IReadOnlyCollection<string>? AdditionalCapabilityNames = null);
+    IReadOnlyCollection<string>? AdditionalCapabilityNames = null,
+    string? ProfileLifecycleManagerServiceSid = null);
 
 public enum WindowsProcessLaunchCheckpoint
 {
@@ -707,6 +709,8 @@ public interface IIsolatedProcess : IDisposable
 
     Task WaitForExitAsync(CancellationToken cancellationToken = default);
 
+    Task WaitForProcessTreeExitAsync(CancellationToken cancellationToken = default);
+
     void TerminateProcessTree();
 }
 
@@ -714,6 +718,8 @@ public sealed class WindowsIsolatedProcess : IIsolatedProcess
 {
     private readonly Process _process;
     private readonly SafeProcessHandle _processHandle;
+    private readonly TaskCompletionSource<bool> _disposeCompletion =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     private WindowsProcessJob? _job;
     private int _disposed;
 
@@ -764,8 +770,58 @@ public sealed class WindowsIsolatedProcess : IIsolatedProcess
 
     public uint ActiveProcessCount => Volatile.Read(ref _job)?.ActiveProcessCount ?? 0;
 
+    internal bool IsJobHandleClosed
+    {
+        get
+        {
+            var job = Volatile.Read(ref _job);
+            return job?.IsClosed ?? _disposeCompletion.Task.IsCompleted;
+        }
+    }
+
     public Task WaitForExitAsync(CancellationToken cancellationToken = default) =>
         _process.WaitForExitAsync(cancellationToken);
+
+    public async Task WaitForProcessTreeExitAsync(
+        CancellationToken cancellationToken = default)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var job = Volatile.Read(ref _job);
+            if (job is null)
+            {
+                if (Volatile.Read(ref _disposed) != 0)
+                {
+                    await _disposeCompletion.Task
+                        .WaitAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    throw new ObjectDisposedException(nameof(WindowsIsolatedProcess));
+                }
+
+                throw new InvalidOperationException(
+                    "The isolated Windows process has no Job Object.");
+            }
+
+            try
+            {
+                if (job.ActiveProcessCount == 0)
+                {
+                    return;
+                }
+            }
+            catch (ObjectDisposedException) when (Volatile.Read(ref _disposed) != 0)
+            {
+                await _disposeCompletion.Task
+                    .WaitAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                throw new ObjectDisposedException(nameof(WindowsIsolatedProcess));
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
 
     public void TerminateProcessTree()
     {
@@ -774,17 +830,52 @@ public sealed class WindowsIsolatedProcess : IIsolatedProcess
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0)
         {
+            _disposeCompletion.Task.GetAwaiter().GetResult();
             return;
         }
 
-        TerminateProcessTree();
-        StandardInput.Dispose();
-        StandardOutput.Dispose();
-        StandardError.Dispose();
-        _process.Dispose();
-        _processHandle.Dispose();
+        var failures = new List<Exception>();
+        var job = Interlocked.Exchange(ref _job, null);
+        try
+        {
+            CaptureFailure(failures, () => job?.Terminate());
+            CaptureFailure(failures, () => job?.Dispose());
+            CaptureFailure(failures, StandardInput.Dispose);
+            CaptureFailure(failures, StandardOutput.Dispose);
+            CaptureFailure(failures, StandardError.Dispose);
+            CaptureFailure(failures, _process.Dispose);
+            CaptureFailure(failures, _processHandle.Dispose);
+        }
+        finally
+        {
+            _disposeCompletion.TrySetResult(true);
+        }
+
+        if (failures.Count == 1)
+        {
+            ExceptionDispatchInfo.Capture(failures[0]).Throw();
+        }
+
+        if (failures.Count > 1)
+        {
+            throw new AggregateException(
+                "Could not release the isolated Windows process tree.",
+                failures);
+        }
+    }
+
+    private static void CaptureFailure(List<Exception> failures, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception exception)
+        {
+            failures.Add(exception);
+        }
     }
 
     private const uint StillActive = 259;
