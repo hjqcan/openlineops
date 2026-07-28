@@ -355,13 +355,13 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | mime-types | 2.1.35 | MIT | npm:package-lock |
 | minimist | 1.2.8 | MIT | npm:package-lock |
 | ms | 2.1.3 | MIT | npm:package-lock |
-| nanoid | 3.3.15 | MIT | npm:package-lock |
+| nanoid | 3.3.16 | MIT | npm:package-lock |
 | node-fetch | 2.7.0 | MIT | npm:package-lock |
 | node-releases | 2.0.50 | MIT | npm:package-lock |
 | parse5 | 8.0.1 | MIT | npm:package-lock |
 | picocolors | 1.1.1 | ISC | npm:package-lock |
 | picomatch | 4.0.4 | MIT | npm:package-lock |
-| postcss | 8.5.16 | MIT | npm:package-lock |
+| postcss | 8.5.23 | MIT | npm:package-lock |
 | progress | 2.0.3 | MIT | npm:package-lock |
 | proxy-from-env | 2.1.0 | MIT | npm:package-lock |
 | psl | 1.15.0 | MIT | npm:package-lock |
