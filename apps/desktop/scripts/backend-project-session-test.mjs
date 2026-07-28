@@ -22,8 +22,10 @@ test('active Project session accepts only a canonical ordinary .oloproj file', a
 
     assert.equal(resolveActiveProjectFile(projectFile), projectFile);
     assert.equal(resolveActiveProjectFile(null), null);
+    // path.relative() returns an absolute path across Windows volumes, so use a
+    // fixture that is relative regardless of the runner's workspace and temp drives.
     assert.throws(
-      () => resolveActiveProjectFile(path.relative(process.cwd(), projectFile)),
+      () => resolveActiveProjectFile(path.join('relative-project', 'line.oloproj')),
       /canonical absolute \.oloproj/u);
     assert.throws(
       () => resolveActiveProjectFile(`${projectFile} `),
