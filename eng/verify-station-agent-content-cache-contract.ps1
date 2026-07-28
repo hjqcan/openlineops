@@ -290,6 +290,7 @@ foreach ($controllerLiteral in @(
         "CreateSuspendedFlag",
         "CreateUnicodeEnvironment",
         "ExtendedStartupInfoPresent",
+        "Desktop = string.Empty",
         "inheritHandles: false",
         "ProcessSecurityDescriptor(runnerSid)",
         "ProcessTerminate | ProcessQueryLimitedInformation | Synchronize",
@@ -304,6 +305,7 @@ foreach ($controllerLiteral in @(
     Assert-ContainsLiteral $relayController $controllerLiteral "The direct Test Relay controller is missing containment boundary '$controllerLiteral'."
 }
 Assert-ForbiddenPattern $relayController 'CREATE_BREAKAWAY_FROM_JOB|CreateBreakawayFromJob|Process\.GetProcessById|OpenProcess\(|WellKnownSidType|BuiltinAdministrators|LocalSystemSid' "The direct Test Relay controller contains breakaway, PID reopen, fallback, or an over-broad process DACL."
+Assert-ForbiddenPattern $relayController 'Desktop\s*=\s*(?:null|@?\"WinSta0)' "The direct Test Relay controller must not inherit or select an interactive desktop."
 if ([regex]::Matches($relayController, [regex]::Escape("CreateProcess(")).Count -ne 2) {
     throw "The direct Test Relay controller must contain one CreateProcess call and one P/Invoke declaration."
 }

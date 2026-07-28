@@ -100,7 +100,8 @@ internal sealed class WindowsSourceTokenRelayProcess : IDisposable
             {
                 StartupInfo = new StartupInfo
                 {
-                    Size = checked((uint)Marshal.SizeOf<StartupInfoEx>())
+                    Size = checked((uint)Marshal.SizeOf<StartupInfoEx>()),
+                    Desktop = string.Empty
                 },
                 AttributeList = attributes.Handle
             };
@@ -289,7 +290,7 @@ internal sealed class WindowsSourceTokenRelayProcess : IDisposable
         {
             var exitCode = ReadExitCode(_process);
             throw new InvalidOperationException(
-                $"Source-token relay PID {ProcessId} exited with code {exitCode} {phase}.");
+                $"Source-token relay PID {ProcessId} exited with code {FormatExitCode(exitCode)} {phase}.");
         }
         if (wait == WaitFailed)
         {
@@ -321,7 +322,7 @@ internal sealed class WindowsSourceTokenRelayProcess : IDisposable
                 if (exitCode != 0)
                 {
                     throw new InvalidOperationException(
-                        $"Source-token relay PID {ProcessId} exited with code {exitCode}.");
+                        $"Source-token relay PID {ProcessId} exited with code {FormatExitCode(exitCode)}.");
                 }
 
                 return;
@@ -503,6 +504,9 @@ internal sealed class WindowsSourceTokenRelayProcess : IDisposable
 
         return exitCode;
     }
+
+    private static string FormatExitCode(uint exitCode) =>
+        $"{exitCode} (0x{exitCode:x8})";
 
     private static Exception? TerminateJobAndWait(
         SafeJobHandle? job,
