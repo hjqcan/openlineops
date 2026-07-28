@@ -508,9 +508,10 @@ Test-FileContains "eng/verify-release-staging-security.ps1" "untracked-secret" "
 Test-FileContains "eng/verify-release-staging-security.ps1" "requires a clean Git worktree" "Release staging security regression must prove formal publication rejects dirty trees."
 Test-FileContains "eng/verify-release-staging-security.ps1" "publication-password-sentinel" "Release staging security regression must prove removed password arguments cannot leak secrets."
 Test-FileContains "eng/verify-release-staging-security.ps1" "taskkill" "Release staging security regression must prove timed-out process trees are terminated."
-Test-FileContains "eng/verify-release-staging-security.ps1" "case-varied-directory" "Release staging security regression must behavior-test case-varied test-only Test Relay directory rejection."
-Test-FileContains "eng/verify-release-staging-security.ps1" "case-varied-file-prefix" "Release staging security regression must behavior-test case-varied test-only Test Relay file-prefix rejection."
-Test-FileContains "eng/verify-release-staging-security.ps1" "renamed-binary-identity" "Release staging security regression must behavior-test renamed portable executables containing the test-only Test Relay identity."
+Test-FileContains "eng/verify-release-staging-security.ps1" "source-file-extension" "Release staging security regression must behavior-test source-file rejection from deployable payloads."
+Test-FileContains "eng/verify-release-staging-security.ps1" "case-varied-tests-directory" "Release staging security regression must behavior-test case-varied tests-directory rejection."
+Test-FileContains "eng/verify-release-staging-security.ps1" "test-assembly-file-name" "Release staging security regression must behavior-test test-assembly file-name rejection."
+Test-FileContains "eng/verify-release-staging-security.ps1" "renamed-test-binary-identity" "Release staging security regression must behavior-test renamed portable executables containing test-framework identity."
 Test-FileContains "eng/stage-release-artifacts.ps1" "release-metadata-checksums.sha256" "Release staging must generate metadata checksums."
 Test-FileContains "eng/inspect-release-candidate.ps1" "RequireSignedWindowsArtifacts" "Release candidate inspection must enforce every shipped Windows executable signature."
 Test-FileContains "eng/inspect-release-candidate.ps1" "bundle-manifest.json" "Release candidate inspection must verify the Agent and Runner bundle manifests."
@@ -553,17 +554,22 @@ Test-FileContains "eng/write-publication-evidence.ps1" "verify-staged-agent-evid
 Test-FileContains "eng/write-publication-evidence.ps1" "verify-production-closure-evidence.ps1" "Publication evidence generation must require strict production closure evidence."
 Test-FileContains "eng/write-publication-evidence.ps1" "verify-studio-two-agent-production-evidence.ps1" "Publication evidence generation must require strict Studio two-Agent evidence."
 Test-FileContains "eng/write-publication-evidence.ps1" "verify-runner-staged-agent-evidence.ps1" "Publication evidence generation must require strict Runner evidence."
-Test-FileContains "eng/verify-staged-agent-evidence.ps1" "serviceTokenConnected" "Staged Agent evidence must require the service-token material-arrival connection fact."
-Test-FileContains "eng/verify-staged-agent-evidence.ps1" "pipeExactAclVerified" "Staged Agent evidence must require the exact material-arrival pipe ACL fact."
+Test-FileContains "eng/verify-staged-agent-evidence.ps1" "outboxRecoveryVerified" "Staged Agent evidence must require material-arrival outbox recovery."
 Test-FileContains "eng/verify-staged-agent-evidence.ps1" "durablePublicationVerified" "Staged Agent evidence must require the durable material-arrival publication fact."
 Test-FileContains "eng/verify-staged-agent-evidence.ps1" "ordinaryCiTokenExplicitAccessDenied" "Staged Agent evidence must require explicit denial of the ordinary CI token."
+Test-FileContains "eng/verify-staged-agent-evidence.ps1" "productionRuntimeReadExecuteVerified" "Staged Agent evidence must require real production Runtime package read and execute verification."
+Test-FileContains "eng/verify-staged-agent-evidence.ps1" "serviceSidReadOnlyAclVerified" "Staged Agent evidence must require the exact service-SID read-only cache ACL."
+Test-FileContains "eng/verify-staged-agent-evidence.ps1" "nestedServiceSidReadOnlyAclVerified" "Staged Agent evidence must require nested service-SID read-only cache ACLs."
+Test-FileContains "eng/verify-staged-agent-evidence.ps1" "administratorPreSealRecoveryFixtureVerified" "Staged Agent evidence must bind pre-seal recovery to the administrator fixture."
 Test-FileContains "eng/verify-evidence-validation.tests.ps1" "staged Agent material-arrival proof uses a truthy integer" "Staged Agent evidence regression must reject truthy non-boolean material-arrival facts."
-Test-FileContains "eng/verify-studio-two-agent-production-evidence.ps1" "entryServiceTokenConnected" "Studio two-Agent evidence must require the entry service-token connection fact."
-Test-FileContains "eng/verify-studio-two-agent-production-evidence.ps1" "entryPipeExactAclVerified" "Studio two-Agent evidence must require the entry pipe exact-ACL fact."
-Test-FileContains "eng/verify-studio-two-agent-production-evidence.ps1" "downstreamServiceTokenExplicitAccessDenied" "Studio two-Agent evidence must require explicit denial of the downstream service token."
+Test-FileContains "eng/verify-studio-two-agent-production-evidence.ps1" "entryRestrictedServiceIdentityVerified" "Studio two-Agent evidence must require the real entry restricted service identity."
+Test-FileContains "eng/verify-studio-two-agent-production-evidence.ps1" "downstreamRestrictedServiceIdentityVerified" "Studio two-Agent evidence must require the real downstream restricted service identity."
+Test-FileContains "eng/verify-studio-two-agent-production-evidence.ps1" "entryPipeOrdinaryTokenExplicitAccessDenied" "Studio two-Agent evidence must require ordinary-token denial on the entry pipe."
+Test-FileContains "eng/verify-studio-two-agent-production-evidence.ps1" "downstreamPipeOrdinaryTokenExplicitAccessDenied" "Studio two-Agent evidence must require ordinary-token denial on the downstream pipe."
+Test-FileContains "eng/verify-studio-two-agent-production-evidence.ps1" "distinctMaterialArrivalPipes" "Studio two-Agent evidence must require distinct material-arrival pipes."
 Test-FileContains "eng/verify-studio-two-agent-production-evidence.ps1" "bothServicesRunningOnOriginalPids" "Studio two-Agent evidence must require both services to remain on their original PIDs."
-Test-FileContains "eng/verify-studio-two-agent-production-evidence.tests.ps1" "entry service token proof uses a truthy integer" "Studio two-Agent evidence regression must reject a truthy integer identity fact."
-Test-FileContains "eng/verify-studio-two-agent-production-evidence.tests.ps1" "entry pipe ACL proof uses a truthy string" "Studio two-Agent evidence regression must reject a truthy string identity fact."
+Test-FileContains "eng/verify-studio-two-agent-production-evidence.tests.ps1" "entry restricted identity proof uses a truthy integer" "Studio two-Agent evidence regression must reject a truthy integer identity fact."
+Test-FileContains "eng/verify-studio-two-agent-production-evidence.tests.ps1" "entry ordinary-token denial uses a truthy string" "Studio two-Agent evidence regression must reject a truthy string pipe-denial fact."
 Test-FileContains "eng/verify-ci-release-artifact-inspection.ps1" "fully-rebound-staged-material-arrival-downgrade" "CI artifact inspection regression must reject fully rebound staged material-arrival semantic downgrade."
 Test-FileContains "eng/verify-ci-release-artifact-inspection.ps1" "fully-rebound-studio-windows-identity-downgrade" "CI artifact inspection regression must reject fully rebound Studio identity semantic downgrade."
 Test-FileContains "eng/verify-evidence-validation.tests.ps1" "station package contains zip traversal" "Evidence regression must reject Station package traversal."
@@ -603,14 +609,33 @@ Test-FileContains "eng/verify-release-candidate-inspection.ps1" "bad-dependency-
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "missing-metadata-checksums" "Release candidate inspection verification must cover missing metadata checksums."
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "bad-metadata-checksums" "Release candidate inspection verification must cover bad metadata checksums."
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "tampered-agent-bundle" "Release candidate inspection verification must reject tampered Agent payloads."
-Test-FileContains "eng/verify-release-candidate-inspection.ps1" "test-only-service-token-test-relay-leak" "Release candidate inspection verification must reject the test-only service-token Test Relay by its forbidden file-name prefix."
-Test-FileContains "eng/verify-release-candidate-inspection.ps1" "renamed-test-only-service-token-test-relay-directory-leak" "Release candidate inspection verification must reject renamed test-only service-token Test Relay payloads in case-varied Test Relay directories."
-Test-FileContains "eng/verify-release-candidate-inspection.ps1" "renamed-test-only-service-token-test-relay-binary-leak" "Release candidate inspection verification must reject renamed portable executables containing the test-only Test Relay identity."
-Test-FileContains "eng/verify-release-candidate-inspection.ps1" "unmanifested-test-only-service-token-test-relay-binary-leak" "Release candidate inspection verification must reject unmanifested Test Relay payloads outside the release inventory."
-Test-FileContains "eng/verify-release-candidate-inspection.ps1" "missing-service-token-test-relay-source" "Release candidate inspection verification must require the test-only Test Relay source in the source artifact."
-Test-FileContains "eng/verify-release-candidate-inspection.ps1" "WindowsServiceTokenTestBridge.cs" "Release candidate inspection verification must require the Test Relay controller source."
-Test-FileContains "eng/verify-release-candidate-inspection.ps1" "WindowsSourceTokenRelayProcess.cs" "Release candidate inspection verification must require the source-process fixture source."
-Test-FileContains "eng/verify-release-candidate-inspection.ps1" "WindowsServiceTokenTestRelayContractTests.cs" "Release candidate inspection verification must require the Test Relay security contract tests."
+Test-FileContains "eng/verify-release-candidate-inspection.ps1" "test-only-directory-payload-leak" "Release candidate inspection verification must reject deployable tests directories."
+Test-FileContains "eng/verify-release-candidate-inspection.ps1" "test-only-assembly-name-payload-leak" "Release candidate inspection verification must reject test assembly file names."
+Test-FileContains "eng/verify-release-candidate-inspection.ps1" "renamed-test-only-binary-payload-leak" "Release candidate inspection verification must reject renamed test binaries by binary identity."
+Test-FileContains "eng/verify-release-candidate-inspection.ps1" "fully-remanifested-rehashed-source-leak" "Release candidate inspection verification must reject a fully re-manifested and re-hashed source-file leak."
+Test-FileContains "eng/verify-release-candidate-inspection.ps1" "Assert-BundleEntryIsFullyManifestedAndHashed" "The source-file leak fixture must prove its bundle and release integrity metadata were fully regenerated."
+Test-FileContains "eng/verify-release-candidate-inspection.ps1" "unmanifested-test-only-binary-payload-leak" "Release candidate inspection verification must reject unmanifested test payloads."
+Test-FileContains "eng/stage-release-artifacts.ps1" "Assert-NoDevelopmentOnlyPayload" "Release staging must reject source, project, and test-only payloads from deployable artifacts."
+Test-FileContains "eng/inspect-release-candidate.ps1" "Test-NoDevelopmentOnlyPayloadEntries" "Release candidate inspection must independently reject source, project, and test-only payloads."
+foreach ($extension in @(
+        ".cs",
+        ".fs",
+        ".vb",
+        ".csproj",
+        ".fsproj",
+        ".vbproj",
+        ".sln",
+        ".slnx")) {
+    $extensionPattern = [regex]::Escape('"' + $extension + '"')
+    Test-FileContains `
+        "eng/stage-release-artifacts.ps1" `
+        $extensionPattern `
+        "Release staging must reject deployable '$extension' source or project files."
+    Test-FileContains `
+        "eng/inspect-release-candidate.ps1" `
+        $extensionPattern `
+        "Release candidate inspection must reject deployable '$extension' source or project files."
+}
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "missing-agent-safety-executable-path" "Release candidate inspection verification must reject a missing safety actuator template field."
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "configured-agent-safety-executable-path" "Release candidate inspection verification must reject a preconfigured release safety actuator path."
 Test-FileContains "eng/verify-release-candidate-inspection.ps1" "missing-agent-package-cache-directory" "Release candidate inspection verification must reject a missing content-cache template field."
@@ -652,7 +677,14 @@ Test-FileContains "eng/invoke-run-scoped-agent-service-cleanup.ps1" "ordinary no
 Test-FileContains "eng/verify-release-staging-security.ps1" "cleanup-manifest-reparse-target" "Release security regression must behavior-test a reparse-point cleanup manifest mutation."
 Test-FileContains "eng/verify-release-staging-security.ps1" "legacyPackageCacheRoot" "Release security regression must reject legacy package-cache compatibility fields."
 Test-FileContains "eng/invoke-run-scoped-agent-service-cleanup.ps1" "SourceExists" "Agent service cleanup preflight must reject a same-name EventLog source under any log."
+Test-FileContains "tests/OpenLineOps.Agent.Tests/StagedAgentRabbitMqProcessE2ETests.cs" "ProcessIdToSessionId" "Staged and Studio Agent gates must bind SCM PIDs to Windows Session 0."
+Test-FileContains "tests/OpenLineOps.Agent.Tests/StagedAgentRabbitMqProcessE2ETests.cs" "if \(sessionId != 0\)" "Staged and Studio Agent gates must hard-reject interactive SCM PIDs."
+Test-FileContains "tests/OpenLineOps.Runner.Tests/RunnerStagedAgentProcessE2ETests.cs" "ProcessIdToSessionId" "Runner staged-Agent gate must bind its SCM PID to Windows Session 0."
+Test-FileContains "tests/OpenLineOps.Runner.Tests/RunnerStagedAgentProcessE2ETests.cs" "if \(sessionId != 0\)" "Runner staged-Agent gate must hard-reject an interactive SCM PID."
+Test-FileContains "eng/verify-staged-agent-evidence.ps1" "session0Verified" "Staged Agent evidence must prove every SCM process start ran in Windows Session 0."
+Test-FileContains "eng/verify-studio-two-agent-production-evidence.ps1" "session0Verified" "Studio two-Agent evidence must prove both Station services ran in Windows Session 0."
 Test-FileContains "eng/verify-runner-staged-agent-evidence.ps1" "serviceLifecycleVerified" "Runner staged-Agent evidence must prove the Agent SCM lifecycle."
+Test-FileContains "eng/verify-runner-staged-agent-evidence.ps1" "session0Verified" "Runner staged-Agent evidence must prove the Agent ran in Windows Session 0."
 Test-FileContains "eng/verify-runner-staged-agent-evidence.ps1" "serviceSidSha256" "Runner staged-Agent evidence must bind the restricted service SID without publishing the raw SID."
 Test-FileContains "eng/verify-runner-staged-agent-evidence.ps1" "exactServiceSidRestricted" "Runner staged-Agent evidence must prove its exact service SID is restricted."
 Test-FileContains "eng/verify-runner-staged-agent-evidence.ps1" "Get-ServiceSidFromName" "Runner staged-Agent evidence must independently derive the service SID hash from the SCM service name."

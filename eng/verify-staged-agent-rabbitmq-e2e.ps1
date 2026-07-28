@@ -484,28 +484,27 @@ Assert-RestrictedServiceIdentity `
 if ($evidence.agentHostIdentity.serviceSid -cne $evidence.restartedAgentHostIdentity.serviceSid) {
     throw "Restarted staged Agent service SID differs from its initial SCM service identity."
 }
-$materialArrivalIpcFields = @(
-    "serviceTokenConnected",
-    "pipeExactAclVerified",
+$materialArrivalFields = @(
+    "outboxRecoveryVerified",
     "durablePublicationVerified",
     "ordinaryCiTokenExplicitAccessDenied")
 Assert-ExactProperties `
-    -Value $evidence.materialArrivalIpc `
-    -Expected $materialArrivalIpcFields `
-    -Description "Staged Agent material-arrival IPC evidence"
-foreach ($field in $materialArrivalIpcFields) {
-    if ($evidence.materialArrivalIpc.$field -isnot [bool] `
-        -or $evidence.materialArrivalIpc.$field -ne $true) {
-        throw "Staged Agent material-arrival IPC evidence field '$field' must be the JSON boolean true."
+    -Value $evidence.materialArrival `
+    -Expected $materialArrivalFields `
+    -Description "Staged Agent material-arrival evidence"
+foreach ($field in $materialArrivalFields) {
+    if ($evidence.materialArrival.$field -isnot [bool] `
+        -or $evidence.materialArrival.$field -ne $true) {
+        throw "Staged Agent material-arrival evidence field '$field' must be the JSON boolean true."
     }
 }
 $immutableContentCacheFields = @(
     "packagedProvisionCommandVerified",
     "runningServiceAdministrationRejected",
-    "serviceTokenReadExecuteVerified",
-    "sealedMutationAccessDenied",
-    "deepAncestorMutationAccessDenied",
-    "preSealRecoveryVerified",
+    "productionRuntimeReadExecuteVerified",
+    "serviceSidReadOnlyAclVerified",
+    "nestedServiceSidReadOnlyAclVerified",
+    "administratorPreSealRecoveryFixtureVerified",
     "cleanupCrashResumeVerified",
     "committedAdminRemovalVerified",
     "packagedRemovalCommandVerified",
@@ -529,6 +528,7 @@ Assert-JsonBooleanProperties $evidence ([ordered]@{
         duplicateRedeliveryRejected = $true
         duplicateAfterRestartRejected = $true
         windowsServiceLifecycleVerified = $true
+        session0Verified = $true
         cleanShutdownVerified = $true
     }) "Staged Agent RabbitMQ evidence"
 Assert-JsonBooleanProperties $evidence.presence ([ordered]@{
@@ -563,6 +563,8 @@ if ($evidence.schema -cne "openlineops.staged-agent-rabbitmq-e2e-evidence" `
     -or [string]$evidence.windowsServiceName -cnotmatch '^OpenLineOpsAgentE2E-[0-9a-f]{32}$' `
     -or $evidence.windowsServiceLifecycleVerified -isnot [bool] `
     -or $evidence.windowsServiceLifecycleVerified -ne $true `
+    -or $evidence.session0Verified -isnot [bool] `
+    -or $evidence.session0Verified -ne $true `
     -or $evidence.cleanShutdownVerified -ne $true) {
     throw "Staged Agent RabbitMQ process E2E evidence is incomplete or invalid."
 }

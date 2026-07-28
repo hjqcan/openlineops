@@ -531,34 +531,55 @@ function Assert-AgentBundleConfiguration {
     }
 }
 
-function Assert-NoTestOnlyServiceTokenRelay {
+function Assert-NoDevelopmentOnlyPayload {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
         [Parameter(Mandatory = $true)][string] $ArtifactKind
     )
 
-    $forbiddenAssemblyPrefix = "OpenLineOps.WindowsServiceToken.TestRelay"
+    $sourceOrProjectExtensions = @(
+        ".cs",
+        ".fs",
+        ".vb",
+        ".csproj",
+        ".fsproj",
+        ".vbproj",
+        ".sln",
+        ".slnx")
+    $testBinaryMarkers = @(
+        "Microsoft.NET.Test.Sdk",
+        "Microsoft.TestPlatform",
+        "testhost.dll",
+        "xunit",
+        "coverlet.collector")
     foreach ($entry in Get-ChildItem -LiteralPath $Root -Force -Recurse) {
         $relativePath = (Get-RelativePathUnderDirectory `
                 -Root $Root `
                 -Path $entry.FullName).Replace('\', '/')
         $segments = @($relativePath.Split('/', [System.StringSplitOptions]::RemoveEmptyEntries))
-        $hasForbiddenDirectory = @($segments | Where-Object {
-                [string]::Equals(
-                    $_,
-                    "windows-service-token-test-relay",
-                    [System.StringComparison]::OrdinalIgnoreCase)
+        $hasTestDirectory = @($segments | Where-Object {
+                $_ -imatch '^(?:tests?|test-results|testresults)$'
             }).Count -gt 0
-        $containsForbiddenBinaryIdentity = -not $entry.PSIsContainer `
-            -and (Test-PortableExecutableContainsAsciiMarker `
-                -Path $entry.FullName `
-                -Marker $forbiddenAssemblyPrefix)
-        if ($hasForbiddenDirectory `
-            -or $entry.Name.StartsWith(
-                $forbiddenAssemblyPrefix,
-                [System.StringComparison]::OrdinalIgnoreCase) `
-            -or $containsForbiddenBinaryIdentity) {
-            throw "The $ArtifactKind release payload contains the test-only Windows service-token Test Relay: $relativePath"
+        $hasTestFileName = -not $entry.PSIsContainer `
+            -and $entry.Name -imatch '(?:^|[._-])tests?(?:[._-]|$)|^(?:testhost|xunit|coverlet)(?:[._-]|$)'
+        $hasSourceOrProjectExtension = -not $entry.PSIsContainer `
+            -and $sourceOrProjectExtensions -icontains $entry.Extension
+        $containsTestBinaryIdentity = $false
+        if (-not $entry.PSIsContainer) {
+            foreach ($marker in $testBinaryMarkers) {
+                if (Test-PortableExecutableContainsAsciiMarker `
+                        -Path $entry.FullName `
+                        -Marker $marker) {
+                    $containsTestBinaryIdentity = $true
+                    break
+                }
+            }
+        }
+        if ($hasSourceOrProjectExtension) {
+            throw "The $ArtifactKind release payload contains a source or project file: $relativePath"
+        }
+        if ($hasTestDirectory -or $hasTestFileName -or $containsTestBinaryIdentity) {
+            throw "The $ArtifactKind release payload contains test-only content: $relativePath"
         }
     }
 }
@@ -614,22 +635,6 @@ function Test-PortableExecutableContainsAsciiMarker {
     }
     finally {
         $stream.Dispose()
-    }
-}
-
-function Assert-NoProductionServiceTokenRelayReference {
-    foreach ($projectRoot in @("modules", "shared", "src", "tools", "samples")) {
-        foreach ($project in Get-ChildItem `
-                     -LiteralPath (Resolve-RepoPath $projectRoot) `
-                     -Filter "*.csproj" `
-                     -File `
-                     -Recurse) {
-            if ((Get-Content -LiteralPath $project.FullName -Raw).IndexOf(
-                    "OpenLineOps.WindowsServiceToken.TestRelay",
-                    [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                throw "Production project '$($project.FullName)' references the test-only Windows service-token Test Relay."
-            }
-        }
     }
 }
 
@@ -1121,8 +1126,6 @@ if ($SignWindowsPackages) {
 
 New-CleanDirectory $resolvedArtifactsRoot
 New-CleanDirectory $resolvedWorkRoot
-Assert-NoProductionServiceTokenRelayReference
-
 $safeVersion = $Version -replace "[^A-Za-z0-9._-]", "_"
 
 $apiPublish = Join-Path $resolvedWorkRoot "api"
@@ -1353,7 +1356,7 @@ $archives = @(
 
 foreach ($archive in $archives) {
     if ($archive.Kind -cne "source") {
-        Assert-NoTestOnlyServiceTokenRelay `
+        Assert-NoDevelopmentOnlyPayload `
             -Root $archive.Source `
             -ArtifactKind $archive.Kind
     }

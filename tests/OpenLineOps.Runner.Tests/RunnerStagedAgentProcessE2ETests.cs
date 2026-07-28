@@ -299,6 +299,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                 runnerCapture.ProcessTreeTerminated,
                 agent.ServiceName,
                 agent.ServiceLifecycleVerified,
+                agent.Session0Verified,
                 agent.ServiceAccountName,
                 agent.ServiceAccountSid,
                 agent.ServiceSidSha256,
@@ -432,6 +433,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         Assert.False(Directory.Exists(root));
         Assert.True(runnerCapture.ProcessTreeTerminated);
         Assert.True(observation.AgentServiceLifecycleVerified);
+        Assert.True(observation.AgentSession0Verified);
         Assert.NotEqual(runnerCapture.ProcessId, observation.AgentProcessId);
         await WriteGateEvidenceAsync(
             prerequisites.EvidencePath,
@@ -1442,6 +1444,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                     mainModuleBound = observation.AgentMainModuleBound,
                     serviceName = observation.AgentServiceName,
                     serviceLifecycleVerified = observation.AgentServiceLifecycleVerified,
+                    session0Verified = observation.AgentSession0Verified,
                     serviceAccountName = observation.AgentServiceAccountName,
                     serviceAccountSid = observation.AgentServiceAccountSid,
                     serviceSidSha256 = observation.AgentServiceSidSha256,
@@ -2521,6 +2524,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             SafeProcessHandle processHandle,
             int processId,
             string runningImageSha256,
+            bool session0Verified,
             RunnerAgentTokenEvidence tokenEvidence)
         {
             _contract = contract;
@@ -2531,6 +2535,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             _processHandle = processHandle;
             ProcessId = processId;
             RunningImageSha256 = runningImageSha256;
+            Session0Verified = session0Verified;
             TokenEvidence = tokenEvidence;
         }
 
@@ -2539,6 +2544,8 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         public bool HasExited => WaitForProcessExit(_processHandle, TimeSpan.Zero);
 
         public string RunningImageSha256 { get; }
+
+        public bool Session0Verified { get; }
 
         public bool MainModuleBound { get; } = true;
 
@@ -2754,6 +2761,20 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                         "Runner Agent SCM identity changed while securing its process handle.");
                 }
 
+                if (!ProcessIdToSessionId(running.ProcessId, out var sessionId))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        $"Could not inspect Runner Agent SCM PID {running.ProcessId} session.");
+                }
+
+                if (sessionId != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Runner Agent SCM PID {running.ProcessId} belongs to interactive "
+                        + $"session {sessionId}, not SCM service session 0.");
+                }
+
                 var executablePath = ReadProcessExecutablePath(processHandle);
                 if (!string.Equals(
                         executablePath,
@@ -2787,6 +2808,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
                     processHandle,
                     checked((int)running.ProcessId),
                     runningImageSha256,
+                    session0Verified: true,
                     tokenEvidence);
                 manager = null;
                 service = null;
@@ -4125,6 +4147,12 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
             uint processId);
 
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ProcessIdToSessionId(
+            uint processId,
+            out uint sessionId);
+
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
         [SuppressMessage(
@@ -4815,6 +4843,7 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
         bool RunnerProcessTreeTerminated,
         string AgentServiceName,
         bool AgentServiceLifecycleVerified,
+        bool AgentSession0Verified,
         string AgentServiceAccountName,
         string AgentServiceAccountSid,
         string AgentServiceSidSha256,

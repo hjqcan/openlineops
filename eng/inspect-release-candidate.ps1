@@ -640,13 +640,27 @@ function Test-SensitiveSourceArchiveEntries {
     }
 }
 
-function Test-NoTestOnlyServiceTokenRelayEntries {
+function Test-NoDevelopmentOnlyPayloadEntries {
     param(
         [Parameter(Mandatory = $true)]$Archive,
         [Parameter(Mandatory = $true)][string] $ArchiveName
     )
 
-    $forbiddenAssemblyPrefix = "OpenLineOps.WindowsServiceToken.TestRelay"
+    $sourceOrProjectExtensions = @(
+        ".cs",
+        ".fs",
+        ".vb",
+        ".csproj",
+        ".fsproj",
+        ".vbproj",
+        ".sln",
+        ".slnx")
+    $testBinaryMarkers = @(
+        "Microsoft.NET.Test.Sdk",
+        "Microsoft.TestPlatform",
+        "testhost.dll",
+        "xunit",
+        "coverlet.collector")
     foreach ($entry in @($Archive.Entries)) {
         $entryName = $entry.FullName
         $normalizedName = $entryName.Replace([char]92, [char]47).TrimEnd('/')
@@ -656,24 +670,33 @@ function Test-NoTestOnlyServiceTokenRelayEntries {
         }
 
         $fileName = $segments[$segments.Count - 1]
-        $hasForbiddenDirectory = @($segments | Where-Object {
-                [string]::Equals(
-                    $_,
-                    "windows-service-token-test-relay",
-                    [System.StringComparison]::OrdinalIgnoreCase)
+        $hasTestDirectory = @($segments | Where-Object {
+                $_ -imatch '^(?:tests?|test-results|testresults)$'
             }).Count -gt 0
-        $containsForbiddenBinaryIdentity = -not $entryName.EndsWith(
+        $hasTestFileName = -not $entryName.EndsWith(
                 "/",
                 [System.StringComparison]::Ordinal) `
-            -and (Test-ZipEntryPortableExecutableContainsAsciiMarker `
-                -Entry $entry `
-                -Marker $forbiddenAssemblyPrefix)
-        if ($hasForbiddenDirectory `
-            -or $fileName.StartsWith(
-                $forbiddenAssemblyPrefix,
-                [System.StringComparison]::OrdinalIgnoreCase) `
-            -or $containsForbiddenBinaryIdentity) {
-            Add-Failure "$ArchiveName contains the test-only Windows service-token Test Relay in a deployable artifact: $entryName"
+            -and $fileName -imatch '(?:^|[._-])tests?(?:[._-]|$)|^(?:testhost|xunit|coverlet)(?:[._-]|$)'
+        $hasSourceOrProjectExtension = -not $entryName.EndsWith(
+                "/",
+                [System.StringComparison]::Ordinal) `
+            -and $sourceOrProjectExtensions -icontains [System.IO.Path]::GetExtension($fileName)
+        $containsTestBinaryIdentity = $false
+        if (-not $entryName.EndsWith("/", [System.StringComparison]::Ordinal)) {
+            foreach ($marker in $testBinaryMarkers) {
+                if (Test-ZipEntryPortableExecutableContainsAsciiMarker `
+                        -Entry $entry `
+                        -Marker $marker) {
+                    $containsTestBinaryIdentity = $true
+                    break
+                }
+            }
+        }
+        if ($hasSourceOrProjectExtension) {
+            Add-Failure "$ArchiveName contains a source or project file in a deployable artifact: $entryName"
+        }
+        if ($hasTestDirectory -or $hasTestFileName -or $containsTestBinaryIdentity) {
+            Add-Failure "$ArchiveName contains test-only content in a deployable artifact: $entryName"
         }
     }
 }
@@ -1492,14 +1515,6 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "Directory.Build.props",
             "OpenLineOps.sln",
             "OpenLineOps.slnx",
-            "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestBridge.cs",
-            "tests/OpenLineOps.Agent.Tests/WindowsSourceTokenRelayProcess.cs",
-            "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestRelayContractTests.cs",
-            "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj",
-            "tests/OpenLineOps.WindowsServiceToken.TestRelay/Program.cs",
-            "tests/OpenLineOps.WindowsServiceToken.TestRelay/RelayProtocol.cs",
-            "tests/OpenLineOps.WindowsServiceToken.TestRelay/WindowsNative.cs",
-            "tests/OpenLineOps.WindowsServiceToken.TestRelay/SourceTokenRelayOperation.cs",
             "docs/development-execution-plan.md",
             "eng/stage-release-artifacts.ps1",
             "eng/verify-ci-workflow-actions.ps1",
@@ -1574,7 +1589,7 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
                     -ArchiveName $artifactByKind[$kind].fileName
             }
             else {
-                Test-NoTestOnlyServiceTokenRelayEntries `
+                Test-NoDevelopmentOnlyPayloadEntries `
                     -Archive $archive `
                     -ArchiveName $artifactByKind[$kind].fileName
             }

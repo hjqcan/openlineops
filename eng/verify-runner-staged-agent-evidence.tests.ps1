@@ -188,6 +188,7 @@ function New-ValidEvidence {
                 mainModuleBound = $true
                 serviceName = 'OpenLineOpsAgentE2E-0123456789abcdef0123456789abcdef'
                 serviceLifecycleVerified = $true
+                session0Verified = $true
                 serviceAccountName = 'NT AUTHORITY\LocalService'
                 serviceAccountSid = 'S-1-5-19'
                 serviceSidSha256 = 'd3aa07b9acd0fdfc42a4f3c9a54ba4321b9883099f83fcaf76bca38804e1f221'
@@ -492,6 +493,18 @@ try {
         param($root)
         $evidence = Read-Evidence $root
         $evidence.execution.agent.serviceLifecycleVerified = $false
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-session0-proof-missing' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent.PSObject.Properties.Remove('session0Verified')
+        Write-Evidence $root $evidence
+    } $false
+    Invoke-Expected 'agent-session0-proof-truthy-string' {
+        param($root)
+        $evidence = Read-Evidence $root
+        $evidence.execution.agent.session0Verified = 'true'
         Write-Evidence $root $evidence
     } $false
     Invoke-Expected 'agent-not-restricted' {

@@ -969,20 +969,19 @@ $publicRestartedAgentIdentity = [ordered]@{
     serviceAccountSid = [string]$privateRabbitMqEvidence.restartedAgentHostIdentity.serviceAccountSid
     serviceSid = [string]$privateRabbitMqEvidence.restartedAgentHostIdentity.serviceSid
 }
-$publicMaterialArrivalIpc = [ordered]@{
-    serviceTokenConnected = [bool]$privateRabbitMqEvidence.materialArrivalIpc.serviceTokenConnected
-    pipeExactAclVerified = [bool]$privateRabbitMqEvidence.materialArrivalIpc.pipeExactAclVerified
-    durablePublicationVerified = [bool]$privateRabbitMqEvidence.materialArrivalIpc.durablePublicationVerified
+$publicMaterialArrival = [ordered]@{
+    outboxRecoveryVerified = [bool]$privateRabbitMqEvidence.materialArrival.outboxRecoveryVerified
+    durablePublicationVerified = [bool]$privateRabbitMqEvidence.materialArrival.durablePublicationVerified
     ordinaryCiTokenExplicitAccessDenied = `
-        [bool]$privateRabbitMqEvidence.materialArrivalIpc.ordinaryCiTokenExplicitAccessDenied
+        [bool]$privateRabbitMqEvidence.materialArrival.ordinaryCiTokenExplicitAccessDenied
 }
 $immutableContentCacheFields = @(
     "packagedProvisionCommandVerified",
     "runningServiceAdministrationRejected",
-    "serviceTokenReadExecuteVerified",
-    "sealedMutationAccessDenied",
-    "deepAncestorMutationAccessDenied",
-    "preSealRecoveryVerified",
+    "productionRuntimeReadExecuteVerified",
+    "serviceSidReadOnlyAclVerified",
+    "nestedServiceSidReadOnlyAclVerified",
+    "administratorPreSealRecoveryFixtureVerified",
     "cleanupCrashResumeVerified",
     "committedAdminRemovalVerified",
     "packagedRemovalCommandVerified",
@@ -1052,13 +1051,14 @@ $rabbitMqEvidence = [ordered]@{
     vendorArtifacts = $publicVendorArtifacts
     agentHostIdentity = $publicAgentIdentity
     restartedAgentHostIdentity = $publicRestartedAgentIdentity
-    materialArrivalIpc = $publicMaterialArrivalIpc
+    materialArrival = $publicMaterialArrival
     immutableContentCache = $publicImmutableContentCache
     eventKinds = @($privateRabbitMqEvidence.eventKinds)
     progressPhases = @($privateRabbitMqEvidence.progressPhases)
     outageControlMode = [string]$privateRabbitMqEvidence.outageControlMode
     windowsServiceName = [string]$privateRabbitMqEvidence.windowsServiceName
     windowsServiceLifecycleVerified = [bool]$privateRabbitMqEvidence.windowsServiceLifecycleVerified
+    session0Verified = [bool]$privateRabbitMqEvidence.session0Verified
     presence = $publicPresence
     cleanShutdownVerified = [bool]$privateRabbitMqEvidence.cleanShutdownVerified
 }
@@ -1079,7 +1079,7 @@ $evidence["rabbitMqTransportCoverage"] = [ordered]@{
         $rabbitMqEvidence.coordinatorTransportResultInboxRestartedAfterBrokerRecovery
     agentHostIdentity = $rabbitMqEvidence.agentHostIdentity
     restartedAgentHostIdentity = $rabbitMqEvidence.restartedAgentHostIdentity
-    materialArrivalIpc = $rabbitMqEvidence.materialArrivalIpc
+    materialArrival = $rabbitMqEvidence.materialArrival
     immutableContentCache = $rabbitMqEvidence.immutableContentCache
     agentId = $rabbitMqEvidence.AgentId
     stationId = $rabbitMqEvidence.StationId
@@ -1098,6 +1098,7 @@ $evidence["rabbitMqTransportCoverage"] = [ordered]@{
     outageControlMode = $rabbitMqEvidence.outageControlMode
     windowsServiceName = $rabbitMqEvidence.windowsServiceName
     windowsServiceLifecycleVerified = $rabbitMqEvidence.windowsServiceLifecycleVerified
+    session0Verified = $rabbitMqEvidence.session0Verified
     presence = $rabbitMqEvidence.presence
     cleanShutdownVerified = $rabbitMqEvidence.cleanShutdownVerified
     evidence = "rabbitmq-process/evidence.json"

@@ -69,7 +69,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         RespectRequiredConstructorParameters = true
     };
-
     private const string AgentBundleRootVariable = "OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT";
     private const string SamplePluginRootVariable = "OPENLINEOPS_STAGED_SAMPLE_PLUGIN_ROOT";
     private const string ApiBundleRootVariable = "OPENLINEOPS_STAGED_API_BUNDLE_ROOT";
@@ -247,6 +246,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         }
 
         var dataRoot = Path.Combine(root, "agent-data");
+        var sqlitePath = Path.Combine(dataRoot, "station-agent.sqlite");
         var distributionRoot = Path.Combine(root, "package-distribution");
         var runtimeWorkRoot = Path.Combine(root, "runtime-work");
         var packageCacheRoot = cleanupEntry.PackageCacheRoot;
@@ -269,6 +269,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         var immutableContentCacheEvidence = ImmutableContentCacheEvidence.Empty;
         var preSealRecoveryPrepared = false;
         var cleanupCrashCheckpointPrepared = false;
+        var materialArrivalOutboxRecoveryVerified = false;
         Exception? executionFailure = null;
         var cleanupFailures = new List<Exception>();
         try
@@ -294,16 +295,50 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 stationId,
                 package.PackageContentSha256,
                 suffix);
-            var localArrivalSignal = new StationMaterialArrivalSignal(
+            var recoveredMaterialArrival = new MaterialArrived(
                 Guid.NewGuid(),
                 $"material-arrival/scm-e2e/{suffix}",
+                agentId,
+                stationId,
+                "project.rabbitmq-e2e",
+                ApplicationId,
+                "snapshot.rabbitmq-e2e",
+                package.PackageContentSha256,
                 StationMaterialKinds.ProductionUnit,
                 $"board-scm-e2e-{suffix}",
+                LineDefinitionId,
+                StationSystemId,
                 StationMaterialArrivalSources.Plc,
                 "plc.scm-e2e",
                 DateTimeOffset.UtcNow);
+            using (var recoveryOutbox = new SqliteStationMaterialArrivalOutboxStore(
+                       $"Data Source={sqlitePath};Pooling=False"))
+            {
+                Assert.True(await recoveryOutbox.TryEnqueueAsync(
+                    recoveredMaterialArrival,
+                    DateTimeOffset.UtcNow));
+                Assert.False(await recoveryOutbox.TryEnqueueAsync(
+                    recoveredMaterialArrival,
+                    DateTimeOffset.UtcNow));
+            }
+
+            var materialArrivalDeliveryCount = 0;
             var materialArrivalReceived = new TaskCompletionSource<MaterialArrived>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
+            ValueTask HandleRecoveredMaterialArrivalAsync(
+                MaterialArrived message,
+                CancellationToken cancellationToken)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (message.MessageId == recoveredMaterialArrival.MessageId
+                    && Interlocked.Increment(ref materialArrivalDeliveryCount) == 1)
+                {
+                    materialArrivalReceived.TrySetResult(message);
+                }
+
+                return ValueTask.CompletedTask;
+            }
+
             var leaseChange = StationDispatchMessageIdentity.CreateLeaseGranted(
                 request,
                 Assert.Single(request.ResourceFences));
@@ -344,16 +379,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 new SystemClock());
             resultInboxStop = new CancellationTokenSource();
             resultInbox = coordinator.RunResultInboxAsync(
-                (message, cancellationToken) =>
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (message.MessageId == localArrivalSignal.MessageId)
-                    {
-                        materialArrivalReceived.TrySetResult(message);
-                    }
-
-                    return ValueTask.CompletedTask;
-                },
+                HandleRecoveredMaterialArrivalAsync,
                 static (_, cancellationToken) =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -408,6 +434,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     runningServiceAdministrationRejected
             };
             initialAgentTokenEvidence = agent.TokenEvidence;
+            var initialAgentSession0Verified = agent.Session0Verified;
+            Assert.True(initialAgentSession0Verified);
             await WaitForExternalAbortIfRequestedAsync(cleanupEntry, agent);
             await topology.WaitForAgentConsumerAsync(agent, TimeSpan.FromSeconds(30));
             var ordinaryCiTokenExplicitAccessDenied =
@@ -415,41 +443,30 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     StationMaterialArrivalLocalIpcOptions.DerivePipeName(agentIdentity.Sid),
                     agent,
                     TimeSpan.FromSeconds(10));
-            var materialArrivalSubmission = await SubmitMaterialArrivalAsStationAsync(
-                StationMaterialArrivalLocalIpcOptions.DerivePipeName(agentIdentity.Sid),
-                agentIdentity.Sid,
-                agent,
-                localArrivalSignal,
-                TimeSpan.FromSeconds(10));
-            var arrivalResponse = materialArrivalSubmission.Response;
-            Assert.True(arrivalResponse.Accepted);
-            Assert.False(arrivalResponse.Replayed);
-            Assert.Null(arrivalResponse.FailureCode);
-            Assert.Equal(localArrivalSignal.MessageId, arrivalResponse.MessageId);
             var arrived = await materialArrivalReceived.Task.WaitAsync(TimeSpan.FromSeconds(30));
-            Assert.Equal(localArrivalSignal.MessageId, arrived.MessageId);
-            Assert.Equal(localArrivalSignal.IdempotencyKey, arrived.IdempotencyKey);
+            Assert.Equal(recoveredMaterialArrival, arrived);
+            Assert.Equal(recoveredMaterialArrival.MessageId, arrived.MessageId);
+            Assert.Equal(recoveredMaterialArrival.IdempotencyKey, arrived.IdempotencyKey);
             Assert.Equal(agentId, arrived.ProducerId);
             Assert.Equal(stationId, arrived.StationId);
-            Assert.Equal(localArrivalSignal.MaterialKind, arrived.MaterialKind);
-            Assert.Equal(localArrivalSignal.MaterialId, arrived.MaterialId);
-            Assert.Equal(localArrivalSignal.Source, arrived.Source);
-            Assert.Equal(localArrivalSignal.ActorId, arrived.ActorId);
+            Assert.Equal(recoveredMaterialArrival.MaterialKind, arrived.MaterialKind);
+            Assert.Equal(recoveredMaterialArrival.MaterialId, arrived.MaterialId);
+            Assert.Equal(recoveredMaterialArrival.Source, arrived.Source);
+            Assert.Equal(recoveredMaterialArrival.ActorId, arrived.ActorId);
             await WaitUntilAsync(
                 () => IsMaterialArrivalDurablyPublishedAsync(
-                    Path.Combine(dataRoot, "station-agent.sqlite"),
-                    localArrivalSignal.MessageId),
+                    sqlitePath,
+                    recoveredMaterialArrival.MessageId),
                 agent,
                 TimeSpan.FromSeconds(30),
-                "Station Agent did not persist and publish the service-token material arrival.");
+                "Station Agent did not recover and publish the pre-existing material-arrival outbox message.");
             var materialArrivalDurablyPublished =
                 await IsMaterialArrivalDurablyPublishedAsync(
-                    Path.Combine(dataRoot, "station-agent.sqlite"),
-                    localArrivalSignal.MessageId);
-            Assert.True(materialArrivalSubmission.ServiceTokenConnected);
-            Assert.True(materialArrivalSubmission.PipeExactAclVerified);
+                    sqlitePath,
+                    recoveredMaterialArrival.MessageId);
             Assert.True(materialArrivalDurablyPublished);
             Assert.True(ordinaryCiTokenExplicitAccessDenied);
+            Assert.Equal(1, Volatile.Read(ref materialArrivalDeliveryCount));
 
             var runtimeClock = new SystemClock();
             var runtimeMaterials = new InMemoryProductionMaterialRepository();
@@ -496,7 +513,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 TimeSpan.FromSeconds(30),
                 "Coordinator did not receive StationJobAccepted before the broker outage.");
 
-            var sqlitePath = Path.Combine(dataRoot, "station-agent.sqlite");
             stationStore = new SqliteStationJobStore(
                 $"Data Source={sqlitePath};Pooling=False");
             brokerOutage = RabbitMqWindowsServiceOutage.CreateRequired(
@@ -562,18 +578,18 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             Assert.Null(await coordinationStore.GetCompletionAsync(request.IdempotencyKey));
             Assert.True(offlinePendingOutboxCount > 0);
             var immutablePackageAccessEvidence =
-                VerifyImmutablePackageAccessAsExactServiceToken(
-                    agent,
+                VerifyImmutablePackageProtectionAfterProductionExecution(
                     packageCacheRoot,
-                    package.PackageContentSha256);
+                    package.PackageContentSha256,
+                    agentIdentity.Sid);
             immutableContentCacheEvidence = immutableContentCacheEvidence with
             {
-                ServiceTokenReadExecuteVerified =
-                    immutablePackageAccessEvidence.ServiceTokenReadExecuteVerified,
-                SealedMutationAccessDenied =
-                    immutablePackageAccessEvidence.SealedMutationAccessDenied,
-                DeepAncestorMutationAccessDenied =
-                    immutablePackageAccessEvidence.DeepAncestorMutationAccessDenied
+                ProductionRuntimeReadExecuteVerified =
+                    immutablePackageAccessEvidence.ProductionRuntimeReadExecuteVerified,
+                ServiceSidReadOnlyAclVerified =
+                    immutablePackageAccessEvidence.ServiceSidReadOnlyAclVerified,
+                NestedServiceSidReadOnlyAclVerified =
+                    immutablePackageAccessEvidence.NestedServiceSidReadOnlyAclVerified
             };
 
             await brokerOutage.StartAsync(TimeSpan.FromMinutes(2));
@@ -600,11 +616,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 new SystemClock());
             resultInboxStop = new CancellationTokenSource();
             resultInbox = coordinator.RunResultInboxAsync(
-                static (_, cancellationToken) =>
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    return ValueTask.CompletedTask;
-                },
+                HandleRecoveredMaterialArrivalAsync,
                 static (_, cancellationToken) =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -696,6 +708,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             agent = agentService.Start();
             var restartedAgentTokenEvidence = agent.TokenEvidence;
             Assert.Equal(initialAgentTokenEvidence, restartedAgentTokenEvidence);
+            Assert.True(agent.Session0Verified);
+            var session0Verified =
+                initialAgentSession0Verified && agent.Session0Verified;
             var restartedAgentPid = agent.Id;
             Assert.NotEqual(firstAgentPid, restartedAgentPid);
             await topology.WaitForAgentConsumerAsync(agent, TimeSpan.FromSeconds(30));
@@ -709,9 +724,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 initialRevision,
                 initialEvents.Count,
                 initialExecutionCount);
+            await Task.Delay(TimeSpan.FromSeconds(1));
+            Assert.Equal(1, Volatile.Read(ref materialArrivalDeliveryCount));
+            Assert.True(await IsMaterialArrivalDurablyPublishedAsync(
+                sqlitePath,
+                recoveredMaterialArrival.MessageId));
+            materialArrivalOutboxRecoveryVerified = true;
             var preSealRecoveryHash = new string('c', 64);
-            preSealRecoveryPrepared = CreatePreSealRecoveryTreeAsExactServiceToken(
-                agent,
+            preSealRecoveryPrepared = CreatePreSealRecoveryFixtureAsAdministrator(
                 packageCacheRoot,
                 preSealRecoveryHash);
             Assert.True(preSealRecoveryPrepared);
@@ -759,7 +779,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             Assert.True(cacheNamespaceRemoved);
             immutableContentCacheEvidence = immutableContentCacheEvidence with
             {
-                PreSealRecoveryVerified = preSealRecoveryPrepared && cacheRootRemoved,
+                AdministratorPreSealRecoveryFixtureVerified =
+                    preSealRecoveryPrepared && cacheRootRemoved,
                 CleanupCrashResumeVerified =
                     cleanupCrashCheckpointPrepared && cacheRootRemoved,
                 CommittedAdminRemovalVerified =
@@ -795,11 +816,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 agentIdentity,
                 windowsServiceName,
                 windowsServiceLifecycleVerified,
+                session0Verified,
                 initialAgentTokenEvidence!,
                 restartedAgentTokenEvidence,
-                new MaterialArrivalIpcEvidence(
-                    materialArrivalSubmission.ServiceTokenConnected,
-                    materialArrivalSubmission.PipeExactAclVerified,
+                new MaterialArrivalRecoveryEvidence(
+                    materialArrivalOutboxRecoveryVerified,
                     materialArrivalDurablyPublished,
                     ordinaryCiTokenExplicitAccessDenied),
                 immutableContentCacheEvidence);
@@ -951,57 +972,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 "The staged Agent RabbitMQ E2E failed and one or more independent cleanup steps also failed.",
                 cleanupFailures);
         }
-    }
-
-    [SupportedOSPlatform("windows")]
-    private static async Task<MaterialArrivalSubmissionEvidence>
-        SubmitMaterialArrivalAsStationAsync(
-            string pipeName,
-            string expectedServiceSid,
-            WindowsAgentProcess agent,
-            StationMaterialArrivalSignal signal,
-            TimeSpan timeout)
-    {
-        using var deadline = new CancellationTokenSource(timeout);
-        await using var pipe = agent.ConnectNamedPipeAsService(pipeName, timeout);
-        var serviceTokenConnected = pipe.IsConnected;
-        if (!serviceTokenConnected)
-        {
-            throw new InvalidOperationException(
-                "The exact Station service token did not connect to its material-arrival pipe.");
-        }
-
-        WindowsIdentityBoundNamedPipe.Verify(pipe, expectedServiceSid);
-        var pipeExactAclVerified = true;
-        await StationMaterialArrivalLocalIpcServer.WriteFrameAsync(
-            pipe,
-            JsonSerializer.SerializeToUtf8Bytes(signal, ReceiptJsonOptions),
-            deadline.Token);
-        var responsePayload = await StationMaterialArrivalLocalIpcServer.ReadFrameAsync(
-            pipe,
-            4096,
-            deadline.Token);
-        var response = JsonSerializer.Deserialize<StationMaterialArrivalLocalIpcResponse>(
-                           responsePayload,
-                           ReceiptJsonOptions)
-                       ?? throw new InvalidDataException(
-                           "Staged Agent material-arrival response is null.");
-        if (response.MessageId != signal.MessageId
-            || !response.Accepted
-            || response.Replayed
-            || response.FailureCode is not null)
-        {
-            throw new InvalidDataException(
-                "Staged Agent material-arrival response is not the exact positive acknowledgement.");
-        }
-
-        await StationMaterialArrivalLocalIpcServer.WriteResponseReceiptAsync(
-            pipe,
-            deadline.Token);
-        return new MaterialArrivalSubmissionEvidence(
-            response,
-            serviceTokenConnected,
-            pipeExactAclVerified);
     }
 
     private static async Task<bool> IsMaterialArrivalDurablyPublishedAsync(
@@ -2943,9 +2913,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         RestrictedAgentIdentity agentIdentity,
         string windowsServiceName,
         bool windowsServiceLifecycleVerified,
+        bool session0Verified,
         AgentHostTokenEvidence initialAgentTokenEvidence,
         AgentHostTokenEvidence restartedAgentTokenEvidence,
-        MaterialArrivalIpcEvidence materialArrivalIpcEvidence,
+        MaterialArrivalRecoveryEvidence materialArrivalEvidence,
         ImmutableContentCacheEvidence immutableContentCacheEvidence)
     {
         if (!immutableContentCacheEvidence.IsComplete)
@@ -3022,22 +2993,21 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     coordinatorTransportResultInboxRestartedAfterBrokerRecovery,
                     windowsServiceName,
                     windowsServiceLifecycleVerified,
+                    session0Verified,
                     agentHostIdentity = TokenProjection(
                         initialAgentTokenEvidence,
                         agentIdentity),
                     restartedAgentHostIdentity = TokenProjection(
                         restartedAgentTokenEvidence,
                         agentIdentity),
-                    materialArrivalIpc = new
+                    materialArrival = new
                     {
-                        serviceTokenConnected =
-                            materialArrivalIpcEvidence.ServiceTokenConnected,
-                        pipeExactAclVerified =
-                            materialArrivalIpcEvidence.PipeExactAclVerified,
+                        outboxRecoveryVerified =
+                            materialArrivalEvidence.OutboxRecoveryVerified,
                         durablePublicationVerified =
-                            materialArrivalIpcEvidence.DurablePublicationVerified,
+                            materialArrivalEvidence.DurablePublicationVerified,
                         ordinaryCiTokenExplicitAccessDenied =
-                            materialArrivalIpcEvidence.OrdinaryCiTokenExplicitAccessDenied
+                            materialArrivalEvidence.OrdinaryCiTokenExplicitAccessDenied
                     },
                     immutableContentCache = new
                     {
@@ -3045,14 +3015,15 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                             immutableContentCacheEvidence.PackagedProvisionCommandVerified,
                         runningServiceAdministrationRejected =
                             immutableContentCacheEvidence.RunningServiceAdministrationRejected,
-                        serviceTokenReadExecuteVerified =
-                            immutableContentCacheEvidence.ServiceTokenReadExecuteVerified,
-                        sealedMutationAccessDenied =
-                            immutableContentCacheEvidence.SealedMutationAccessDenied,
-                        deepAncestorMutationAccessDenied =
-                            immutableContentCacheEvidence.DeepAncestorMutationAccessDenied,
-                        preSealRecoveryVerified =
-                            immutableContentCacheEvidence.PreSealRecoveryVerified,
+                        productionRuntimeReadExecuteVerified =
+                            immutableContentCacheEvidence.ProductionRuntimeReadExecuteVerified,
+                        serviceSidReadOnlyAclVerified =
+                            immutableContentCacheEvidence.ServiceSidReadOnlyAclVerified,
+                        nestedServiceSidReadOnlyAclVerified =
+                            immutableContentCacheEvidence.NestedServiceSidReadOnlyAclVerified,
+                        administratorPreSealRecoveryFixtureVerified =
+                            immutableContentCacheEvidence
+                                .AdministratorPreSealRecoveryFixtureVerified,
                         cleanupCrashResumeVerified =
                             immutableContentCacheEvidence.CleanupCrashResumeVerified,
                         committedAdminRemovalVerified =
@@ -3162,10 +3133,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     }
 
     [SupportedOSPlatform("windows")]
-    private static ImmutableContentCacheEvidence VerifyImmutablePackageAccessAsExactServiceToken(
-        WindowsAgentProcess agent,
+    private static ImmutableContentCacheEvidence
+        VerifyImmutablePackageProtectionAfterProductionExecution(
         string packageCacheRoot,
-        string contentSha256)
+        string contentSha256,
+        string stationServiceSid)
     {
         var contentDirectory = Path.Combine(packageCacheRoot, contentSha256);
         var commitDirectory = Path.Combine(
@@ -3199,99 +3171,94 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 "The frozen vendor package does not exercise at least three nested immutable directories.");
         }
 
-        return agent.RunAsService(() =>
+        Assert.Equal(contentSha256 + "\n", File.ReadAllText(marker));
+        Assert.NotEmpty(File.ReadAllBytes(executable));
+        WindowsContentAccessAuthorizer.VerifyReadExecute(
+            contentDirectory,
+            stationServiceSid);
+        WindowsContentAccessAuthorizer.VerifyReadExecute(
+            commitDirectory,
+            stationServiceSid);
+        foreach (var file in Directory.EnumerateFiles(
+                     contentDirectory,
+                     "*",
+                     SearchOption.AllDirectories).Append(marker))
         {
-            Assert.Equal(contentSha256 + "\n", File.ReadAllText(marker));
-            Assert.NotEmpty(File.ReadAllBytes(executable));
-            RequireNativeFileAccessAllowed(
-                executable,
-                GenericExecute,
-                FileFlagOpenReparsePoint,
-                "execute the frozen vendor helper");
-
-            foreach (var file in new[] { executable, marker })
+            if ((File.GetAttributes(file)
+                 & (FileAttributes.ReadOnly
+                    | FileAttributes.ReparsePoint
+                    | FileAttributes.Device))
+                != FileAttributes.ReadOnly)
             {
-                RequireExactAccessDenied(
-                    () => File.WriteAllText(file, "mutation"),
-                    $"write immutable file '{file}'");
-                RequireExactAccessDenied(
-                    () => File.Delete(file),
-                    $"delete immutable file '{file}'");
-                RequireExactAccessDenied(
-                    () => File.Move(file, file + ".moved"),
-                    $"rename immutable file '{file}'");
-                RequireExactAccessDenied(
-                    () => File.SetAttributes(
-                        file,
-                        File.GetAttributes(file) & ~FileAttributes.ReadOnly),
-                    $"clear immutable read-only attribute '{file}'");
-                RequireFileSecurityMutationDenied(file);
+                throw new InvalidDataException(
+                    $"Frozen package file '{file}' is not one ordinary read-only file.");
             }
+        }
 
-            foreach (var directory in protectedDirectories.Append(packageCacheRoot))
-            {
-                RequireExactAccessDenied(
-                    () => File.WriteAllText(
-                        Path.Combine(directory, $".mutation-{Guid.NewGuid():N}"),
-                        "mutation"),
-                    $"create a child in immutable directory '{directory}'");
-                RequireExactAccessDenied(
-                    () => Directory.Move(directory, directory + ".moved"),
-                    $"rename immutable directory '{directory}'");
-                RequireNativeFileAccessDenied(
-                    directory,
-                    DeleteAccess,
-                    FileFlagOpenReparsePoint | FileFlagBackupSemantics,
-                    $"open immutable directory '{directory}' for deletion");
-                RequireDirectorySecurityMutationDenied(directory);
-            }
-
-            return new ImmutableContentCacheEvidence(
-                PackagedProvisionCommandVerified: false,
-                RunningServiceAdministrationRejected: false,
-                ServiceTokenReadExecuteVerified: true,
-                SealedMutationAccessDenied: true,
-                DeepAncestorMutationAccessDenied: true,
-                PreSealRecoveryVerified: false,
-                CleanupCrashResumeVerified: false,
-                CommittedAdminRemovalVerified: false,
-                PackagedRemovalCommandVerified: false,
-                CacheNamespaceRemoved: false);
-        });
+        return new ImmutableContentCacheEvidence(
+            PackagedProvisionCommandVerified: false,
+            RunningServiceAdministrationRejected: false,
+            ProductionRuntimeReadExecuteVerified: true,
+            ServiceSidReadOnlyAclVerified: true,
+            NestedServiceSidReadOnlyAclVerified: true,
+            AdministratorPreSealRecoveryFixtureVerified: false,
+            CleanupCrashResumeVerified: false,
+            CommittedAdminRemovalVerified: false,
+            PackagedRemovalCommandVerified: false,
+            CacheNamespaceRemoved: false);
     }
 
     [SupportedOSPlatform("windows")]
-    private static bool CreatePreSealRecoveryTreeAsExactServiceToken(
-        WindowsAgentProcess agent,
+    private static bool CreatePreSealRecoveryFixtureAsAdministrator(
         string packageCacheRoot,
         string contentSha256)
     {
         var contentDirectory = Path.Combine(packageCacheRoot, contentSha256);
         var payload = Path.Combine(contentDirectory, "deep", "nested", "payload.bin");
-        return agent.RunAsService(() =>
+        Directory.CreateDirectory(Path.GetDirectoryName(payload)!);
+        File.WriteAllText(payload, "interrupted-pre-seal");
+        var localService = new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null);
+        foreach (var path in Directory
+                     .EnumerateDirectories(contentDirectory, "*", SearchOption.AllDirectories)
+                     .OrderByDescending(static path => path.Length)
+                     .Prepend(contentDirectory)
+                     .Append(payload))
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(payload)!);
-            File.WriteAllText(payload, "interrupted-pre-seal");
-            foreach (var path in Directory
-                         .EnumerateDirectories(contentDirectory, "*", SearchOption.AllDirectories)
-                         .Prepend(contentDirectory)
-                         .Append(payload))
+            FileSystemSecurity security = Directory.Exists(path)
+                ? FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path))
+                : FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
+            security.SetOwner(localService);
+            if (Directory.Exists(path))
             {
-                FileSystemSecurity security = Directory.Exists(path)
-                    ? FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path))
-                    : FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
-                Assert.Equal(
-                    new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null),
-                    security.GetOwner(typeof(SecurityIdentifier)));
-                Assert.False(security.AreAccessRulesProtected);
+                FileSystemAclExtensions.SetAccessControl(
+                    new DirectoryInfo(path),
+                    (DirectorySecurity)security);
             }
+            else
+            {
+                FileSystemAclExtensions.SetAccessControl(
+                    new FileInfo(path),
+                    (FileSecurity)security);
+            }
+        }
 
-            return File.Exists(payload)
-                   && string.Equals(
-                       File.ReadAllText(payload),
-                       "interrupted-pre-seal",
-                       StringComparison.Ordinal);
-        });
+        foreach (var path in Directory
+                     .EnumerateDirectories(contentDirectory, "*", SearchOption.AllDirectories)
+                     .Prepend(contentDirectory)
+                     .Append(payload))
+        {
+            FileSystemSecurity security = Directory.Exists(path)
+                ? FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path))
+                : FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
+            Assert.Equal(localService, security.GetOwner(typeof(SecurityIdentifier)));
+            Assert.False(security.AreAccessRulesProtected);
+        }
+
+        return File.Exists(payload)
+               && string.Equals(
+                   File.ReadAllText(payload),
+                   "interrupted-pre-seal",
+                   StringComparison.Ordinal);
     }
 
     [SupportedOSPlatform("windows")]
@@ -4106,24 +4073,18 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         string PackagePath,
         string PublicKeyPath);
 
-    private sealed record MaterialArrivalSubmissionEvidence(
-        StationMaterialArrivalLocalIpcResponse Response,
-        bool ServiceTokenConnected,
-        bool PipeExactAclVerified);
-
-    private sealed record MaterialArrivalIpcEvidence(
-        bool ServiceTokenConnected,
-        bool PipeExactAclVerified,
+    private sealed record MaterialArrivalRecoveryEvidence(
+        bool OutboxRecoveryVerified,
         bool DurablePublicationVerified,
         bool OrdinaryCiTokenExplicitAccessDenied);
 
     private sealed record ImmutableContentCacheEvidence(
         bool PackagedProvisionCommandVerified,
         bool RunningServiceAdministrationRejected,
-        bool ServiceTokenReadExecuteVerified,
-        bool SealedMutationAccessDenied,
-        bool DeepAncestorMutationAccessDenied,
-        bool PreSealRecoveryVerified,
+        bool ProductionRuntimeReadExecuteVerified,
+        bool ServiceSidReadOnlyAclVerified,
+        bool NestedServiceSidReadOnlyAclVerified,
+        bool AdministratorPreSealRecoveryFixtureVerified,
         bool CleanupCrashResumeVerified,
         bool CommittedAdminRemovalVerified,
         bool PackagedRemovalCommandVerified,
@@ -4132,10 +4093,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         public static ImmutableContentCacheEvidence Empty { get; } = new(
             PackagedProvisionCommandVerified: false,
             RunningServiceAdministrationRejected: false,
-            ServiceTokenReadExecuteVerified: false,
-            SealedMutationAccessDenied: false,
-            DeepAncestorMutationAccessDenied: false,
-            PreSealRecoveryVerified: false,
+            ProductionRuntimeReadExecuteVerified: false,
+            ServiceSidReadOnlyAclVerified: false,
+            NestedServiceSidReadOnlyAclVerified: false,
+            AdministratorPreSealRecoveryFixtureVerified: false,
             CleanupCrashResumeVerified: false,
             CommittedAdminRemovalVerified: false,
             PackagedRemovalCommandVerified: false,
@@ -4144,10 +4105,10 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         public bool IsComplete =>
             PackagedProvisionCommandVerified
             && RunningServiceAdministrationRejected
-            && ServiceTokenReadExecuteVerified
-            && SealedMutationAccessDenied
-            && DeepAncestorMutationAccessDenied
-            && PreSealRecoveryVerified
+            && ProductionRuntimeReadExecuteVerified
+            && ServiceSidReadOnlyAclVerified
+            && NestedServiceSidReadOnlyAclVerified
+            && AdministratorPreSealRecoveryFixtureVerified
             && CleanupCrashResumeVerified
             && CommittedAdminRemovalVerified
             && PackagedRemovalCommandVerified
@@ -5325,7 +5286,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private readonly string _expectedBinaryPath;
         private readonly string _expectedServiceAccountName;
         private readonly string _packageCacheRoot;
-        private readonly string _serviceTokenBridgeRoot;
         private readonly RestrictedAgentIdentity _identity;
         private readonly List<uint> _startedProcessIds = [];
         private readonly List<uint> _cleanlyStoppedProcessIds = [];
@@ -5343,8 +5303,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             string expectedBinaryPath,
             string expectedServiceAccountName,
             RestrictedAgentIdentity identity,
-            string packageCacheRoot,
-            string serviceTokenBridgeRoot)
+            string packageCacheRoot)
         {
             _serviceControlManager = serviceControlManager;
             _service = service;
@@ -5356,12 +5315,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             _expectedServiceAccountName = expectedServiceAccountName;
             _identity = identity;
             _packageCacheRoot = Path.GetFullPath(packageCacheRoot);
-            _serviceTokenBridgeRoot = Path.GetFullPath(serviceTokenBridgeRoot);
         }
 
         public string ServiceName { get; }
-
-        internal string ServiceTokenBridgeRoot => _serviceTokenBridgeRoot;
 
         public bool DeletionProven { get; private set; }
 
@@ -5524,10 +5480,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     binaryPath,
                     identity.ServiceAccountName,
                     identity,
-                    packageCacheRoot,
-                    Path.GetDirectoryName(fullWorkingDirectory)
-                    ?? throw new InvalidDataException(
-                        "The staged Agent content root has no run-scoped parent."));
+                    packageCacheRoot);
                 service = null;
                 return owner;
             }
@@ -7393,7 +7346,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         private readonly WindowsAgentService _service;
         private readonly SafeProcessHandle _processHandle;
         private readonly uint _processId;
-        private readonly string _expectedServiceSid;
         private int? _exitCode;
         private bool _disposed;
 
@@ -7402,17 +7354,17 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             SafeProcessHandle processHandle,
             uint processId,
             AgentHostTokenEvidence tokenEvidence,
+            bool session0Verified,
             string executablePath,
-            string executableSha256,
-            string expectedServiceSid)
+            string executableSha256)
         {
             _service = service;
             _processHandle = processHandle;
             _processId = processId;
             TokenEvidence = tokenEvidence;
+            Session0Verified = session0Verified;
             ExecutablePath = executablePath;
             ExecutableSha256 = executableSha256;
-            _expectedServiceSid = expectedServiceSid;
         }
 
         public int Id => checked((int)_processId);
@@ -7427,75 +7379,11 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         public AgentHostTokenEvidence TokenEvidence { get; }
 
+        public bool Session0Verified { get; }
+
         public string ExecutablePath { get; }
 
         public string ExecutableSha256 { get; }
-
-        public T RunAsService<T>(Func<T> action)
-        {
-            ThrowIfDisposed();
-            ArgumentNullException.ThrowIfNull(action);
-            if (HasExited)
-            {
-                throw new InvalidOperationException(
-                    $"Staged Agent service PID {_processId} exited before exact-token bridging.");
-            }
-
-            var result = WindowsServiceTokenTestBridge.Run(
-                _service.ServiceTokenBridgeRoot,
-                _service.ServiceName,
-                _processHandle,
-                _processId,
-                ExecutablePath,
-                ExecutableSha256,
-                _expectedServiceSid,
-                action);
-            if (HasExited)
-            {
-                if (result is IDisposable disposable)
-                {
-                    disposable.Dispose();
-                }
-
-                throw new InvalidOperationException(
-                    $"Staged Agent service PID {_processId} exited during exact-token bridging.");
-            }
-
-            return result;
-        }
-
-        public NamedPipeClientStream ConnectNamedPipeAsService(
-            string pipeName,
-            TimeSpan timeout)
-        {
-            ThrowIfDisposed();
-            ArgumentException.ThrowIfNullOrWhiteSpace(pipeName);
-            if (timeout <= TimeSpan.Zero || timeout.TotalMilliseconds > int.MaxValue)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(timeout),
-                    "Named-pipe connection timeout must be positive and representable by Win32.");
-            }
-
-            return RunAsService(() =>
-            {
-                var pipe = new NamedPipeClientStream(
-                    ".",
-                    pipeName,
-                    PipeDirection.InOut,
-                    PipeOptions.Asynchronous);
-                try
-                {
-                    pipe.Connect(checked((int)Math.Ceiling(timeout.TotalMilliseconds)));
-                    return pipe;
-                }
-                catch
-                {
-                    pipe.Dispose();
-                    throw;
-                }
-            });
-        }
 
         internal static SafeProcessHandle OpenRequiredProcess(uint processId)
         {
@@ -7552,9 +7440,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 processHandle,
                 processId,
                 validation.TokenEvidence,
+                validation.Session0Verified,
                 validation.ExecutablePath,
-                validation.ExecutableSha256,
-                requestedIdentity.Sid);
+                validation.ExecutableSha256);
         }
 
         internal static ValidatedProcessEvidence ValidateRequiredProcess(
@@ -7571,6 +7459,19 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                 throw new ArgumentException(
                     "The staged Agent service process handle is unavailable.",
                     nameof(processHandle));
+            }
+
+            if (!ProcessIdToSessionId(processId, out var sessionId))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not inspect the staged Agent service PID {processId} session.");
+            }
+            if (sessionId != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Staged Agent service PID {processId} belongs to interactive session "
+                    + $"{sessionId}, not SCM service session 0.");
             }
 
             var tokenEvidence = ReadRequiredTokenEvidence(
@@ -7604,6 +7505,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
             return new ValidatedProcessEvidence(
                 tokenEvidence,
+                Session0Verified: true,
                 actualExecutablePath,
                 actualSha256);
         }
@@ -7970,6 +7872,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         internal sealed record ValidatedProcessEvidence(
             AgentHostTokenEvidence TokenEvidence,
+            bool Session0Verified,
             string ExecutablePath,
             string ExecutableSha256);
 
@@ -8011,6 +7914,12 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             uint flags,
             StringBuilder executablePath,
             ref uint executablePathLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ProcessIdToSessionId(
+            uint processId,
+            out uint sessionId);
 
         [DllImport("advapi32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

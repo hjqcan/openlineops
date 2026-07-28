@@ -296,7 +296,7 @@ $agent = $execution.agent
 Assert-ExactProperties $agent @(
     'processId', 'executableFileName', 'executableSha256', 'runningImageSha256',
     'bundleManifestSha256', 'bundleChecksumsSha256', 'manifestBound',
-    'mainModuleBound', 'serviceName', 'serviceLifecycleVerified',
+    'mainModuleBound', 'serviceName', 'serviceLifecycleVerified', 'session0Verified',
     'serviceAccountName', 'serviceAccountSid', 'serviceSidSha256',
     'isRestrictedToken', 'serviceLogonSidPresent', 'serviceLogonSidEnabled',
     'exactServiceSidPresent', 'exactServiceSidEnabled', 'exactServiceSidRestricted',
@@ -311,6 +311,7 @@ Assert-JsonBooleanProperties $agent ([ordered]@{
         manifestBound = $true
         mainModuleBound = $true
         serviceLifecycleVerified = $true
+        session0Verified = $true
         isRestrictedToken = $true
         serviceLogonSidPresent = $true
         serviceLogonSidEnabled = $true

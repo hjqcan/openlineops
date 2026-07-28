@@ -254,40 +254,49 @@ if (Test-Path -LiteralPath $resolvedWorkRoot) {
 }
 New-Item -ItemType Directory -Path $resolvedWorkRoot -Force | Out-Null
 
-$serviceTokenTestRelayGuardDefinitions = @(
+$developmentPayloadGuardDefinitions = @(
     (Get-FunctionDefinition -Ast $stageAst -Name "Get-RelativePathUnderDirectory").Extent.Text,
     (Get-FunctionDefinition -Ast $stageAst -Name "Test-PortableExecutableContainsAsciiMarker").Extent.Text,
-    (Get-FunctionDefinition -Ast $stageAst -Name "Assert-NoTestOnlyServiceTokenRelay").Extent.Text
+    (Get-FunctionDefinition -Ast $stageAst -Name "Assert-NoDevelopmentOnlyPayload").Extent.Text
 ) -join [Environment]::NewLine
-$serviceTokenTestRelayGuard = [scriptblock]::Create(
+$developmentPayloadGuard = [scriptblock]::Create(
     "param(`$Root, `$ArtifactKind)" + [Environment]::NewLine +
-    $serviceTokenTestRelayGuardDefinitions + [Environment]::NewLine +
-    "Assert-NoTestOnlyServiceTokenRelay -Root `$Root -ArtifactKind `$ArtifactKind")
-$serviceTokenTestRelayPayloadFixtures = @(
+    $developmentPayloadGuardDefinitions + [Environment]::NewLine +
+    "Assert-NoDevelopmentOnlyPayload -Root `$Root -ArtifactKind `$ArtifactKind")
+$developmentPayloadFixtures = @(
     [ordered]@{
-        Name = "case-varied-directory"
-        RelativePath = "WINDOWS-SERVICE-TOKEN-TEST-RELAY/renamed-relay.exe"
+        Name = "source-file-extension"
+        RelativePath = "support/EmbeddedRuntimeSource.cs"
         IncludeBinaryIdentity = $false
+        ExpectedPattern = "contains a source or project file"
     },
     [ordered]@{
-        Name = "case-varied-file-prefix"
-        RelativePath = "openlineops.windowsservicetoken.testrelay.renamed.bin"
+        Name = "case-varied-tests-directory"
+        RelativePath = "TESTS/renamed-helper.exe"
         IncludeBinaryIdentity = $false
+        ExpectedPattern = "contains test-only content"
     },
     [ordered]@{
-        Name = "renamed-binary-identity"
-        RelativePath = "support/renamed-relay.bin"
+        Name = "test-assembly-file-name"
+        RelativePath = "support/OpenLineOps.Agent.Tests.dll"
+        IncludeBinaryIdentity = $false
+        ExpectedPattern = "contains test-only content"
+    },
+    [ordered]@{
+        Name = "renamed-test-binary-identity"
+        RelativePath = "support/renamed-helper.bin"
         IncludeBinaryIdentity = $true
+        ExpectedPattern = "contains test-only content"
     })
-foreach ($fixture in $serviceTokenTestRelayPayloadFixtures) {
-    $fixtureRoot = Join-Path $resolvedWorkRoot ("service-token-test-relay-" + $fixture.Name)
+foreach ($fixture in $developmentPayloadFixtures) {
+    $fixtureRoot = Join-Path $resolvedWorkRoot ("development-payload-" + $fixture.Name)
     $fixturePath = Join-Path $fixtureRoot $fixture.RelativePath
     New-Item -ItemType Directory -Path (Split-Path $fixturePath -Parent) -Force | Out-Null
     if ($fixture.IncludeBinaryIdentity) {
         $portableExecutable = [System.IO.File]::ReadAllBytes(
             (Join-Path $env:SystemRoot "System32/where.exe"))
         $identityMarker = [System.Text.Encoding]::ASCII.GetBytes(
-            "OpenLineOps.WindowsServiceToken.TestRelay")
+            "xunit.runner")
         $payload = [byte[]]::new($portableExecutable.Length + $identityMarker.Length)
         [System.Buffer]::BlockCopy(
             $portableExecutable,
@@ -306,18 +315,18 @@ foreach ($fixture in $serviceTokenTestRelayPayloadFixtures) {
     else {
         [System.IO.File]::WriteAllText(
             $fixturePath,
-            "test-only-test-relay-sentinel",
+            "test-only-payload-sentinel",
             [System.Text.UTF8Encoding]::new($false))
     }
     $failure = $null
     try {
-        & $serviceTokenTestRelayGuard $fixtureRoot "agent"
+        & $developmentPayloadGuard $fixtureRoot "agent"
     }
     catch {
         $failure = $_.Exception.Message
     }
-    if ($failure -notmatch "contains the test-only Windows service-token Test Relay") {
-        throw "Release staging accepted the $($fixture.Name) test-only Windows service-token Test Relay fixture."
+    if ($failure -notmatch $fixture.ExpectedPattern) {
+        throw "Release staging accepted the $($fixture.Name) development-only payload fixture."
     }
 }
 

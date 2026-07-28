@@ -280,7 +280,7 @@ function Set-StagedExactTestHash {
     }
 }
 
-function Set-StagedMaterialArrivalIpcField {
+function Set-StagedMaterialArrivalField {
     param(
         [Parameter(Mandatory = $true)][string] $Field,
         [Parameter(Mandatory = $true)] $Value
@@ -289,14 +289,14 @@ function Set-StagedMaterialArrivalIpcField {
     $evidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
     $rawPath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
     $raw = Get-Content -LiteralPath $rawPath -Raw | ConvertFrom-Json
-    if ($evidence.rabbitMqTransportCoverage.materialArrivalIpc.PSObject.Properties.Name `
+    if ($evidence.rabbitMqTransportCoverage.materialArrival.PSObject.Properties.Name `
         -cnotcontains $Field `
-        -or $raw.materialArrivalIpc.PSObject.Properties.Name -cnotcontains $Field) {
-        throw "Unknown staged Agent material-arrival IPC fixture field '$Field'."
+        -or $raw.materialArrival.PSObject.Properties.Name -cnotcontains $Field) {
+        throw "Unknown staged Agent material-arrival fixture field '$Field'."
     }
 
-    $evidence.rabbitMqTransportCoverage.materialArrivalIpc.$Field = $Value
-    $raw.materialArrivalIpc.$Field = $Value
+    $evidence.rabbitMqTransportCoverage.materialArrival.$Field = $Value
+    $raw.materialArrival.$Field = $Value
     Write-Json -Path $rawPath -Value $raw
     $evidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawPath
     Write-Json -Path $stagedEvidencePath -Value $evidence
@@ -1038,14 +1038,38 @@ Invoke-ExpectedFailure `
     -Pattern "RabbitMQ|service|closure" `
     -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
 
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$rawEvidencePath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
+$rawEvidence = Get-Content -LiteralPath $rawEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.PSObject.Properties.Remove("session0Verified")
+$rawEvidence.PSObject.Properties.Remove("session0Verified")
+Write-Json -Path $rawEvidencePath -Value $rawEvidence
+$stagedEvidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawEvidencePath
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent Session 0 proof missing" `
+    -Pattern "JSON boolean true|Session 0|session0" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
+Reset-StagedAgentFixture
+$stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
+$rawEvidencePath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
+$rawEvidence = Get-Content -LiteralPath $rawEvidencePath -Raw | ConvertFrom-Json
+$stagedEvidence.rabbitMqTransportCoverage.session0Verified = "true"
+$rawEvidence.session0Verified = "true"
+Write-Json -Path $rawEvidencePath -Value $rawEvidence
+$stagedEvidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawEvidencePath
+Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
+Invoke-ExpectedFailure `
+    -Name "staged Agent Session 0 proof uses a truthy string" `
+    -Pattern "JSON boolean true" `
+    -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
+
 foreach ($mutation in @(
         [pscustomobject]@{
-            Name = "staged Agent service token material-arrival connection not verified"
-            Field = "serviceTokenConnected"
-        },
-        [pscustomobject]@{
-            Name = "staged Agent material-arrival pipe exact ACL not verified"
-            Field = "pipeExactAclVerified"
+            Name = "staged Agent material-arrival outbox recovery not verified"
+            Field = "outboxRecoveryVerified"
         },
         [pscustomobject]@{
             Name = "staged Agent material arrival not durably published"
@@ -1056,15 +1080,15 @@ foreach ($mutation in @(
             Field = "ordinaryCiTokenExplicitAccessDenied"
         })) {
     Reset-StagedAgentFixture
-    Set-StagedMaterialArrivalIpcField -Field $mutation.Field -Value $false
+    Set-StagedMaterialArrivalField -Field $mutation.Field -Value $false
     Invoke-ExpectedFailure `
         -Name $mutation.Name `
-        -Pattern "material-arrival IPC" `
+        -Pattern "material-arrival" `
         -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
 }
 
 Reset-StagedAgentFixture
-Set-StagedMaterialArrivalIpcField -Field "serviceTokenConnected" -Value 1
+Set-StagedMaterialArrivalField -Field "outboxRecoveryVerified" -Value 1
 Invoke-ExpectedFailure `
     -Name "staged Agent material-arrival proof uses a truthy integer" `
     -Pattern "JSON boolean true" `
@@ -1159,25 +1183,25 @@ Reset-StagedAgentFixture
 $stagedEvidence = Get-Content -LiteralPath $stagedEvidencePath -Raw | ConvertFrom-Json
 $rawEvidencePath = Join-Path $stagedAgentRoot "rabbitmq-process/evidence.json"
 $rawEvidence = Get-Content -LiteralPath $rawEvidencePath -Raw | ConvertFrom-Json
-$stagedEvidence.rabbitMqTransportCoverage.materialArrivalIpc |
+$stagedEvidence.rabbitMqTransportCoverage.materialArrival |
     Add-Member -NotePropertyName unexpectedCompatibilityProof -NotePropertyValue $true
-$rawEvidence.materialArrivalIpc |
+$rawEvidence.materialArrival |
     Add-Member -NotePropertyName unexpectedCompatibilityProof -NotePropertyValue $true
 Write-Json -Path $rawEvidencePath -Value $rawEvidence
 $stagedEvidence.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $rawEvidencePath
 Write-Json -Path $stagedEvidencePath -Value $stagedEvidence
 Invoke-ExpectedFailure `
-    -Name "staged Agent material-arrival IPC compatibility field rejected" `
+    -Name "staged Agent material-arrival compatibility field rejected" `
     -Pattern "exact strict-schema properties" `
     -Action { & $StagedAgentVerifier -EvidenceRoot $stagedAgentRoot -RequireSanitizedRoot }
 
 $immutableContentCacheFields = @(
     "packagedProvisionCommandVerified",
     "runningServiceAdministrationRejected",
-    "serviceTokenReadExecuteVerified",
-    "sealedMutationAccessDenied",
-    "deepAncestorMutationAccessDenied",
-    "preSealRecoveryVerified",
+    "productionRuntimeReadExecuteVerified",
+    "serviceSidReadOnlyAclVerified",
+    "nestedServiceSidReadOnlyAclVerified",
+    "administratorPreSealRecoveryFixtureVerified",
     "cleanupCrashResumeVerified",
     "committedAdminRemovalVerified",
     "packagedRemovalCommandVerified",
@@ -1194,7 +1218,7 @@ foreach ($field in $immutableContentCacheFields) {
 foreach ($truthyMutation in @(1, 0, "true", "false")) {
     Reset-StagedAgentFixture
     Set-StagedImmutableContentCacheField `
-        -Field "serviceTokenReadExecuteVerified" `
+        -Field "productionRuntimeReadExecuteVerified" `
         -Value $truthyMutation
     Invoke-ExpectedFailure `
         -Name "staged Agent immutable content-cache proof rejects non-boolean '$truthyMutation'" `

@@ -752,13 +752,13 @@ $stagedRawPath = Join-Path `
     $stagedSemanticDowngradeRoot `
     "output/staged-agent-bundle-e2e/rabbitmq-process/evidence.json"
 $stagedRaw = Get-Content -LiteralPath $stagedRawPath -Raw | ConvertFrom-Json
-$stagedRaw.materialArrivalIpc.durablePublicationVerified = $false
+$stagedRaw.materialArrival.durablePublicationVerified = $false
 Write-Json -Path $stagedRawPath -Value $stagedRaw
 $stagedSummaryPath = Join-Path `
     $stagedSemanticDowngradeRoot `
     "output/staged-agent-bundle-e2e/evidence.json"
 $stagedSummary = Get-Content -LiteralPath $stagedSummaryPath -Raw | ConvertFrom-Json
-$stagedSummary.rabbitMqTransportCoverage.materialArrivalIpc.durablePublicationVerified = $false
+$stagedSummary.rabbitMqTransportCoverage.materialArrival.durablePublicationVerified = $false
 $stagedSummary.rabbitMqTransportCoverage.evidenceSha256 = Get-FileSha256 $stagedRawPath
 Write-Json -Path $stagedSummaryPath -Value $stagedSummary
 Sync-PublicationE2eEvidenceBinding `
@@ -896,7 +896,7 @@ $studioEvidencePath = Join-Path `
     $studioSemanticDowngradeRoot `
     "output/studio-two-agent-production-closure/evidence.json"
 $studioEvidence = Get-Content -LiteralPath $studioEvidencePath -Raw | ConvertFrom-Json
-$studioEvidence.windowsIdentity.entryPipeExactAclVerified = $false
+$studioEvidence.windowsIdentity.entryPipeOrdinaryTokenExplicitAccessDenied = $false
 Write-Json -Path $studioEvidencePath -Value $studioEvidence
 $studioManifestPath = Join-Path `
     $studioSemanticDowngradeRoot `
@@ -920,7 +920,7 @@ Assert-FailsWith `
         -Root $studioSemanticDowngradeRoot `
         -Name "fully-rebound-studio-windows-identity-downgrade") `
     -Name "fully-rebound-studio-windows-identity-downgrade" `
-    -Pattern "entryPipeExactAclVerified.*JSON boolean true"
+    -Pattern "entryPipeOrdinaryTokenExplicitAccessDenied.*JSON boolean true"
 
 $studioTruthyBooleanRoot = New-Bundle `
     -Name "fully-rebound-studio-truthy-parallel-proof" `

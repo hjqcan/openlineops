@@ -84,6 +84,7 @@ function New-Agent {
         processId = $ProcessId
         credentialTokenSha256 = $Hash
         nonAdministrativeToken = $true
+        session0Verified = $true
         exitCode = 0
     }
 }
@@ -234,9 +235,13 @@ function New-StudioEvidence {
             entryServiceSidSha256 = $hash3
             downstreamServiceSidSha256 = $hash4
             distinctRestrictedServiceSids = $true
-            entryServiceTokenConnected = $true
-            entryPipeExactAclVerified = $true
-            downstreamServiceTokenExplicitAccessDenied = $true
+            entryRestrictedServiceIdentityVerified = $true
+            downstreamRestrictedServiceIdentityVerified = $true
+            entryMaterialArrivalPipeNameSha256 = $hash5
+            downstreamMaterialArrivalPipeNameSha256 = $hash6
+            distinctMaterialArrivalPipes = $true
+            entryPipeOrdinaryTokenExplicitAccessDenied = $true
+            downstreamPipeOrdinaryTokenExplicitAccessDenied = $true
             bothServicesRunningOnOriginalPids = $true
         }
         broker = [ordered]@{
@@ -399,6 +404,8 @@ Invoke-Mutation "Application portability proof uses a truthy string" { param($e)
 Invoke-Mutation "immutable Trace proof uses a truthy integer" { param($e) $e.sourceStudioClosure.immutableRunTrace.unchanged = 1 } "JSON boolean true"
 Invoke-Mutation "Coordinator restart proof uses a truthy string" { param($e) $e.coordinator.onlyApiWasRestarted = "true" } "JSON boolean true"
 Invoke-Mutation "Agent token proof uses a truthy integer" { param($e) $e.agents[0].nonAdministrativeToken = 1 } "JSON boolean true"
+Invoke-Mutation "Agent Session 0 proof is missing" { param($e) $e.agents[0].PSObject.Properties.Remove("session0Verified") } "must contain exactly|exact strict-schema"
+Invoke-Mutation "Agent Session 0 proof uses a truthy string" { param($e) $e.agents[0].session0Verified = "true" } "JSON boolean true"
 Invoke-Mutation "broker TLS false proof uses numeric zero" { param($e) $e.broker.tls = 0 } "JSON boolean false"
 Invoke-Mutation "parallel proof uses a truthy string" { param($e) $e.parallelExecution.observed = "true" } "JSON boolean true"
 Invoke-Mutation "vendor no-replay proof uses a truthy integer" { param($e) $e.vendorExecution.noAutomaticReplayAfterActiveCoordinatorCrash = 1 } "JSON boolean true"
@@ -416,12 +423,15 @@ Invoke-Mutation "LocalService account not shared" { param($e) $e.windowsIdentity
 Invoke-Mutation "wrong shared service account" { param($e) $e.windowsIdentity.serviceAccountName = "NT AUTHORITY\NetworkService" } "share LocalService"
 Invoke-Mutation "same restricted service SID" { param($e) $e.windowsIdentity.downstreamServiceSidSha256 = $e.windowsIdentity.entryServiceSidSha256 } "distinct restricted service SIDs"
 Invoke-Mutation "distinct restricted service SID proof reduced" { param($e) $e.windowsIdentity.distinctRestrictedServiceSids = $false } "JSON boolean true|distinct restricted service SIDs"
-Invoke-Mutation "entry service token did not connect" { param($e) $e.windowsIdentity.entryServiceTokenConnected = $false } "JSON boolean true"
-Invoke-Mutation "entry pipe exact ACL not verified" { param($e) $e.windowsIdentity.entryPipeExactAclVerified = $false } "JSON boolean true"
-Invoke-Mutation "downstream token was not explicitly denied" { param($e) $e.windowsIdentity.downstreamServiceTokenExplicitAccessDenied = $false } "JSON boolean true"
+Invoke-Mutation "entry restricted identity not verified" { param($e) $e.windowsIdentity.entryRestrictedServiceIdentityVerified = $false } "JSON boolean true"
+Invoke-Mutation "downstream restricted identity not verified" { param($e) $e.windowsIdentity.downstreamRestrictedServiceIdentityVerified = $false } "JSON boolean true"
+Invoke-Mutation "same material-arrival pipe" { param($e) $e.windowsIdentity.downstreamMaterialArrivalPipeNameSha256 = $e.windowsIdentity.entryMaterialArrivalPipeNameSha256 } "distinct.*material-arrival pipes"
+Invoke-Mutation "distinct material-arrival pipe proof reduced" { param($e) $e.windowsIdentity.distinctMaterialArrivalPipes = $false } "JSON boolean true|distinct.*material-arrival pipes"
+Invoke-Mutation "entry pipe ordinary token was not explicitly denied" { param($e) $e.windowsIdentity.entryPipeOrdinaryTokenExplicitAccessDenied = $false } "JSON boolean true"
+Invoke-Mutation "downstream pipe ordinary token was not explicitly denied" { param($e) $e.windowsIdentity.downstreamPipeOrdinaryTokenExplicitAccessDenied = $false } "JSON boolean true"
 Invoke-Mutation "services did not remain on original PIDs" { param($e) $e.windowsIdentity.bothServicesRunningOnOriginalPids = $false } "JSON boolean true"
-Invoke-Mutation "entry service token proof uses a truthy integer" { param($e) $e.windowsIdentity.entryServiceTokenConnected = 1 } "JSON boolean true"
-Invoke-Mutation "entry pipe ACL proof uses a truthy string" { param($e) $e.windowsIdentity.entryPipeExactAclVerified = "true" } "JSON boolean true"
+Invoke-Mutation "entry restricted identity proof uses a truthy integer" { param($e) $e.windowsIdentity.entryRestrictedServiceIdentityVerified = 1 } "JSON boolean true"
+Invoke-Mutation "entry ordinary-token denial uses a truthy string" { param($e) $e.windowsIdentity.entryPipeOrdinaryTokenExplicitAccessDenied = "true" } "JSON boolean true"
 Invoke-Mutation "administrative Agent token" { param($e) $e.agents[0].nonAdministrativeToken = $false } "JSON boolean true|non-administrative"
 Invoke-Mutation "Application copy uses one Project" { param($e) $e.sourceStudioClosure.applicationPortability.targetProjectId = $e.sourceStudioClosure.applicationPortability.sourceProjectId } "two Projects"
 Invoke-Mutation "Application copy changed" { param($e) $e.sourceStudioClosure.applicationPortability.unchanged = $false } "JSON boolean true|unchanged"

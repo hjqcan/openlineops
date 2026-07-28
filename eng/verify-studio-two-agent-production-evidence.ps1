@@ -312,14 +312,18 @@ Assert-Condition ($agents.Count -eq 2) "Studio evidence must contain exactly two
 foreach ($agent in $agents) {
     Assert-ExactProperties $agent @(
         "role", "agentId", "stationId", "stationSystemId", "processId",
-        "credentialTokenSha256", "nonAdministrativeToken", "exitCode") `
+        "credentialTokenSha256", "nonAdministrativeToken", "session0Verified",
+        "exitCode") `
         "Studio Agent evidence"
     Assert-JsonBooleanProperties $agent ([ordered]@{
             nonAdministrativeToken = $true
+            session0Verified = $true
         }) "Studio Agent evidence"
     Assert-Sha256 $agent.credentialTokenSha256 "Studio Agent credential token hash"
-    Assert-Condition ($agent.nonAdministrativeToken -eq $true -and $agent.exitCode -eq 0) `
-        "Studio Agent did not run and exit under a non-administrative token."
+    Assert-Condition ($agent.nonAdministrativeToken -eq $true `
+            -and $agent.session0Verified -eq $true `
+            -and $agent.exitCode -eq 0) `
+        "Studio Agent did not run in Session 0 and exit under a non-administrative token."
     Assert-PositiveInteger $agent.processId "Studio Agent process ID"
     Assert-GuidText ([string]$agent.agentId) "Studio Agent ID"
     Assert-GuidText ([string]$agent.stationId) "Studio Station ID"
@@ -337,29 +341,38 @@ $identity = $evidence.windowsIdentity
 Assert-ExactProperties $identity @(
     "sharedLocalServiceAccount", "serviceAccountName", "serviceAccountSid",
     "entryServiceSidSha256", "downstreamServiceSidSha256", "distinctRestrictedServiceSids",
-    "entryServiceTokenConnected", "entryPipeExactAclVerified",
-    "downstreamServiceTokenExplicitAccessDenied", "bothServicesRunningOnOriginalPids") `
+    "entryRestrictedServiceIdentityVerified", "downstreamRestrictedServiceIdentityVerified",
+    "entryMaterialArrivalPipeNameSha256", "downstreamMaterialArrivalPipeNameSha256",
+    "distinctMaterialArrivalPipes", "entryPipeOrdinaryTokenExplicitAccessDenied",
+    "downstreamPipeOrdinaryTokenExplicitAccessDenied", "bothServicesRunningOnOriginalPids") `
     "Studio Windows identity evidence"
 Assert-JsonBooleanProperties $identity ([ordered]@{
         sharedLocalServiceAccount = $true
         distinctRestrictedServiceSids = $true
-        entryServiceTokenConnected = $true
-        entryPipeExactAclVerified = $true
-        downstreamServiceTokenExplicitAccessDenied = $true
+        entryRestrictedServiceIdentityVerified = $true
+        downstreamRestrictedServiceIdentityVerified = $true
+        distinctMaterialArrivalPipes = $true
+        entryPipeOrdinaryTokenExplicitAccessDenied = $true
+        downstreamPipeOrdinaryTokenExplicitAccessDenied = $true
         bothServicesRunningOnOriginalPids = $true
     }) "Studio Windows identity evidence"
 Assert-Sha256 $identity.entryServiceSidSha256 "Studio entry Agent service SID"
 Assert-Sha256 $identity.downstreamServiceSidSha256 "Studio downstream Agent service SID"
+Assert-Sha256 $identity.entryMaterialArrivalPipeNameSha256 "Studio entry material-arrival pipe name"
+Assert-Sha256 $identity.downstreamMaterialArrivalPipeNameSha256 "Studio downstream material-arrival pipe name"
 Assert-Condition ($identity.sharedLocalServiceAccount -eq $true `
         -and $identity.serviceAccountName -ceq "NT AUTHORITY\LocalService" `
         -and $identity.serviceAccountSid -ceq "S-1-5-19" `
         -and $identity.distinctRestrictedServiceSids -eq $true `
         -and $identity.entryServiceSidSha256 -cne $identity.downstreamServiceSidSha256 `
-        -and $identity.entryServiceTokenConnected -eq $true `
-        -and $identity.entryPipeExactAclVerified -eq $true `
-        -and $identity.downstreamServiceTokenExplicitAccessDenied -eq $true `
+        -and $identity.entryRestrictedServiceIdentityVerified -eq $true `
+        -and $identity.downstreamRestrictedServiceIdentityVerified -eq $true `
+        -and $identity.distinctMaterialArrivalPipes -eq $true `
+        -and $identity.entryMaterialArrivalPipeNameSha256 -cne $identity.downstreamMaterialArrivalPipeNameSha256 `
+        -and $identity.entryPipeOrdinaryTokenExplicitAccessDenied -eq $true `
+        -and $identity.downstreamPipeOrdinaryTokenExplicitAccessDenied -eq $true `
         -and $identity.bothServicesRunningOnOriginalPids -eq $true) `
-    "Studio Agents must share LocalService, retain distinct restricted service SIDs, and prove service-token material-arrival IPC isolation while remaining Running."
+    "Studio Agents must share LocalService, prove two real restricted service identities, retain distinct restricted service SIDs and material-arrival pipes, enforce ordinary-token denial on both pipes, and remain on their original running PIDs."
 
 $broker = $evidence.broker
 Assert-ExactProperties $broker @(

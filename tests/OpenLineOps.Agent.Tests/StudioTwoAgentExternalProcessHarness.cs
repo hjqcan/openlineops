@@ -67,9 +67,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         int QueueCount);
 
     internal sealed record StudioMaterialArrivalIpcIsolationEvidence(
-        bool EntryServiceTokenConnected,
-        bool EntryPipeExactAclVerified,
-        bool DownstreamServiceTokenExplicitAccessDenied,
+        bool EntryRestrictedServiceIdentityVerified,
+        bool DownstreamRestrictedServiceIdentityVerified,
+        bool EntryPipeOrdinaryTokenExplicitAccessDenied,
+        bool DownstreamPipeOrdinaryTokenExplicitAccessDenied,
+        bool DistinctRestrictedServiceSids,
+        string EntryMaterialArrivalPipeNameSha256,
+        string DownstreamMaterialArrivalPipeNameSha256,
+        bool DistinctMaterialArrivalPipes,
         bool BothServicesRunningOnOriginalPids);
 
     [SupportedOSPlatform("windows")]
@@ -197,6 +202,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         public bool DownstreamAgentNonAdministrative =>
             _downstreamProcess?.TokenEvidence.NonAdministrative
+            ?? throw new InvalidOperationException("Downstream Agent has not started.");
+
+        public bool EntryAgentSession0Verified => _entryProcess?.Session0Verified
+            ?? throw new InvalidOperationException("Entry Agent has not started.");
+
+        public bool DownstreamAgentSession0Verified =>
+            _downstreamProcess?.Session0Verified
             ?? throw new InvalidOperationException("Downstream Agent has not started.");
 
         public string ServiceAccountName
@@ -693,7 +705,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         TimeSpan.FromSeconds(30),
                         cancellationToken));
                 _materialArrivalIpcIsolation =
-                    VerifyCrossStationMaterialArrivalIpcIsolation(cancellationToken);
+                    VerifyMaterialArrivalIpcIsolation(cancellationToken);
             }
             catch (Exception primaryFailure)
             {
@@ -1085,7 +1097,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         }
 
         private StudioMaterialArrivalIpcIsolationEvidence
-            VerifyCrossStationMaterialArrivalIpcIsolation(
+            VerifyMaterialArrivalIpcIsolation(
                 CancellationToken cancellationToken)
         {
             var entryProcess = _entryProcess
@@ -1119,68 +1131,30 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
             var entryPipeName = StationMaterialArrivalLocalIpcOptions.DerivePipeName(
                 entryServiceSid);
-            var entryImpersonationEntered = false;
-            var entryServiceTokenConnected = false;
-            var entryPipeExactAclVerified = false;
-            _ = entryProcess.RunAsService(() =>
-            {
-                entryImpersonationEntered = true;
-                cancellationToken.ThrowIfCancellationRequested();
-                using var pipe = new NamedPipeClientStream(
-                    ".",
-                    entryPipeName,
-                    PipeDirection.InOut,
-                    PipeOptions.None);
-                pipe.Connect(checked((int)MaterialArrivalPipeConnectTimeout.TotalMilliseconds));
-                entryServiceTokenConnected = pipe.IsConnected;
-                WindowsIdentityBoundNamedPipe.Verify(pipe, entryServiceSid);
-                entryPipeExactAclVerified = true;
-                return true;
-            });
-            if (!entryImpersonationEntered
-                || !entryServiceTokenConnected
-                || !entryPipeExactAclVerified)
+            var downstreamPipeName = StationMaterialArrivalLocalIpcOptions.DerivePipeName(
+                downstreamServiceSid);
+            if (string.Equals(entryPipeName, downstreamPipeName, StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
-                    "The entry Station process token did not connect to and verify the exact material-arrival pipe ACL.");
+                    "Distinct Station service SIDs derived the same material-arrival pipe name.");
             }
 
-            var downstreamImpersonationEntered = false;
-            var crossStationFailure = downstreamProcess.RunAsService(
-                () =>
-                {
-                    downstreamImpersonationEntered = true;
-                    return ProbeCrossStationPipeUntilTerminalResult(
-                        entryPipeName,
-                        MaterialArrivalPipeConnectTimeout,
-                        cancellationToken);
-                });
-            if (!downstreamImpersonationEntered)
+            var entryFailure = ProbeMaterialArrivalPipeUntilTerminalResult(
+                entryPipeName,
+                MaterialArrivalPipeConnectTimeout,
+                cancellationToken);
+            if (entryFailure is null || !IsExplicitAccessDenied(entryFailure))
             {
-                throw new InvalidOperationException(
-                    "The downstream Station process token was not applied to the cross-Station pipe probe.");
+                throw OrdinaryTokenPipeDenialFailure("entry", entryFailure);
             }
 
-            if (crossStationFailure is null)
+            var downstreamFailure = ProbeMaterialArrivalPipeUntilTerminalResult(
+                downstreamPipeName,
+                MaterialArrivalPipeConnectTimeout,
+                cancellationToken);
+            if (downstreamFailure is null || !IsExplicitAccessDenied(downstreamFailure))
             {
-                throw new UnauthorizedAccessException(
-                    "The downstream Station service token connected to the entry Station material-arrival pipe.");
-            }
-
-            if (!IsExplicitAccessDenied(crossStationFailure))
-            {
-                var nativeError = WindowsErrorCode(crossStationFailure);
-                var reason = nativeError switch
-                {
-                    ErrorFileNotFound => "the entry pipe was absent",
-                    ErrorPipeBusy => "the entry pipe was busy",
-                    _ when crossStationFailure is TimeoutException =>
-                        "the cross-Station connection timed out",
-                    _ => "the connection failed without an explicit access-denied result"
-                };
-                throw new InvalidOperationException(
-                    $"Cross-Station material-arrival isolation was not proven because {reason}.",
-                    crossStationFailure);
+                throw OrdinaryTokenPipeDenialFailure("downstream", downstreamFailure);
             }
 
             VerifyServiceStillRunning(
@@ -1198,10 +1172,35 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             }
 
             return new StudioMaterialArrivalIpcIsolationEvidence(
-                entryServiceTokenConnected,
-                entryPipeExactAclVerified,
-                DownstreamServiceTokenExplicitAccessDenied: true,
+                EntryRestrictedServiceIdentityVerified:
+                    entryProcess.TokenEvidence.MeetsRestrictedServiceIdentityBoundary,
+                DownstreamRestrictedServiceIdentityVerified:
+                    downstreamProcess.TokenEvidence.MeetsRestrictedServiceIdentityBoundary,
+                EntryPipeOrdinaryTokenExplicitAccessDenied: true,
+                DownstreamPipeOrdinaryTokenExplicitAccessDenied: true,
+                DistinctRestrictedServiceSids: true,
+                EntryMaterialArrivalPipeNameSha256: StudioSha256Text(entryPipeName),
+                DownstreamMaterialArrivalPipeNameSha256: StudioSha256Text(downstreamPipeName),
+                DistinctMaterialArrivalPipes: true,
                 BothServicesRunningOnOriginalPids: true);
+        }
+
+        private static InvalidOperationException OrdinaryTokenPipeDenialFailure(
+            string role,
+            Exception? failure)
+        {
+            var nativeError = failure is null ? 0 : WindowsErrorCode(failure);
+            var reason = failure switch
+            {
+                null => "the ordinary CI token connected",
+                TimeoutException => "the connection timed out",
+                _ when nativeError == ErrorFileNotFound => "the pipe was absent",
+                _ when nativeError == ErrorPipeBusy => "the pipe was busy",
+                _ => "the connection failed without an explicit access-denied result"
+            };
+            return new InvalidOperationException(
+                $"The {role} Station material-arrival pipe did not prove ordinary-token denial because {reason}.",
+                failure);
         }
 
         internal static bool IsExplicitAccessDenied(Exception exception)
@@ -1216,7 +1215,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             return WindowsErrorCode(exception) is ErrorFileNotFound or ErrorPipeBusy;
         }
 
-        private static Exception? ProbeCrossStationPipeUntilTerminalResult(
+        private static Exception? ProbeMaterialArrivalPipeUntilTerminalResult(
             string pipeName,
             TimeSpan totalTimeout,
             CancellationToken cancellationToken)

@@ -548,10 +548,10 @@ $stagedAgentEvidencePath = Join-Path $resolvedStagedAgentEvidenceRoot "evidence.
 $immutableContentCacheFields = @(
     "packagedProvisionCommandVerified",
     "runningServiceAdministrationRejected",
-    "serviceTokenReadExecuteVerified",
-    "sealedMutationAccessDenied",
-    "deepAncestorMutationAccessDenied",
-    "preSealRecoveryVerified",
+    "productionRuntimeReadExecuteVerified",
+    "serviceSidReadOnlyAclVerified",
+    "nestedServiceSidReadOnlyAclVerified",
+    "administratorPreSealRecoveryFixtureVerified",
     "cleanupCrashResumeVerified",
     "committedAdminRemovalVerified",
     "packagedRemovalCommandVerified",
@@ -580,6 +580,7 @@ if (Test-Path -LiteralPath $stagedAgentEvidencePath -PathType Leaf) {
             -Expected ([ordered]@{
                 coordinatorTransportResultInboxRestartedAfterBrokerRecovery = $true
                 windowsServiceLifecycleVerified = $true
+                session0Verified = $true
             })
         $stagedIdentityExpectedBooleans = [ordered]@{
             nonAdministrative = $true
@@ -661,6 +662,7 @@ if (Test-Path -LiteralPath $stagedAgentEvidencePath -PathType Leaf) {
             -or $stagedAgentDocument.rabbitMqTransportCoverage.restartedAgentHostIdentity.serviceSid -cne $stagedAgentDocument.rabbitMqTransportCoverage.agentHostIdentity.serviceSid `
             -or [string]$stagedAgentDocument.rabbitMqTransportCoverage.windowsServiceName -cnotmatch '^OpenLineOpsAgentE2E-[0-9a-f]{32}$' `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.windowsServiceLifecycleVerified -ne $true `
+            -or $stagedAgentDocument.rabbitMqTransportCoverage.session0Verified -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.presence.startedAndHeartbeatPersisted -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.presence.expiredOfflineDuringBrokerOutage -ne $true `
             -or $stagedAgentDocument.rabbitMqTransportCoverage.presence.freshOnlineAfterReconnect -ne $true) {

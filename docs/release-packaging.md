@@ -170,31 +170,19 @@ administrator operations; release static gates, executable tests, staging, and
 candidate inspection require both commands and their packaged deployment
 instructions.
 
-The Windows service-token Test Relay is test infrastructure, not a product
-runtime. Its source is present only as ordinary test source in the open-source
-`source` artifact so the repository remains fully buildable. Its executable,
-`OpenLineOps.WindowsServiceToken.TestRelay` assembly prefix, and
-`windows-service-token-test-relay` staging directory are forbidden from every
-API, Agent, Runner, Desktop, Plugin Host, Script Worker and sample-plugin
-artifact. Release staging rejects such a leak before archive creation,
-candidate inspection independently rejects a fully re-manifested and re-hashed
-leak. The Test Relay project is not packable and is non-publishable by default;
-the Agent test staging target explicitly enables only its isolated publish to
-produce an exact one-file NativeAOT bundle. Contract tests reject CLR metadata,
-`coreclr.dll`, a direct `USER32.dll` import, symbols or any second bundle entry.
-Inside its entrypoint the relay resolves the desktop APIs from system USER32
-and proves the exact `Service-0x0-3e5$\Default` attachment before and after
-authenticated pipe access. The test-only runner creates it directly from a
-fully validated Station parent with `PROCESS_CREATE_PROCESS`,
-`CompareObjectHandles`,
-`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` and a private
-`PROC_THREAD_ATTRIBUTE_JOB_LIST`. It binds the verified Session-0 LocalService
-parent to `Service-0x0-3e5$\Default` instead of inheriting or automatically
-selecting a desktop; the source Station, suspended relay and running relay must
-all remain in Session 0. No Test Relay executable belongs to a release
-candidate. The handle comparison import is pinned to the documented
-`Kernelbase.dll` runtime module and is exercised by the Windows contract suite
-before any staged service scenario.
+Windows service verification uses the extracted production Agent, Station
+Runtime, Plugin Host, Script Worker, least-privilege launcher, and vendor
+program directly. There is no identity relay, helper service, token-copy
+utility, or test-only executable to stage or exclude. Candidate inspection
+requires the exact declared product and sample payload inventories and rejects
+unmanifested files, executable identity drift, reparse points, unexpected
+symbols, source/project files, test-named paths, and recognized test-framework
+binaries inside deployable archives. The staged
+Windows gates bind the SCM-reported Agent PID to the canonical packaged image,
+SHA-256, Session 0, and query-only restricted LocalService token evidence before
+running the production process chain. Staged, two-Station, and Runner evidence
+all require an exact JSON boolean `session0Verified`; their mutation gates
+reject missing fields and non-boolean substitutes.
 
 See `docs/station-agent-deployment.md` and
 `docs/headless-runner.md` for deployment and invocation.

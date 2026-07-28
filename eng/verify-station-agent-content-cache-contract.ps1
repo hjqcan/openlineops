@@ -49,68 +49,18 @@ $agentStagedE2E = Read-RequiredText "tests/OpenLineOps.Agent.Tests/StagedAgentRa
 $runnerStagedE2E = Read-RequiredText "tests/OpenLineOps.Runner.Tests/RunnerStagedAgentProcessE2ETests.cs"
 $transactionLock = Read-RequiredText "shared/OpenLineOps.ContentProtection/ImmutableContentCacheTransactionLock.cs"
 $studioHarness = Read-RequiredText "tests/OpenLineOps.Agent.Tests/StudioTwoAgentExternalProcessHarness.cs"
-$relayBridge = Read-RequiredText "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestBridge.cs"
-$relayController = Read-RequiredText "tests/OpenLineOps.Agent.Tests/WindowsSourceTokenRelayProcess.cs"
-$relayContractTests = Read-RequiredText "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestRelayContractTests.cs"
-$relayProject = Read-RequiredText "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj"
-$relayProgram = Read-RequiredText "tests/OpenLineOps.WindowsServiceToken.TestRelay/Program.cs"
-$relayProtocol = Read-RequiredText "tests/OpenLineOps.WindowsServiceToken.TestRelay/RelayProtocol.cs"
-$relayNative = Read-RequiredText "tests/OpenLineOps.WindowsServiceToken.TestRelay/WindowsNative.cs"
-$relayOperation = Read-RequiredText "tests/OpenLineOps.WindowsServiceToken.TestRelay/SourceTokenRelayOperation.cs"
-$agentTestsProject = Read-RequiredText "tests/OpenLineOps.Agent.Tests/OpenLineOps.Agent.Tests.csproj"
+$studioE2E = Read-RequiredText "tests/OpenLineOps.Agent.Tests/StudioTwoAgentRealCoordinatorE2ETests.cs"
+$stagedEvidenceValidator = Read-RequiredText "eng/verify-staged-agent-evidence.ps1"
+$studioEvidenceValidator = Read-RequiredText "eng/verify-studio-two-agent-production-evidence.ps1"
+$runnerEvidenceValidator = Read-RequiredText "eng/verify-runner-staged-agent-evidence.ps1"
+$stagedEvidenceMutations = Read-RequiredText "eng/verify-evidence-validation.tests.ps1"
+$studioEvidenceMutations = Read-RequiredText "eng/verify-studio-two-agent-production-evidence.tests.ps1"
+$runnerEvidenceMutations = Read-RequiredText "eng/verify-runner-staged-agent-evidence.tests.ps1"
 $deployment = Read-RequiredText "docs/station-agent-deployment.md"
 $security = Read-RequiredText "docs/station-agent-security.md"
 $release = Read-RequiredText "docs/release-packaging.md"
 $staging = Read-RequiredText "eng/stage-release-artifacts.ps1"
 $inspection = Read-RequiredText "eng/inspect-release-candidate.ps1"
-
-foreach ($retiredPath in @(
-        "tests/OpenLineOps.Agent.Tests/WindowsKernelObjectAccessLease.cs",
-        "tests/OpenLineOps.Agent.Tests/WindowsProcessAccessLease.cs",
-        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestHelperContractTests.cs")) {
-    if (Test-Path -LiteralPath (Join-Path $repoRoot $retiredPath)) {
-        throw "Retired service-token helper or source-process DACL implementation still exists: $retiredPath"
-    }
-}
-
-$retiredHelperRoot = Join-Path $repoRoot "tests/OpenLineOps.WindowsServiceToken.TestHelper"
-if (Test-Path -LiteralPath $retiredHelperRoot -PathType Container) {
-    $retiredSourceEntries = @(Get-ChildItem -LiteralPath $retiredHelperRoot -Recurse -File | Where-Object {
-            $relative = $_.FullName.Substring($retiredHelperRoot.Length).TrimStart(
-                [char[]]@(
-                    [System.IO.Path]::DirectorySeparatorChar,
-                    [System.IO.Path]::AltDirectorySeparatorChar))
-            $segments = $relative -split '[\\/]'
-            -not ($segments -contains "bin" -or $segments -contains "obj")
-        })
-    if ($retiredSourceEntries.Count -ne 0) {
-        throw "Retired service-token TestHelper source still exists beneath tests/OpenLineOps.WindowsServiceToken.TestHelper."
-    }
-}
-
-$relayRoot = Join-Path $repoRoot "tests/OpenLineOps.WindowsServiceToken.TestRelay"
-$relaySourceFiles = @(Get-ChildItem -LiteralPath $relayRoot -Recurse -File -Filter "*.cs" | Where-Object {
-        $relative = $_.FullName.Substring($relayRoot.Length).TrimStart(
-            [char[]]@(
-                [System.IO.Path]::DirectorySeparatorChar,
-                [System.IO.Path]::AltDirectorySeparatorChar))
-        $segments = $relative -split '[\\/]'
-        -not ($segments -contains "bin" -or $segments -contains "obj")
-    } | Sort-Object Name)
-$relaySourceNames = [string]::Join("|", @($relaySourceFiles | ForEach-Object Name))
-if ($relaySourceNames -cne "Program.cs|RelayProtocol.cs|SourceTokenRelayOperation.cs|WindowsNative.cs") {
-    throw "The Test Relay source tree must contain exactly Program.cs, RelayProtocol.cs, SourceTokenRelayOperation.cs, and WindowsNative.cs."
-}
-if (@($relaySourceFiles | Where-Object {
-            ($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0
-        }).Count -ne 0) {
-    throw "The Test Relay source tree contains a reparse-point C# file."
-}
-$relayAllSource = [string]::Join(
-    [Environment]::NewLine,
-    @($relaySourceFiles | ForEach-Object {
-            Get-Content -LiteralPath $_.FullName -Raw
-        }))
 
 $scalarReaderMarker = "private static int ReadTokenScalar("
 $groupsReaderMarker = "private static List<TokenGroupEvidence> ReadTokenGroups("
@@ -195,274 +145,17 @@ Assert-ContainsLiteral $contentProtector "TokenAccessLevels.Query | TokenAccessL
     "Immutable content cleanup administrator classification does not request the token duplication right required by WindowsPrincipal role checks."
 Assert-ContainsLiteral $transactionLock "TokenAccessLevels.Query | TokenAccessLevels.Duplicate" `
     "Immutable content transaction-lock owner classification does not request the token duplication right required by WindowsPrincipal role checks."
-Assert-ContainsLiteral $agentStagedE2E "WindowsServiceTokenTestBridge.Run(" "Staged Agent exact-service-token checks do not use the direct source-token relay bridge."
-Assert-ContainsLiteral $studioHarness ".RunAsService(" "The packaged two-Agent gate does not route exact Station identities through the shared direct relay bridge."
 foreach ($directTokenConsumer in @($agentStagedE2E, $studioHarness)) {
-    Assert-ForbiddenPattern $directTokenConsumer 'DuplicateTokenEx|TokenDuplicate|DuplicateHandle|SeDebugPrivilege|AdjustTokenPrivileges' "Staged Agent and Studio E2E harnesses must not duplicate service tokens or enable debug privilege directly."
+    Assert-ForbiddenPattern $directTokenConsumer 'DuplicateTokenEx|TokenDuplicate|DuplicateHandle|SeDebugPrivilege|AdjustTokenPrivileges|CreateProcessAsUser|CreateProcessWithToken' "Staged Agent and Studio E2E harnesses must not duplicate service tokens, enable debug privilege, or launch a copied token."
 }
-
-$directRelayImplementation = [string]::Join([Environment]::NewLine, @($relayBridge, $relayController, $relayAllSource))
-Assert-ForbiddenPattern $directRelayImplementation 'WindowsKernelObjectAccessLease|WindowsProcessAccessLease|WindowsServiceTokenTestHelper|OpenLineOps\.WindowsServiceToken\.TestHelper' "The direct Test Relay implementation still references a retired helper or source-process DACL lease."
-Assert-ForbiddenPattern $directRelayImplementation 'DuplicateToken(?:Ex)?|TokenDuplicate|DuplicateHandle|SeDebugPrivilege|AdjustTokenPrivileges|SetKernelObjectSecurity|SetNamedSecurityInfo|WRITE_DAC|WriteDac' "The direct Test Relay must not copy tokens, enable debug privilege, or rewrite the Station process/token DACL."
-Assert-ForbiddenPattern $directRelayImplementation '\b(?:V|v)[0-9]+\b' "The direct Test Relay contains a version-suffixed implementation name."
-
-foreach ($bridgeLiteral in @(
-        "ProcessCreateProcess = 0x00000080",
-        "OpenExactSourceCreationProcess(",
-        '[DllImport("kernelbase.dll", SetLastError = true, ExactSpelling = true)]',
-        "CompareObjectHandles(retainedSourceProcess, process)",
-        "using (var createOnlySource = OpenExactSourceCreationProcess(",
-        "WindowsSourceTokenRelayProcess.CreateSuspended(",
-        "relay.ValidateCreated(request);",
-        "relay.Resume();",
-        "ValidateSourceServiceAndProcessRunning(",
-        "ValidateCapturedProcessImageAndHash(",
-        "ValidateSourceProcessOutsideJob(",
-        "PrepareRelayRoot(",
-        "CreateProtectedDirectory(relayRoot, security)",
-        "VerifyRelayBundle(",
-        "AssertRelayTreeSecurity(",
-        "SearchOption.TopDirectoryOnly",
-        "NamedPipeServerStreamAcl.Create(",
-        "PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance",
-        "PipeAccessRights.ReadWrite | PipeAccessRights.Synchronize",
-        "GetNamedPipeClientProcessId(",
-        "controlPipe.RunAsClient(",
-        "ValidateImpersonatedSourceIdentity(",
-        "CryptographicOperations.FixedTimeEquals(",
-        "WriteReceipt(controlPipe)",
-        "relay.WaitForSuccessfulExit(TransitionTimeout)",
-        "relay.Dispose();",
-        "controlPipe.Dispose();",
-        "DeleteRelayRoot(bridgeRoot)",
-        "case IDisposable disposable:",
-        "case IAsyncDisposable asyncDisposable:",
-        "cleanupFailures.Add(exception)")) {
-    Assert-ContainsLiteral $relayBridge $bridgeLiteral "The direct Windows source-token bridge is missing strict boundary '$bridgeLiteral'."
-}
-Assert-ForbiddenPattern $relayBridge 'SearchOption\.AllDirectories|PipeAccessRights\.(?:ChangePermissions|TakeOwnership|CreateNewInstance)' "The direct bridge must not follow recursive reparse paths or grant administrative pipe rights."
-
-$openExactStart = $relayBridge.IndexOf(
-    "private static SafeProcessHandle OpenExactSourceCreationProcess(",
-    [System.StringComparison]::Ordinal)
-$openExactEnd = $relayBridge.IndexOf(
-    "private static void PrepareRelayRoot(",
-    $openExactStart,
-    [System.StringComparison]::Ordinal)
-if ($openExactStart -lt 0 -or $openExactEnd -le $openExactStart) {
-    throw "The direct bridge is missing its bounded create-only source process opener."
-}
-$openExactSource = $relayBridge.Substring($openExactStart, $openExactEnd - $openExactStart)
-Assert-ContainsLiteral $openExactSource "OpenProcess(" "The direct bridge does not open the exact source process."
-Assert-ContainsLiteral $openExactSource "ProcessCreateProcess" "The direct bridge does not request only PROCESS_CREATE_PROCESS."
-Assert-ContainsLiteral $openExactSource "inheritHandle: false" "The direct bridge source capability is inheritable."
-Assert-ContainsLiteral $openExactSource "CompareObjectHandles(retainedSourceProcess, process)" "The direct bridge does not bind the create-only capability to the retained Station process object."
-$compareObjectHandlesBindingPattern = '\[DllImport\("kernelbase\.dll", SetLastError = true, ExactSpelling = true\)\]\s*\[return: MarshalAs\(UnmanagedType\.Bool\)\]\s*internal static extern bool CompareObjectHandles\('
-if ([regex]::Matches($relayBridge, $compareObjectHandlesBindingPattern).Count -ne 1) {
-    throw "CompareObjectHandles must have exactly one BOOL binding to its documented Kernelbase.dll runtime module."
-}
-Assert-ContainsLiteral $openExactSource "throw new Win32Exception(" "The direct bridge does not fail closed when exact create-only access is denied."
-Assert-ForbiddenPattern $openExactSource 'catch|ProcessCreateProcess\s*\|' "The exact source process opener contains a fallback or adds rights beyond PROCESS_CREATE_PROCESS."
-if ([regex]::Matches($relayBridge, [regex]::Escape("OpenProcess(")).Count -ne 2) {
-    throw "The direct bridge must contain exactly one OpenProcess call plus its P/Invoke declaration, with no fallback reopen."
-}
-
-foreach ($threeWayValidation in @(
-        "ValidateSourceProcessOutsideJob(sourceProcessHandle, sourceProcessId);",
-        "VerifyRelayBundle(relayBundleRoot, relayBundleInventory);",
-        "AssertRelayTreeSecurity(bridgeRoot, canonicalSourceServiceSid);")) {
-    if ([regex]::Matches($relayBridge, [regex]::Escape($threeWayValidation)).Count -ne 3) {
-        throw "The direct bridge must enforce '$threeWayValidation' before creation, before resume, and after completion."
-    }
-}
-if ([regex]::Matches(
-        $relayBridge,
-        [regex]::Escape("ValidateCapturedProcessImageAndHash(")).Count -lt 4) {
-    throw "The direct bridge must repeatedly bind the retained Station/Relay process handles to canonical image hashes."
-}
-
-foreach ($controllerLiteral in @(
-        "ProcThreadAttributeParentProcess = 0x00020000",
-        "ProcThreadAttributeJobList = 0x0002000D",
-        "JobObjectLimitActiveProcess | JobObjectLimitKillOnJobClose",
-        "ActiveProcessLimit = 1",
-        "CreateNoWindow",
-        "CreateSuspendedFlag",
-        "CreateUnicodeEnvironment",
-        "ExtendedStartupInfoPresent",
-        'private const string LocalServiceDesktop = @"Service-0x0-3e5$\Default";',
-        "Desktop = LocalServiceDesktop",
-        "inheritHandles: false",
-        "ProcessSecurityDescriptor(runnerSid)",
-        "ProcessTerminate | ProcessQueryLimitedInformation | Synchronize",
-        "ResumeThread(_thread)",
-        "previousSuspendCount != 1",
-        "IsProcessInJob(_process, _job",
-        "TerminateJobObject(job, 70)",
-        "TerminateProcess(process, 70)",
-        "ReadCreatedAtUtcTicks(_process)",
-        "ValidateCreated(",
-        "ValidateRunning(")) {
-    Assert-ContainsLiteral $relayController $controllerLiteral "The direct Test Relay controller is missing containment boundary '$controllerLiteral'."
-}
-Assert-ForbiddenPattern $relayController 'CREATE_BREAKAWAY_FROM_JOB|CreateBreakawayFromJob|Process\.GetProcessById|OpenProcess\(|WellKnownSidType|BuiltinAdministrators|LocalSystemSid' "The direct Test Relay controller contains breakaway, PID reopen, fallback, or an over-broad process DACL."
-Assert-ForbiddenPattern $relayController 'Desktop\s*=\s*(?:null|string\.Empty|@?""|@?"WinSta0)' "The direct Test Relay controller must bind only the explicit LocalService service desktop."
-if ([regex]::Matches($relayController, [regex]::Escape("CreateProcess(")).Count -ne 2) {
-    throw "The direct Test Relay controller must contain one CreateProcess call and one P/Invoke declaration."
-}
-
-foreach ($programLiteral in @(
-        "RelayProtocol.ParseInvocation(args)",
-        "SourceTokenRelayOperation.ExecuteAsync(requestPath)",
-        "InvalidInvocationExitCode",
-        "OperationFailureExitCode")) {
-    Assert-ContainsLiteral $relayProgram $programLiteral "The fixed Test Relay entry point is missing '$programLiteral'."
-}
-foreach ($protocolLiteral in @(
-        "args.Count != 2",
-        '"--request"',
-        "RequestPropertyNames",
-        "AllowTrailingCommas = false",
-        "CommentHandling = JsonCommentHandling.Disallow",
-        "MaxDepth = 4",
-        "contains unknown property",
-        "duplicates property",
-        "is missing properties",
-        "sourceProcessCreatedAtUtcTicks",
-        "RequireCanonicalAbsoluteFile(",
-        "RequireCanonicalAbsoluteDirectory(",
-        "RequireLowerHex(",
-        "RequireServiceSid(",
-        "RequirePipeName(",
-        "RejectReparsePoint(",
-        "OpenLineOps.WindowsServiceToken.TestRelay.exe",
-        "openlineops-source-token-relay-")) {
-    Assert-ContainsLiteral $relayProtocol $protocolLiteral "The strict Test Relay request protocol is missing '$protocolLiteral'."
-}
-
-foreach ($nativeLiteral in @(
-        "ValidateCurrentSourceToken(",
-        "LocalServiceSid",
-        "TokenPrimary",
-        "TokenElevationTypeDefault",
-        "AdministratorsSid",
-        "ServiceLogonSid",
-        "TokenRestrictedSids",
-        "ValidateCurrentServiceDesktop(",
-        "LoadLibrarySearchSystem32",
-        "GetProcessWindowStation",
-        "GetThreadDesktop",
-        "GetUserObjectInformationW",
-        "LocalServiceWindowStation",
-        "LocalServiceDesktop",
-        "ValidateCanonicalExecutableHandle(",
-        "FileAttributeReparsePoint",
-        "GetFinalPathNameByHandle(",
-        "BorrowedCurrentProcessTokenHandle")) {
-    Assert-ContainsLiteral $relayNative $nativeLiteral "The Test Relay token/image self-attestation is missing '$nativeLiteral'."
-}
-Assert-ForbiddenPattern $relayAllSource 'OpenProcessToken|CreateRestrictedToken|CreateProcessAsUser|CreateProcessWithToken|OpenSCManager|OpenService|CreateService|UseWindowsService|BackgroundService' "The fixed Test Relay must not acquire/copy tokens or host an SCM service."
-
-foreach ($operationLiteral in @(
-        "PipeConnectionTimeout = TimeSpan.FromSeconds(15)",
-        "ReceiptTimeout = TimeSpan.FromSeconds(60)",
-        "TokenImpersonationLevel.Impersonation",
-        "Convert.FromHexString(request.Nonce)",
-        "pipe.WriteAsync(nonce",
-        "AcceptedReceipt",
-        "bytesRead != 1",
-        "ValidateCanonicalExecutableHandle(",
-        "SHA256.HashData(stream)")) {
-    Assert-ContainsLiteral $relayOperation $operationLiteral "The Test Relay operation is missing '$operationLiteral'."
-}
-foreach ($twiceValidated in @(
-        "WindowsNative.ValidateCurrentSourceToken(request.ExpectedSourceServiceSid);",
-        "WindowsNative.ValidateCurrentServiceDesktop();",
-        "ValidateCurrentRelayExecutable(request);",
-        "ValidateSourceExecutableFile(request);")) {
-    if ([regex]::Matches($relayOperation, [regex]::Escape($twiceValidated)).Count -ne 2) {
-        throw "The Test Relay must validate '$twiceValidated' both before pipe access and after the authenticated receipt."
-    }
-}
-
-foreach ($testLiteral in @(
-        "RelayBundleIsOneNativeAotExecutableWithoutDirectUser32Import",
-        "Assert.False(pe.HasMetadata)",
-        "ReadPeImportedModules",
-        '"USER32.dll"',
-        '"coreclr.dll"',
-        "AssertImageContainsText",
-        '"GetProcessWindowStation"',
-        '"GetThreadDesktop"',
-        '"GetUserObjectInformationW"',
-        "RelayBundleCopyIsFrozenAndRejectsChangedOrAddedFiles",
-        "RelayBundleCopyRejectsAnEmptyBundle",
-        "RelayTreeOwnerCanonicalizationRestoresEveryEntry",
-        "ExactProcessHandleRejectsPidAndCreationTimeDrift",
-        "CompareObjectHandlesLoadsFromDocumentedKernelBaseDll",
-        "PipeClientRightsContainOnlyProtocolAccess",
-        "RelayExecutableRejectsEveryInvocationExceptOneCanonicalRequest",
-        "RelayExecutableRejectsUnknownAndMissingRequestProperties",
-        "CanonicalRelayRequestReachesTokenSelfAttestation",
-        "SuspendedRelayIsBoundToItsImageAndKilledByJobDisposal")) {
-    Assert-ContainsLiteral $relayContractTests $testLiteral "The direct Test Relay contract suite is missing '$testLiteral'."
-}
-Assert-ForbiddenPattern $relayContractTests '3221225794|0x[cC]0000142|STATUS_DLL_INIT_FAILED' `
-    "The direct Test Relay contract suite must never accept a pre-Main DLL initialization failure."
-
-foreach ($projectLiteral in @(
-        "<IsPackable>false</IsPackable>",
-        "<IsPublishable>false</IsPublishable>",
-        "<IsTestProject>false</IsTestProject>",
-        '<RuntimeIdentifier Condition="$([MSBuild]::IsOSPlatform(''Windows''))">win-x64</RuntimeIdentifier>',
-        '<PublishAot Condition="$([MSBuild]::IsOSPlatform(''Windows''))">true</PublishAot>',
-        '<SelfContained Condition="$([MSBuild]::IsOSPlatform(''Windows''))">true</SelfContained>',
-        '<StripSymbols Condition="$([MSBuild]::IsOSPlatform(''Windows''))">true</StripSymbols>')) {
-    Assert-ContainsLiteral $relayProject $projectLiteral "The Test Relay project is missing release isolation '$projectLiteral'."
-}
-$agentTestsProjectXml = [xml]$agentTestsProject
-$relayReferences = @(
-    $agentTestsProjectXml.Project.ItemGroup.ProjectReference | Where-Object {
-        $_.Include -ceq '..\OpenLineOps.WindowsServiceToken.TestRelay\OpenLineOps.WindowsServiceToken.TestRelay.csproj'
-    })
-if ($relayReferences.Count -ne 1 -or $relayReferences[0].ReferenceOutputAssembly -cne 'false') {
-    throw "Agent tests must reference exactly one Test Relay project with ReferenceOutputAssembly=false."
-}
-foreach ($stagingLiteral in @(
-        "StageWindowsServiceTokenTestRelayBundle",
-        "windows-service-token-test-relay",
-        "OpenLineOps.WindowsServiceToken.TestRelay.exe",
-        'Targets="Publish"',
-        "IsPublishable=true",
-        "PublishAot=true",
-        "SelfContained=true",
-        "_ServiceTokenTestRelayUnexpectedFile",
-        "must contain exactly one executable",
-        '<FileWrites Include="$(_ServiceTokenTestRelayPublishDir)**\*" />',
-        '<FileWrites Include="$(_ServiceTokenTestRelayBundleDir)**\*" />')) {
-    Assert-ContainsLiteral $agentTestsProject $stagingLiteral "Agent tests are missing Test Relay staging boundary '$stagingLiteral'."
-}
-
-foreach ($documentationLiteral in @(
-        "PROCESS_CREATE_PROCESS",
-        "CompareObjectHandles",
-        "PROC_THREAD_ATTRIBUTE_PARENT_PROCESS",
-        "PROC_THREAD_ATTRIBUTE_JOB_LIST",
-        'Service-0x0-3e5$\Default',
-        "NativeAOT",
-        '`USER32.dll`')) {
-    Assert-ContainsLiteral $security $documentationLiteral "Station security documentation is missing direct relay boundary '$documentationLiteral'."
-    Assert-ContainsLiteral $release $documentationLiteral "Release documentation is missing direct relay boundary '$documentationLiteral'."
-}
-foreach ($bridgeSessionLiteral in @(
-        "ProcessIdToSessionId",
-        'ValidateSessionZero(sourceProcessId, "source Station")',
-        '"suspended source-token relay"',
-        '"running source-token relay"')) {
-    Assert-ContainsLiteral $relayBridge $bridgeSessionLiteral "The direct bridge is missing Session-0 binding '$bridgeSessionLiteral'."
-}
-Assert-ForbiddenPattern $security 'one-shot virtual service|temporary process DACL|WindowsProcessAccessLease|WindowsKernelObjectAccessLease|OpenLineOps\.WindowsServiceToken\.TestHelper' "Station security documentation retains the retired helper-service/source-DACL design."
-Assert-ForbiddenPattern $release 'one-shot virtual service|temporary process DACL|WindowsProcessAccessLease|WindowsKernelObjectAccessLease|OpenLineOps\.WindowsServiceToken\.TestHelper' "Release documentation retains the retired helper-service/source-DACL design."
+Assert-ContainsLiteral $agentStagedE2E "productionRuntimeReadExecuteVerified" `
+    "Staged Agent evidence does not bind immutable package access to a real production Runtime job."
+Assert-ContainsLiteral $agentStagedE2E "serviceSidReadOnlyAclVerified" `
+    "Staged Agent evidence does not verify the exact service-SID read-only cache ACL."
+Assert-ContainsLiteral $agentStagedE2E "nestedServiceSidReadOnlyAclVerified" `
+    "Staged Agent evidence does not verify nested service-SID read-only cache ACLs."
+Assert-ContainsLiteral $agentStagedE2E "administratorPreSealRecoveryFixtureVerified" `
+    "Staged Agent evidence does not bind pre-seal recovery to its administrator fixture."
 
 Assert-ContainsLiteral $contentProtector "ReadIsRestrictedToken(identity.AccessToken);" `
     "Station service identity validation does not use the native restricted-token predicate."
@@ -476,6 +169,12 @@ Assert-ContainsLiteral $runnerStagedE2E "TokenInformationClass.TokenElevationTyp
     "Runner staged Agent evidence does not inspect the UAC linked-token boundary."
 Assert-ContainsLiteral $runnerStagedE2E "HasLinkedToken" `
     "Runner staged Agent evidence does not expose the linked-token boundary."
+Assert-ContainsLiteral $runnerStagedE2E "ProcessIdToSessionId(running.ProcessId, out var sessionId)" `
+    "Runner staged Agent evidence does not bind the SCM PID to Windows Session 0."
+Assert-ContainsLiteral $runnerStagedE2E "if (sessionId != 0)" `
+    "Runner staged Agent evidence does not hard-reject an interactive SCM PID."
+Assert-ContainsLiteral $runnerStagedE2E "session0Verified: true" `
+    "Runner staged Agent evidence does not record the successful Session 0 assertion."
 Assert-ContainsLiteral $runnerScalarReader "const int bufferLength = sizeof(int);" `
     "Runner staged Agent scalar token evidence does not use the exact native integer width."
 Assert-ContainsLiteral $runnerScalarReader "returnedLength != bufferLength" `
@@ -489,6 +188,34 @@ Assert-ContainsLiteral $agentStagedE2E "TokenInformationClass.TokenElevationType
     "Agent staged evidence does not inspect the UAC linked-token boundary."
 Assert-ContainsLiteral $agentStagedE2E "HasLinkedToken" `
     "Agent staged evidence does not expose the linked-token boundary."
+Assert-ContainsLiteral $agentStagedE2E "ProcessIdToSessionId(processId, out var sessionId)" `
+    "Agent staged evidence does not bind each SCM PID to Windows Session 0."
+Assert-ContainsLiteral $agentStagedE2E "if (sessionId != 0)" `
+    "Agent staged evidence does not hard-reject an interactive SCM PID."
+Assert-ContainsLiteral $agentStagedE2E "Session0Verified: true" `
+    "Agent staged evidence does not retain the successful Session 0 assertion."
+Assert-ContainsLiteral $studioHarness "EntryAgentSession0Verified" `
+    "Studio two-Agent harness does not expose the entry Station Session 0 assertion."
+Assert-ContainsLiteral $studioHarness "DownstreamAgentSession0Verified" `
+    "Studio two-Agent harness does not expose the downstream Station Session 0 assertion."
+Assert-ContainsLiteral $studioE2E "session0Verified = entryAgentSession0Verified" `
+    "Studio two-Agent evidence does not record the entry Station Session 0 assertion."
+Assert-ContainsLiteral $studioE2E "session0Verified = downstreamAgentSession0Verified" `
+    "Studio two-Agent evidence does not record the downstream Station Session 0 assertion."
+foreach ($validator in @(
+        $stagedEvidenceValidator,
+        $studioEvidenceValidator,
+        $runnerEvidenceValidator)) {
+    Assert-ContainsLiteral $validator "session0Verified" `
+        "A public Agent evidence validator does not require Session 0 proof."
+}
+foreach ($mutations in @(
+        $stagedEvidenceMutations,
+        $studioEvidenceMutations,
+        $runnerEvidenceMutations)) {
+    Assert-ContainsLiteral $mutations "session0Verified" `
+        "An Agent evidence mutation suite does not reject invalid Session 0 proof."
+}
 Assert-ContainsLiteral $scalarReader "const int bufferLength = sizeof(int);" `
     "Agent staged scalar token evidence does not use the exact native integer width."
 Assert-ContainsLiteral $scalarReader "returnedLength != bufferLength" `
@@ -570,11 +297,16 @@ Assert-ContainsLiteral $inspection "DEPLOYMENT.md is missing content-cache provi
     "Release candidate inspection does not enforce the packaged provisioning instructions."
 Assert-ContainsLiteral $inspection "--remove-content-cache-package" `
     "Release candidate inspection does not enforce the packaged protected-package removal command."
-Assert-ContainsLiteral $staging 'The $ArtifactKind release payload contains the test-only Windows service-token Test Relay' "Release staging does not reject the test-only Test Relay from deployable payloads."
-Assert-ContainsLiteral $staging "Test-PortableExecutableContainsAsciiMarker" "Release staging does not reject renamed portable executables carrying the Test Relay identity."
-Assert-ContainsLiteral $staging "Production project" "Release staging does not reject production references to the Test Relay."
-Assert-ContainsLiteral $inspection "contains the test-only Windows service-token Test Relay in a deployable artifact" "Release candidate inspection does not independently reject the Test Relay."
-Assert-ContainsLiteral $inspection "Test-ZipEntryPortableExecutableContainsAsciiMarker" "Release candidate inspection does not inspect renamed portable executables for the Test Relay identity."
+Assert-ContainsLiteral $staging "Assert-NoDevelopmentOnlyPayload" "Release staging does not reject source, project, and test-only deployable payloads."
+Assert-ContainsLiteral $staging "Test-PortableExecutableContainsAsciiMarker" "Release staging does not reject renamed portable executables carrying test-framework identity."
+Assert-ContainsLiteral $inspection "Test-NoDevelopmentOnlyPayloadEntries" "Release candidate inspection does not independently reject source, project, and test-only deployable payloads."
+Assert-ContainsLiteral $inspection "Test-ZipEntryPortableExecutableContainsAsciiMarker" "Release candidate inspection does not inspect renamed portable executables for test-framework identity."
+foreach ($extension in @(".cs", ".fs", ".vb", ".csproj", ".fsproj", ".vbproj", ".sln", ".slnx")) {
+    Assert-ContainsLiteral $staging ('"' + $extension + '"') `
+        "Release staging does not reject '$extension' files from deployable payloads."
+    Assert-ContainsLiteral $inspection ('"' + $extension + '"') `
+        "Release candidate inspection does not reject '$extension' files from deployable payloads."
+}
 
-Write-Host "Station Agent content-cache provisioning and direct source-token Relay contract verification passed."
+Write-Host "Station Agent content-cache provisioning and production evidence contract verification passed."
 exit 0

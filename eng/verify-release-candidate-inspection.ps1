@@ -613,11 +613,11 @@ function New-MinimalReleaseCandidate {
         [switch] $BackslashDesktopEntry,
         [switch] $WrongCaseDesktopEntry,
         [switch] $TamperAgentBundle,
-        [switch] $IncludeServiceTokenTestRelayInAgent,
-        [switch] $IncludeRenamedServiceTokenTestRelayDirectoryInAgent,
-        [switch] $IncludeRenamedServiceTokenTestRelayBinaryInAgent,
-        [switch] $IncludeUnmanifestedServiceTokenTestRelayBinary,
-        [switch] $OmitServiceTokenTestRelaySource,
+        [switch] $IncludeTestDirectoryPayloadInAgent,
+        [switch] $IncludeTestAssemblyNamePayloadInAgent,
+        [switch] $IncludeRenamedTestBinaryPayloadInAgent,
+        [switch] $IncludeManifestedSourcePayloadInAgent,
+        [switch] $IncludeUnmanifestedTestBinary,
         [switch] $ExposeRemovedAgentContainerSetting,
         [switch] $OmitAgentSafetyExecutablePath,
         [switch] $OmitAgentStationSystemId,
@@ -650,14 +650,6 @@ function New-MinimalReleaseCandidate {
         "Directory.Build.props",
         "OpenLineOps.sln",
         "OpenLineOps.slnx",
-        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestBridge.cs",
-        "tests/OpenLineOps.Agent.Tests/WindowsSourceTokenRelayProcess.cs",
-        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestRelayContractTests.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj",
-        "tests/OpenLineOps.WindowsServiceToken.TestRelay/Program.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestRelay/RelayProtocol.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestRelay/WindowsNative.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestRelay/SourceTokenRelayOperation.cs",
         "docs/development-execution-plan.md",
         "eng/stage-release-artifacts.ps1",
         "eng/verify-ci-workflow-actions.ps1",
@@ -704,13 +696,6 @@ function New-MinimalReleaseCandidate {
             throw "Fixture source entry '$OmitSourceEntry' is not present exactly once."
         }
     }
-    if ($OmitServiceTokenTestRelaySource) {
-        $sourceEntries = @($sourceEntries | Where-Object {
-                -not $_.StartsWith(
-                    "tests/OpenLineOps.WindowsServiceToken.TestRelay/",
-                    [System.StringComparison]::Ordinal)
-            })
-    }
     New-TestZip `
         -Root $root `
         -Name "source/source-openlineops-$version.zip" `
@@ -733,23 +718,26 @@ function New-MinimalReleaseCandidate {
         "LICENSE.txt",
         "THIRD-PARTY-NOTICES.md")
     $agentFileSourceOverrides = @{}
-    if ($IncludeServiceTokenTestRelayInAgent) {
-        $relayPath = "OpenLineOps.WindowsServiceToken.TestRelay.exe"
-        $agentFiles += $relayPath
-        $agentFileSourceOverrides[$relayPath] =
-            $script:ServiceTokenTestRelayFixtureExecutablePath
+    if ($IncludeTestDirectoryPayloadInAgent) {
+        $testPayloadPath = "TESTS/renamed-helper.exe"
+        $agentFiles += $testPayloadPath
+        $agentFileSourceOverrides[$testPayloadPath] =
+            $script:TestPayloadFixtureExecutablePath
     }
-    if ($IncludeRenamedServiceTokenTestRelayDirectoryInAgent) {
-        $relayPath = "WINDOWS-SERVICE-TOKEN-TEST-RELAY/renamed-relay.exe"
-        $agentFiles += $relayPath
-        $agentFileSourceOverrides[$relayPath] =
-            $script:ServiceTokenTestRelayFixtureExecutablePath
+    if ($IncludeTestAssemblyNamePayloadInAgent) {
+        $testPayloadPath = "support/OpenLineOps.Agent.Tests.dll"
+        $agentFiles += $testPayloadPath
+        $agentFileSourceOverrides[$testPayloadPath] =
+            $script:TestPayloadFixtureExecutablePath
     }
-    if ($IncludeRenamedServiceTokenTestRelayBinaryInAgent) {
-        $relayPath = "support/renamed-relay.bin"
-        $agentFiles += $relayPath
-        $agentFileSourceOverrides[$relayPath] =
-            $script:ServiceTokenTestRelayFixtureExecutablePath
+    if ($IncludeRenamedTestBinaryPayloadInAgent) {
+        $testPayloadPath = "support/renamed-helper.bin"
+        $agentFiles += $testPayloadPath
+        $agentFileSourceOverrides[$testPayloadPath] =
+            $script:TestPayloadFixtureExecutablePath
+    }
+    if ($IncludeManifestedSourcePayloadInAgent) {
+        $agentFiles += "support/EmbeddedRuntimeSource.cs"
     }
 
     New-TestWindowsBundleZip `
@@ -859,10 +847,10 @@ function New-MinimalReleaseCandidate {
         }
     }
 
-    if ($IncludeUnmanifestedServiceTokenTestRelayBinary) {
-        $unmanifestedPath = Join-Path $root "agent/unmanifested-relay.bin"
+    if ($IncludeUnmanifestedTestBinary) {
+        $unmanifestedPath = Join-Path $root "agent/unmanifested-test-helper.bin"
         Copy-Item `
-            -LiteralPath $script:ServiceTokenTestRelayFixtureExecutablePath `
+            -LiteralPath $script:TestPayloadFixtureExecutablePath `
             -Destination $unmanifestedPath
     }
 
@@ -921,34 +909,128 @@ function Assert-InspectionFails {
     Write-Host "Fixture '$Name' failed as expected."
 }
 
+function Read-FixtureZipEntryText {
+    param([Parameter(Mandatory = $true)]$Entry)
+
+    $reader = [System.IO.StreamReader]::new(
+        $Entry.Open(),
+        [System.Text.Encoding]::UTF8,
+        $true)
+    try {
+        return $reader.ReadToEnd()
+    }
+    finally {
+        $reader.Dispose()
+    }
+}
+
+function Get-FixtureZipEntrySha256 {
+    param([Parameter(Mandatory = $true)]$Entry)
+
+    $stream = $Entry.Open()
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha256.ComputeHash($stream)
+        return [System.BitConverter]::ToString($hash).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Assert-BundleEntryIsFullyManifestedAndHashed {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $BundleRelativePath,
+        [Parameter(Mandatory = $true)][string] $EntryRelativePath
+    )
+
+    $bundlePath = Join-Path $Root $BundleRelativePath
+    $bundleFile = Get-Item -LiteralPath $bundlePath
+    $bundleSha256 = Get-FileSha256 $bundlePath
+    $releaseManifest = Get-Content `
+        -LiteralPath (Join-Path $Root "release-manifest.json") `
+        -Raw | ConvertFrom-Json
+    $releaseRecords = @($releaseManifest.artifacts | Where-Object {
+            $_.relativePath -ceq $BundleRelativePath
+        })
+    if ($releaseRecords.Count -ne 1 `
+        -or [long]$releaseRecords[0].sizeBytes -ne $bundleFile.Length `
+        -or [string]$releaseRecords[0].sha256 -cne $bundleSha256) {
+        throw "Fixture bundle '$BundleRelativePath' is not exactly size/hash bound by release-manifest.json."
+    }
+
+    $releaseChecksumLines = @(
+        (Get-Content -LiteralPath (Join-Path $Root "checksums.sha256")) |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($releaseChecksumLines -cnotcontains "$bundleSha256  $BundleRelativePath") {
+        throw "Fixture bundle '$BundleRelativePath' is not hash bound by checksums.sha256."
+    }
+
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($bundlePath)
+    try {
+        $payloadEntries = @($archive.Entries | Where-Object {
+                $_.FullName.Replace([char]92, [char]47) -ceq $EntryRelativePath
+            })
+        if ($payloadEntries.Count -ne 1) {
+            throw "Fixture bundle '$BundleRelativePath' does not contain exactly one '$EntryRelativePath' payload."
+        }
+        $payloadEntry = $payloadEntries[0]
+        $manifestEntry = $archive.GetEntry("bundle-manifest.json")
+        $checksumsEntry = $archive.GetEntry("bundle-checksums.sha256")
+        if ($null -eq $manifestEntry -or $null -eq $checksumsEntry) {
+            throw "Fixture bundle '$BundleRelativePath' is missing its payload or bundle integrity metadata."
+        }
+
+        $payloadSha256 = Get-FixtureZipEntrySha256 $payloadEntry
+        $bundleManifest = (Read-FixtureZipEntryText $manifestEntry) | ConvertFrom-Json
+        $payloadRecords = @($bundleManifest.files | Where-Object {
+                $_.relativePath -ceq $EntryRelativePath
+            })
+        if ($payloadRecords.Count -ne 1 `
+            -or [long]$payloadRecords[0].sizeBytes -ne $payloadEntry.Length `
+            -or [string]$payloadRecords[0].sha256 -cne $payloadSha256) {
+            throw "Fixture payload '$EntryRelativePath' is not exactly size/hash bound by bundle-manifest.json."
+        }
+
+        $bundleChecksumLines = @(
+            (Read-FixtureZipEntryText $checksumsEntry) -split "\r?\n" |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($bundleChecksumLines -cnotcontains "$payloadSha256  $EntryRelativePath") {
+            throw "Fixture payload '$EntryRelativePath' is not hash bound by bundle-checksums.sha256."
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
 $ResolvedWorkRoot = Resolve-RepoPath $WorkRoot
 Assert-UnderRepoRoot $ResolvedWorkRoot
 New-CleanDirectory $ResolvedWorkRoot
-$serviceTokenTestRelayFixtureOutput = Join-Path `
+$script:TestPayloadFixtureExecutablePath = Join-Path `
     $ResolvedWorkRoot `
-    "service-token-test-relay-fixture"
-$serviceTokenTestRelayFixtureProject = Resolve-RepoPath `
-    "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj"
-$serviceTokenTestRelayBuildOutput = @(& dotnet build `
-        $serviceTokenTestRelayFixtureProject `
-        --configuration Release `
-        --runtime win-x64 `
-        --self-contained true `
-        --output $serviceTokenTestRelayFixtureOutput `
-        -p:DebugSymbols=false `
-        -p:DebugType=None 2>&1)
-if ($LASTEXITCODE -ne 0) {
-    Write-Host ($serviceTokenTestRelayBuildOutput | Out-String)
-    throw "Could not build the real Windows service-token Test Relay payload fixture."
-}
-$script:ServiceTokenTestRelayFixtureExecutablePath = Join-Path `
-    $serviceTokenTestRelayFixtureOutput `
-    "OpenLineOps.WindowsServiceToken.TestRelay.exe"
-if (-not (Test-Path `
-        -LiteralPath $script:ServiceTokenTestRelayFixtureExecutablePath `
-        -PathType Leaf)) {
-    throw "The real Windows service-token Test Relay payload fixture is missing its executable."
-}
+    "renamed-test-payload.bin"
+$fixtureExecutable = [System.IO.File]::ReadAllBytes(
+    (Join-Path $env:SystemRoot "System32/where.exe"))
+$fixtureMarker = [System.Text.Encoding]::ASCII.GetBytes("xunit.runner")
+$fixturePayload = [byte[]]::new($fixtureExecutable.Length + $fixtureMarker.Length)
+[System.Buffer]::BlockCopy(
+    $fixtureExecutable,
+    0,
+    $fixturePayload,
+    0,
+    $fixtureExecutable.Length)
+[System.Buffer]::BlockCopy(
+    $fixtureMarker,
+    0,
+    $fixturePayload,
+    $fixtureExecutable.Length,
+    $fixtureMarker.Length)
+[System.IO.File]::WriteAllBytes(
+    $script:TestPayloadFixtureExecutablePath,
+    $fixturePayload)
 
 $positiveRoot = New-MinimalReleaseCandidate -Name "positive"
 Assert-InspectionPasses -Root $positiveRoot -Name "positive"
@@ -961,66 +1043,60 @@ Assert-InspectionFails `
     -Name "tampered-agent-bundle" `
     -ExpectedPattern "bundle (size|hash) mismatch for 'OpenLineOps\.Agent\.exe'"
 
-$serviceTokenTestRelayLeakRoot = New-MinimalReleaseCandidate `
-    -Name "test-only-service-token-test-relay-leak" `
-    -IncludeServiceTokenTestRelayInAgent
+$testDirectoryPayloadRoot = New-MinimalReleaseCandidate `
+    -Name "test-only-directory-payload-leak" `
+    -IncludeTestDirectoryPayloadInAgent
 Assert-InspectionFails `
-    -Root $serviceTokenTestRelayLeakRoot `
-    -Name "test-only-service-token-test-relay-leak" `
-    -ExpectedPattern "test-only Windows service-token Test Relay in a deployable artifact"
+    -Root $testDirectoryPayloadRoot `
+    -Name "test-only-directory-payload-leak" `
+    -ExpectedPattern "test-only content in a deployable artifact"
 
-$renamedServiceTokenTestRelayLeakRoot = New-MinimalReleaseCandidate `
-    -Name "renamed-test-only-service-token-test-relay-directory-leak" `
-    -IncludeRenamedServiceTokenTestRelayDirectoryInAgent
+$testAssemblyNamePayloadRoot = New-MinimalReleaseCandidate `
+    -Name "test-only-assembly-name-payload-leak" `
+    -IncludeTestAssemblyNamePayloadInAgent
 Assert-InspectionFails `
-    -Root $renamedServiceTokenTestRelayLeakRoot `
-    -Name "renamed-test-only-service-token-test-relay-directory-leak" `
-    -ExpectedPattern "test-only Windows service-token Test Relay in a deployable artifact"
+    -Root $testAssemblyNamePayloadRoot `
+    -Name "test-only-assembly-name-payload-leak" `
+    -ExpectedPattern "test-only content in a deployable artifact"
 
-$renamedServiceTokenTestRelayBinaryLeakRoot = New-MinimalReleaseCandidate `
-    -Name "renamed-test-only-service-token-test-relay-binary-leak" `
-    -IncludeRenamedServiceTokenTestRelayBinaryInAgent
+$renamedTestBinaryPayloadRoot = New-MinimalReleaseCandidate `
+    -Name "renamed-test-only-binary-payload-leak" `
+    -IncludeRenamedTestBinaryPayloadInAgent
 Assert-InspectionFails `
-    -Root $renamedServiceTokenTestRelayBinaryLeakRoot `
-    -Name "renamed-test-only-service-token-test-relay-binary-leak" `
-    -ExpectedPattern "test-only Windows service-token Test Relay in a deployable artifact"
+    -Root $renamedTestBinaryPayloadRoot `
+    -Name "renamed-test-only-binary-payload-leak" `
+    -ExpectedPattern "test-only content in a deployable artifact"
 
-$unmanifestedServiceTokenTestRelayBinaryLeakRoot = New-MinimalReleaseCandidate `
-    -Name "unmanifested-test-only-service-token-test-relay-binary-leak" `
-    -IncludeUnmanifestedServiceTokenTestRelayBinary
-Assert-InspectionFails `
-    -Root $unmanifestedServiceTokenTestRelayBinaryLeakRoot `
-    -Name "unmanifested-test-only-service-token-test-relay-binary-leak" `
-    -ExpectedPattern "unmanifested file"
-
-$missingServiceTokenTestRelaySourceRoot = New-MinimalReleaseCandidate `
-    -Name "missing-service-token-test-relay-source" `
-    -OmitServiceTokenTestRelaySource
-Assert-InspectionFails `
-    -Root $missingServiceTokenTestRelaySourceRoot `
-    -Name "missing-service-token-test-relay-source" `
-    -ExpectedPattern "missing expected entry: tests/OpenLineOps\.WindowsServiceToken\.TestRelay/"
-
-foreach ($relaySourceEntry in @(
-        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestBridge.cs",
-        "tests/OpenLineOps.Agent.Tests/WindowsSourceTokenRelayProcess.cs",
-        "tests/OpenLineOps.Agent.Tests/WindowsServiceTokenTestRelayContractTests.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestRelay/OpenLineOps.WindowsServiceToken.TestRelay.csproj",
-        "tests/OpenLineOps.WindowsServiceToken.TestRelay/Program.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestRelay/RelayProtocol.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestRelay/WindowsNative.cs",
-        "tests/OpenLineOps.WindowsServiceToken.TestRelay/SourceTokenRelayOperation.cs")) {
-    $fixtureName =
-        "missing-test-relay-source-" +
-        [System.IO.Path]::GetFileNameWithoutExtension($relaySourceEntry).ToLowerInvariant()
-    $missingRelaySourceRoot = New-MinimalReleaseCandidate `
-        -Name $fixtureName `
-        -OmitSourceEntry $relaySourceEntry
-    Assert-InspectionFails `
-        -Root $missingRelaySourceRoot `
-        -Name $fixtureName `
-        -ExpectedPattern ([regex]::Escape("missing expected entry: $relaySourceEntry"))
+$manifestedSourceLeakName = "fully-remanifested-rehashed-source-leak"
+$manifestedSourceLeakRoot = New-MinimalReleaseCandidate `
+    -Name $manifestedSourceLeakName `
+    -IncludeManifestedSourcePayloadInAgent
+$manifestedSourceLeakManifest = Get-Content `
+    -LiteralPath (Join-Path $manifestedSourceLeakRoot "release-manifest.json") `
+    -Raw | ConvertFrom-Json
+$manifestedSourceLeakAgentRecords = @(
+    $manifestedSourceLeakManifest.artifacts | Where-Object {
+        $_.kind -ceq "agent"
+    })
+if ($manifestedSourceLeakAgentRecords.Count -ne 1) {
+    throw "The fully re-manifested source-leak fixture must contain exactly one Agent artifact record."
 }
+Assert-BundleEntryIsFullyManifestedAndHashed `
+    -Root $manifestedSourceLeakRoot `
+    -BundleRelativePath ([string]$manifestedSourceLeakAgentRecords[0].relativePath) `
+    -EntryRelativePath "support/EmbeddedRuntimeSource.cs"
+Assert-InspectionFails `
+    -Root $manifestedSourceLeakRoot `
+    -Name $manifestedSourceLeakName `
+    -ExpectedPattern "source or project file in a deployable artifact"
+
+$unmanifestedTestBinaryRoot = New-MinimalReleaseCandidate `
+    -Name "unmanifested-test-only-binary-payload-leak" `
+    -IncludeUnmanifestedTestBinary
+Assert-InspectionFails `
+    -Root $unmanifestedTestBinaryRoot `
+    -Name "unmanifested-test-only-binary-payload-leak" `
+    -ExpectedPattern "unmanifested file"
 
 $removedAgentContainerSettingRoot = New-MinimalReleaseCandidate `
     -Name "removed-agent-container-setting" `
@@ -1127,7 +1203,7 @@ Assert-InspectionFails `
 
 $windowsCanonicalAliasRoot = New-MinimalReleaseCandidate `
     -Name "windows-canonical-alias-path" `
-    -ExtraSourceEntries @("windows-service-token-test-relay./renamed-relay.exe")
+    -ExtraSourceEntries @("tests./renamed-helper.exe")
 Assert-InspectionFails `
     -Root $windowsCanonicalAliasRoot `
     -Name "windows-canonical-alias-path" `

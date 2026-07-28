@@ -107,21 +107,31 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             cancellationToken);
         await agents.StartAgentsAsync(coordinator.BaseUri, cancellationToken);
         var materialArrivalIpcIsolation = agents.MaterialArrivalIpcIsolation;
-        Assert.True(materialArrivalIpcIsolation.EntryServiceTokenConnected);
-        Assert.True(materialArrivalIpcIsolation.EntryPipeExactAclVerified);
-        Assert.True(materialArrivalIpcIsolation.DownstreamServiceTokenExplicitAccessDenied);
+        Assert.True(materialArrivalIpcIsolation.EntryRestrictedServiceIdentityVerified);
+        Assert.True(materialArrivalIpcIsolation.DownstreamRestrictedServiceIdentityVerified);
+        Assert.True(materialArrivalIpcIsolation.EntryPipeOrdinaryTokenExplicitAccessDenied);
+        Assert.True(materialArrivalIpcIsolation.DownstreamPipeOrdinaryTokenExplicitAccessDenied);
+        Assert.True(materialArrivalIpcIsolation.DistinctRestrictedServiceSids);
+        Assert.True(materialArrivalIpcIsolation.DistinctMaterialArrivalPipes);
+        Assert.NotEqual(
+            materialArrivalIpcIsolation.EntryMaterialArrivalPipeNameSha256,
+            materialArrivalIpcIsolation.DownstreamMaterialArrivalPipeNameSha256);
         Assert.True(materialArrivalIpcIsolation.BothServicesRunningOnOriginalPids);
         var entryAgentPid = agents.EntryAgentProcessId;
         var downstreamAgentPid = agents.DownstreamAgentProcessId;
         Assert.NotEqual(entryAgentPid, downstreamAgentPid);
         var entryAgentNonAdministrative = agents.EntryAgentNonAdministrative;
         var downstreamAgentNonAdministrative = agents.DownstreamAgentNonAdministrative;
+        var entryAgentSession0Verified = agents.EntryAgentSession0Verified;
+        var downstreamAgentSession0Verified = agents.DownstreamAgentSession0Verified;
         var serviceAccountName = agents.ServiceAccountName;
         var serviceAccountSid = agents.ServiceAccountSid;
         var entryServiceSid = agents.EntryAgentServiceSid;
         var downstreamServiceSid = agents.DownstreamAgentServiceSid;
         Assert.True(entryAgentNonAdministrative);
         Assert.True(downstreamAgentNonAdministrative);
+        Assert.True(entryAgentSession0Verified);
+        Assert.True(downstreamAgentSession0Verified);
         Assert.Equal(RestrictedAgentIdentity.LocalServiceAccountName, serviceAccountName);
         Assert.Equal(RestrictedAgentIdentity.LocalServiceAccountSid, serviceAccountSid);
         Assert.NotEqual(entryServiceSid, downstreamServiceSid);
@@ -711,6 +721,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             materialArrivalIpcIsolation,
             entryAgentNonAdministrative,
             downstreamAgentNonAdministrative,
+            entryAgentSession0Verified,
+            downstreamAgentSession0Verified,
             onlyApiWasRestarted,
             persistentStateRestored,
             runABeforeRestartSha256,
@@ -1991,6 +2003,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         StudioMaterialArrivalIpcIsolationEvidence materialArrivalIpcIsolation,
         bool entryAgentNonAdministrative,
         bool downstreamAgentNonAdministrative,
+        bool entryAgentSession0Verified,
+        bool downstreamAgentSession0Verified,
         bool onlyApiWasRestarted,
         bool persistentStateRestored,
         string runBeforeRestartSha256,
@@ -2121,6 +2135,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     processId = entryAgentPid,
                     credentialTokenSha256 = entryTokenHash,
                     nonAdministrativeToken = entryAgentNonAdministrative,
+                    session0Verified = entryAgentSession0Verified,
                     exitCode = agentExitCodes.EntryExitCode
                 },
                 new
@@ -2132,6 +2147,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     processId = downstreamAgentPid,
                     credentialTokenSha256 = downstreamTokenHash,
                     nonAdministrativeToken = downstreamAgentNonAdministrative,
+                    session0Verified = downstreamAgentSession0Verified,
                     exitCode = agentExitCodes.DownstreamExitCode
                 }
             },
@@ -2146,12 +2162,20 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     entryServiceSidSha256,
                     downstreamServiceSidSha256,
                     StringComparison.Ordinal),
-                entryServiceTokenConnected =
-                    materialArrivalIpcIsolation.EntryServiceTokenConnected,
-                entryPipeExactAclVerified =
-                    materialArrivalIpcIsolation.EntryPipeExactAclVerified,
-                downstreamServiceTokenExplicitAccessDenied =
-                    materialArrivalIpcIsolation.DownstreamServiceTokenExplicitAccessDenied,
+                entryRestrictedServiceIdentityVerified =
+                    materialArrivalIpcIsolation.EntryRestrictedServiceIdentityVerified,
+                downstreamRestrictedServiceIdentityVerified =
+                    materialArrivalIpcIsolation.DownstreamRestrictedServiceIdentityVerified,
+                entryPipeOrdinaryTokenExplicitAccessDenied =
+                    materialArrivalIpcIsolation.EntryPipeOrdinaryTokenExplicitAccessDenied,
+                downstreamPipeOrdinaryTokenExplicitAccessDenied =
+                    materialArrivalIpcIsolation.DownstreamPipeOrdinaryTokenExplicitAccessDenied,
+                entryMaterialArrivalPipeNameSha256 =
+                    materialArrivalIpcIsolation.EntryMaterialArrivalPipeNameSha256,
+                downstreamMaterialArrivalPipeNameSha256 =
+                    materialArrivalIpcIsolation.DownstreamMaterialArrivalPipeNameSha256,
+                distinctMaterialArrivalPipes =
+                    materialArrivalIpcIsolation.DistinctMaterialArrivalPipes,
                 bothServicesRunningOnOriginalPids =
                     materialArrivalIpcIsolation.BothServicesRunningOnOriginalPids
             },

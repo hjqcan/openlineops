@@ -1016,19 +1016,18 @@ function Write-StagedAgentEvidenceFixture {
         freshOnlineAfterReconnect = $true
         onlineAfterReconnect = [ordered]@{ status = "Idle"; health = "Online" }
     }
-    $materialArrivalIpc = [ordered]@{
-        serviceTokenConnected = $true
-        pipeExactAclVerified = $true
+    $materialArrival = [ordered]@{
+        outboxRecoveryVerified = $true
         durablePublicationVerified = $true
         ordinaryCiTokenExplicitAccessDenied = $true
     }
     $immutableContentCache = [ordered]@{
         packagedProvisionCommandVerified = $true
         runningServiceAdministrationRejected = $true
-        serviceTokenReadExecuteVerified = $true
-        sealedMutationAccessDenied = $true
-        deepAncestorMutationAccessDenied = $true
-        preSealRecoveryVerified = $true
+        productionRuntimeReadExecuteVerified = $true
+        serviceSidReadOnlyAclVerified = $true
+        nestedServiceSidReadOnlyAclVerified = $true
+        administratorPreSealRecoveryFixtureVerified = $true
         cleanupCrashResumeVerified = $true
         committedAdminRemovalVerified = $true
         packagedRemovalCommandVerified = $true
@@ -1058,10 +1057,11 @@ function Write-StagedAgentEvidenceFixture {
         StationId = "station.fixture"
         windowsServiceName = "OpenLineOpsAgentE2E-0123456789abcdef0123456789abcdef"
         windowsServiceLifecycleVerified = $true
+        session0Verified = $true
         vendorArtifacts = $artifacts
         agentHostIdentity = $identity
         restartedAgentHostIdentity = $identity
-        materialArrivalIpc = $materialArrivalIpc
+        materialArrival = $materialArrival
         immutableContentCache = $immutableContentCache
         presence = $presence
         cleanShutdownVerified = $true
@@ -1080,12 +1080,13 @@ function Write-StagedAgentEvidenceFixture {
         coordinatorTransportResultInboxRestartedAfterBrokerRecovery = $raw.coordinatorTransportResultInboxRestartedAfterBrokerRecovery
         agentHostIdentity = $identity
         restartedAgentHostIdentity = $identity
-        materialArrivalIpc = $materialArrivalIpc
+        materialArrival = $materialArrival
         immutableContentCache = $immutableContentCache
         agentId = $raw.AgentId
         stationId = $raw.StationId
         windowsServiceName = $raw.windowsServiceName
         windowsServiceLifecycleVerified = $raw.windowsServiceLifecycleVerified
+        session0Verified = $raw.session0Verified
         packageContentSha256 = $raw.packageContentSha256
         firstAgentPid = $raw.firstAgentPid
         restartedAgentPid = $raw.restartedAgentPid

@@ -581,27 +581,26 @@ Assert-TestEvidenceBinding `
     "Staged Python runtime-provisioning exact-test binding"
 
 $rabbit = $evidence.rabbitMqTransportCoverage
-$materialArrivalIpcFields = @(
-    "serviceTokenConnected",
-    "pipeExactAclVerified",
+$materialArrivalFields = @(
+    "outboxRecoveryVerified",
     "durablePublicationVerified",
     "ordinaryCiTokenExplicitAccessDenied")
 Assert-ExactProperties `
-    -Value $rabbit.materialArrivalIpc `
-    -Expected $materialArrivalIpcFields `
-    -Description "Staged Agent material-arrival IPC evidence"
-foreach ($field in $materialArrivalIpcFields) {
-    Assert-Condition ($rabbit.materialArrivalIpc.$field -is [bool] `
-            -and $rabbit.materialArrivalIpc.$field -eq $true) `
-        "Staged Agent material-arrival IPC evidence field '$field' must be the JSON boolean true."
+    -Value $rabbit.materialArrival `
+    -Expected $materialArrivalFields `
+    -Description "Staged Agent material-arrival evidence"
+foreach ($field in $materialArrivalFields) {
+    Assert-Condition ($rabbit.materialArrival.$field -is [bool] `
+            -and $rabbit.materialArrival.$field -eq $true) `
+        "Staged Agent material-arrival evidence field '$field' must be the JSON boolean true."
 }
 $immutableContentCacheFields = @(
     "packagedProvisionCommandVerified",
     "runningServiceAdministrationRejected",
-    "serviceTokenReadExecuteVerified",
-    "sealedMutationAccessDenied",
-    "deepAncestorMutationAccessDenied",
-    "preSealRecoveryVerified",
+    "productionRuntimeReadExecuteVerified",
+    "serviceSidReadOnlyAclVerified",
+    "nestedServiceSidReadOnlyAclVerified",
+    "administratorPreSealRecoveryFixtureVerified",
     "cleanupCrashResumeVerified",
     "committedAdminRemovalVerified",
     "packagedRemovalCommandVerified",
@@ -624,6 +623,7 @@ Assert-JsonBooleanProperties $rabbit ([ordered]@{
         duplicateRedeliveryRejected = $true
         duplicateAfterRestartRejected = $true
         windowsServiceLifecycleVerified = $true
+        session0Verified = $true
         cleanShutdownVerified = $true
     }) "Staged Agent public RabbitMQ evidence"
 Assert-Condition ($rabbit.status -ceq "passed" `
@@ -649,6 +649,8 @@ Assert-Condition ($rabbit.status -ceq "passed" `
         -and [string]$rabbit.windowsServiceName -cmatch '^OpenLineOpsAgentE2E-[0-9a-f]{32}$' `
         -and $rabbit.windowsServiceLifecycleVerified -is [bool] `
         -and $rabbit.windowsServiceLifecycleVerified -eq $true `
+        -and $rabbit.session0Verified -is [bool] `
+        -and $rabbit.session0Verified -eq $true `
         -and $rabbit.cleanShutdownVerified -is [bool] `
         -and $rabbit.cleanShutdownVerified -eq $true) `
     "Staged Agent RabbitMQ transport closure is incomplete or was skipped."
@@ -785,6 +787,7 @@ Assert-JsonBooleanProperties $raw ([ordered]@{
         duplicateRedeliveryRejected = $true
         duplicateAfterRestartRejected = $true
         windowsServiceLifecycleVerified = $true
+        session0Verified = $true
         cleanShutdownVerified = $true
     }) "Staged Agent raw RabbitMQ evidence"
 foreach ($rawIdentity in @($raw.agentHostIdentity, $raw.restartedAgentHostIdentity)) {
@@ -811,15 +814,15 @@ Assert-JsonBooleanProperties $raw.presence ([ordered]@{
         freshOnlineAfterReconnect = $true
     }) "Staged Agent raw presence evidence"
 Assert-ExactProperties `
-    -Value $raw.materialArrivalIpc `
-    -Expected $materialArrivalIpcFields `
-    -Description "Staged Agent raw material-arrival IPC evidence"
-foreach ($field in $materialArrivalIpcFields) {
-    Assert-Condition ($raw.materialArrivalIpc.$field -is [bool] `
-            -and $raw.materialArrivalIpc.$field -eq $true) `
-        "Staged Agent raw material-arrival IPC evidence field '$field' must be the JSON boolean true."
-    Assert-Condition ($rabbit.materialArrivalIpc.$field -ceq $raw.materialArrivalIpc.$field) `
-        "Staged Agent material-arrival IPC field '$field' differs from raw RabbitMQ evidence."
+    -Value $raw.materialArrival `
+    -Expected $materialArrivalFields `
+    -Description "Staged Agent raw material-arrival evidence"
+foreach ($field in $materialArrivalFields) {
+    Assert-Condition ($raw.materialArrival.$field -is [bool] `
+            -and $raw.materialArrival.$field -eq $true) `
+        "Staged Agent raw material-arrival evidence field '$field' must be the JSON boolean true."
+    Assert-Condition ($rabbit.materialArrival.$field -ceq $raw.materialArrival.$field) `
+        "Staged Agent material-arrival field '$field' differs from raw RabbitMQ evidence."
 }
 Assert-ExactProperties `
     -Value $raw.immutableContentCache `
@@ -850,7 +853,8 @@ foreach ($field in @(
         "restartedAgentPid",
         "packageContentSha256",
         "windowsServiceName",
-        "windowsServiceLifecycleVerified")) {
+        "windowsServiceLifecycleVerified",
+        "session0Verified")) {
     Assert-Condition ($rabbit.$field -ceq $raw.$field) `
         "Staged Agent summary field '$field' differs from raw RabbitMQ evidence."
 }

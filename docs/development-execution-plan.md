@@ -1,6 +1,6 @@
 # OpenLineOps Production-Line Implementation Baseline
 
-Last updated: 2026-07-23
+Last updated: 2026-07-28
 
 ## Product Contract
 
@@ -240,71 +240,42 @@ package-cache root beneath its deterministic anchor;
 wrapper `finally` blocks and independent workflow `always()` steps invoke the
 same bounded, idempotent scavenger. Studio's two Station services share the
 LocalService base account but must expose distinct restricted service SIDs.
-Because Windows checks `TOKEN_DUPLICATE` against the service token object's own
-DACL, the external test runner never opens, copies, or changes a Station token.
-Windows E2E instead uses a fixed, self-contained Test Relay that is created
-directly from the verified Station process; it does not create another Windows
-service or virtual account. The runner first validates the Station's exact SCM
-service binding, retained PID, creation time, liveness, canonical image and
-SHA-256, and proves that the source process is outside every job. The protected
-bridge root contains only the strict request and immutable Test Relay bundle.
-Its complete relative-path/length/SHA-256 inventory, owner and ACL are checked
-before process creation, again before resume, and after successful completion.
+The Windows gates use those real SCM services directly. The runner retains only
+terminate, limited-query, and synchronize access to each SCM-reported PID,
+validates the canonical packaged Agent image and SHA-256, and fails unless the
+process belongs to Session 0. It opens each process token with `TOKEN_QUERY`
+only and requires the exact primary, unlinked, restricted LocalService,
+service-logon, service-SID, and non-administrator facts. The runner never
+duplicates or exports a Station token, changes a process or token DACL, enables
+debug privilege, installs an identity broker, or exposes an arbitrary callback
+under the service identity. Staged evidence binds the initial and restarted
+service checks, Studio evidence binds both Station services, and Runner evidence
+binds its Agent check through a strict `session0Verified` JSON boolean; missing
+or truthy substitutes are rejected.
 
-The runner opens the retained Station PID with only
-`PROCESS_CREATE_PROCESS`, does not make that handle inheritable, and uses
-`CompareObjectHandles` to prove that this new handle denotes the same kernel
-process object as the already-retained Station handle. The call is bound to its
-documented `Kernelbase.dll` runtime module and is executed by a Windows contract
-test before the staged service gates. Denial, import failure or an object
-mismatch is a hard failure. There is no process-DACL lease or mutation and no
-compatibility path. With that create-only handle, the runner creates the fixed
-Test Relay suspended through
-`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`, while
-`PROC_THREAD_ATTRIBUTE_JOB_LIST` atomically assigns a private, non-inheritable,
-kill-on-close job with an active-process limit of one. The source process being
-in another job is rejected instead of relying on breakaway behavior. The
-relay explicitly binds `Service-0x0-3e5$\Default`, the LocalService
-noninteractive desktop, never the interactive test runner's desktop. It is one
-NativeAOT executable without CLR metadata, a `coreclr.dll` bootstrap or a
-direct `USER32.dll` import; its PE shape and exact one-file bundle are
-behavioral contracts. Inside its entrypoint it resolves the desktop APIs from
-system USER32 and proves `Service-0x0-3e5$\Default` before pipe access and
-again after the authenticated receipt. Empty, inherited and interactive desktop
-selectors are rejected, and the source Station plus suspended and running relay
-must all remain in Session 0. The create-only Station handle is closed
-immediately when native creation returns, before relay validation, resume, pipe
-impersonation, or any test action.
+The signed-package job then executes through the real Agent, Station Runtime,
+Plugin Host or Script Worker, least-privilege launcher, vendor program, Job
+Objects, SQLite stores, RabbitMQ transport, Coordinator persistence, Artifact
+upload, and Trace projection. Immutable content read/execute is proven by that
+production execution. The cache verifier independently requires exact
+service-SID read-only ACLs through every nested package entry, while recovery
+fixtures are explicitly administrator-created and never described as
+service-token actions.
 
-The runner retains the exact relay process and thread handles, reads and binds
-the relay PID and creation time, and validates its canonical image, SHA-256 and
-private-job membership while the only thread remains suspended. It then
-revalidates the Station SCM/PID/time/image/hash/job facts, Test Relay inventory
-and bridge ACL before resuming the relay. The relay independently proves that
-its current primary token is the restricted `NT AUTHORITY\LocalService` token:
-there is no UAC linked token or Administrators SID, the service-logon SID is
-enabled, and the exact Station service SID is both enabled and present in
-`TokenRestrictedSids`. It also reopens the frozen Agent and relay images by
-canonical non-reparse handles and verifies their hashes.
-
-The Test Relay connects to one random, single-instance control pipe whose
-protected ACL grants only the exact Station service SID
-read/write/synchronize client rights. The runner binds the connection to the
-retained relay PID with `GetNamedPipeClientProcessId`, revalidates the
-impersonated Station identity, verifies the 256-bit nonce, and runs the boundary
-assertion through `RunAsClient`. The exact one-byte receipt completes the relay
-protocol; the relay then repeats its identity and image checks before exiting,
-and any captured assertion failure is rethrown. A successful protocol
-revalidates the frozen bundle and ACL before removal. Every path terminates and
-waits the exact one-process job when necessary, proves cleanup, and removes all
-temporary state.
-
-No path opens, duplicates, copies or exports a Station token; reads or changes a
-token DACL; changes the Station process DACL; enables `SeDebugPrivilege`; uses a
-LocalSystem broker; or falls back to broader access, handle duplication,
-breakaway or another protocol. The Test Relay accepts only its strict
-nonce-bound request, is absent from every deployable artifact, and does not
-relax any production Agent pipe, cache or token ACL.
+Before SCM start, the staged Agent gate writes one valid pending
+`MaterialArrived` message with the production SQLite Outbox store. The real
+Agent must recover it, publish it through RabbitMQ, mark it durably published,
+and keep the Coordinator delivery count at one after restart. Local arrival
+pipe framing, receipts, replay, and durable enqueue remain production
+server/client contract tests. The real Windows services must deny the ordinary
+CI token on both Station pipes. The two-Agent gate additionally requires two
+verified restricted service identities, distinct service SIDs and derived pipe
+name hashes, explicit access denial on both pipes, and both original SCM PIDs
+still running. The Station-local pipe is the restricted production extension
+boundary for code already running under the Station Agent identity; it is not a
+preconfigured vendor-specific PLC adapter. Independently managed scanner, PLC,
+or MES adapters use the authenticated Coordinator arrival endpoint and enter
+the same command model.
 
 `eng/verify-studio-two-agent-production-evidence.ps1` and
 `eng/verify-runner-staged-agent-evidence.ps1` bind that two-Agent proof and the
