@@ -51,7 +51,8 @@ internal static class ProjectProcessResourceFileStore
                 path,
                 FileMode.Open,
                 FileAccess.Read,
-                FileShare.Read,
+                // Readers retain their revision while an atomic replacement commits the next one.
+                FileShare.Read | FileShare.Delete,
                 bufferSize: 16 * 1024,
                 useAsync: true);
 
@@ -163,7 +164,15 @@ internal static class ProjectProcessResourceFileStore
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            File.Move(temporaryPath, path, overwrite);
+            if (overwrite && File.Exists(path))
+            {
+                // File.Replace preserves a continuously addressable commit pointer for concurrent readers.
+                File.Replace(temporaryPath, path, destinationBackupFileName: null);
+            }
+            else
+            {
+                File.Move(temporaryPath, path, overwrite: false);
+            }
         }
         finally
         {
