@@ -100,21 +100,32 @@
           AfterTargets="Build"
           Condition="$([MSBuild]::IsOSPlatform('Windows'))">
     <PropertyGroup>
-      <_ServiceTokenTestRelayOutputDir>$(MSBuildProjectDirectory)\..\OpenLineOps.WindowsServiceToken.TestRelay\bin\$(Configuration)\$(TargetFramework)\win-x64\</_ServiceTokenTestRelayOutputDir>
+      <_ServiceTokenTestRelayProject>$(MSBuildProjectDirectory)\..\OpenLineOps.WindowsServiceToken.TestRelay\OpenLineOps.WindowsServiceToken.TestRelay.csproj</_ServiceTokenTestRelayProject>
+      <_ServiceTokenTestRelayPublishDir>$(MSBuildProjectDirectory)\..\OpenLineOps.WindowsServiceToken.TestRelay\bin\$(Configuration)\$(TargetFramework)\win-x64\publish\</_ServiceTokenTestRelayPublishDir>
+      <_ServiceTokenTestRelayExecutable>$(_ServiceTokenTestRelayPublishDir)OpenLineOps.WindowsServiceToken.TestRelay.exe</_ServiceTokenTestRelayExecutable>
       <_ServiceTokenTestRelayBundleDir>$(TargetDir)windows-service-token-test-relay\</_ServiceTokenTestRelayBundleDir>
     </PropertyGroup>
+    <RemoveDir Directories="$(_ServiceTokenTestRelayPublishDir)" />
+    <MSBuild Projects="$(_ServiceTokenTestRelayProject)"
+             Targets="Publish"
+             BuildInParallel="false"
+             Properties="Configuration=$(Configuration);IsPublishable=true;RuntimeIdentifier=win-x64;PublishAot=true;SelfContained=true;PublishDir=$(_ServiceTokenTestRelayPublishDir)" />
     <ItemGroup>
-      <_ServiceTokenTestRelayFile Include="$(_ServiceTokenTestRelayOutputDir)**\*"
-                                  Exclude="$(_ServiceTokenTestRelayOutputDir)**\*.pdb" />
+      <_ServiceTokenTestRelayPublishedFile Include="$(_ServiceTokenTestRelayPublishDir)**\*" />
+      <_ServiceTokenTestRelayUnexpectedFile Include="@(_ServiceTokenTestRelayPublishedFile)"
+                                             Exclude="$(_ServiceTokenTestRelayExecutable)" />
     </ItemGroup>
-    <Error Condition="!Exists('$(_ServiceTokenTestRelayOutputDir)OpenLineOps.WindowsServiceToken.TestRelay.exe')"
-           Text="The Windows service-token Test Relay was not built before Agent test staging." />
+    <Error Condition="!Exists('$(_ServiceTokenTestRelayExecutable)')"
+           Text="The Windows service-token Test Relay NativeAOT executable was not published before Agent test staging." />
+    <Error Condition="'@(_ServiceTokenTestRelayUnexpectedFile)' != ''"
+           Text="The Windows service-token Test Relay NativeAOT publish output must contain exactly one executable." />
     <RemoveDir Directories="$(_ServiceTokenTestRelayBundleDir)" />
     <MakeDir Directories="$(_ServiceTokenTestRelayBundleDir)" />
-    <Copy SourceFiles="@(_ServiceTokenTestRelayFile)"
-          DestinationFiles="@(_ServiceTokenTestRelayFile->'$(_ServiceTokenTestRelayBundleDir)%(RecursiveDir)%(Filename)%(Extension)')"
+    <Copy SourceFiles="$(_ServiceTokenTestRelayExecutable)"
+          DestinationFolder="$(_ServiceTokenTestRelayBundleDir)"
           SkipUnchangedFiles="true" />
     <ItemGroup>
+      <FileWrites Include="$(_ServiceTokenTestRelayPublishDir)**\*" />
       <FileWrites Include="$(_ServiceTokenTestRelayBundleDir)**\*" />
     </ItemGroup>
   </Target>

@@ -25,6 +25,7 @@ internal static class SourceTokenRelayOperation
         }
 
         WindowsNative.ValidateCurrentSourceToken(request.ExpectedSourceServiceSid);
+        WindowsNative.ValidateCurrentServiceDesktop();
         ValidateCurrentRelayExecutable(request);
         ValidateSourceExecutableFile(request);
 
@@ -51,6 +52,7 @@ internal static class SourceTokenRelayOperation
         }
 
         WindowsNative.ValidateCurrentSourceToken(request.ExpectedSourceServiceSid);
+        WindowsNative.ValidateCurrentServiceDesktop();
         ValidateCurrentRelayExecutable(request);
         ValidateSourceExecutableFile(request);
         return 0;

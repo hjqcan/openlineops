@@ -68,13 +68,19 @@ one active process. Its desktop field explicitly names the LocalService
 noninteractive desktop `Service-0x0-3e5$\Default`; an empty selector is
 forbidden because Windows would choose a desktop rather than bind the SCM
 service desktop. The bridge proves that both the source Station and suspended
-and running relay remain in Session 0. This keeps the relay apphost and CoreCLR
-`USER32` initialization inside the same token/session/desktop boundary before
-managed code can run. The relay process object's protected DACL grants the
-runner only terminate, query and synchronize rights for later opens. The runner
-retains the exact native process handle returned by creation. The create-only
-Station handle is closed immediately after `CreateProcess` returns, before
-relay validation, resume, pipe impersonation or the protected test action.
+and running relay remain in Session 0. The relay is published as one NativeAOT
+executable with no CLR metadata, `coreclr.dll` bootstrap or `USER32.dll` static
+direct import; Windows contract tests parse the PE import directory and reject
+any additional bundle entry or managed/direct-USER32 regression. Inside its
+entrypoint, the relay resolves the desktop APIs from system USER32 in System32
+and proves that its process window station is `Service-0x0-3e5$` and its thread
+desktop is `Default`, both before pipe access and after the authenticated
+receipt. The relay process
+object's protected DACL grants the runner only terminate, query and synchronize
+rights for later opens. The runner retains the exact native process handle
+returned by creation. The create-only Station handle is closed immediately
+after `CreateProcess` returns, before relay validation, resume, pipe
+impersonation or the protected test action.
 
 While the relay remains suspended, the runner binds its retained handle to the
 exact PID and creation time, validates the canonical Test Relay image and hash,

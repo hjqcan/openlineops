@@ -178,9 +178,15 @@ runtime. Its source is present only as ordinary test source in the open-source
 API, Agent, Runner, Desktop, Plugin Host, Script Worker and sample-plugin
 artifact. Release staging rejects such a leak before archive creation,
 candidate inspection independently rejects a fully re-manifested and re-hashed
-leak, and the Test Relay project is neither packable nor publishable. The
-test-only runner creates it directly from a fully validated Station parent with
-`PROCESS_CREATE_PROCESS`, `CompareObjectHandles`,
+leak. The Test Relay project is not packable and is non-publishable by default;
+the Agent test staging target explicitly enables only its isolated publish to
+produce an exact one-file NativeAOT bundle. Contract tests reject CLR metadata,
+`coreclr.dll`, a direct `USER32.dll` import, symbols or any second bundle entry.
+Inside its entrypoint the relay resolves the desktop APIs from system USER32
+and proves the exact `Service-0x0-3e5$\Default` attachment before and after
+authenticated pipe access. The test-only runner creates it directly from a
+fully validated Station parent with `PROCESS_CREATE_PROCESS`,
+`CompareObjectHandles`,
 `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` and a private
 `PROC_THREAD_ATTRIBUTE_JOB_LIST`. It binds the verified Session-0 LocalService
 parent to `Service-0x0-3e5$\Default` instead of inheriting or automatically

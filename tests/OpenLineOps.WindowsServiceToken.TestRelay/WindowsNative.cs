@@ -14,9 +14,13 @@ internal static class WindowsNative
     private const uint GroupUseForDenyOnly = 0x00000010;
     private const int TokenPrimary = 1;
     private const int TokenElevationTypeDefault = 1;
+    private const int UserObjectInformationName = 2;
+    private const uint LoadLibrarySearchSystem32 = 0x00000800;
     private const uint FileAttributeDirectory = 0x00000010;
     private const uint FileAttributeDevice = 0x00000040;
     private const uint FileAttributeReparsePoint = 0x00000400;
+    private const string LocalServiceWindowStation = "Service-0x0-3e5$";
+    private const string LocalServiceDesktop = "Default";
     private const string LocalServiceSid = "S-1-5-19";
     private const string ServiceLogonSid = "S-1-5-6";
     private const string AdministratorsSid = "S-1-5-32-544";
@@ -90,6 +94,143 @@ internal static class WindowsNative
             throw new InvalidOperationException(
                 "The source-token relay did not prove the exact primary, unlinked, restricted LocalService identity without an Administrators SID and with its exact service SID enabled in TokenGroups and present in TokenRestrictedSids.");
         }
+    }
+
+    public static void ValidateCurrentServiceDesktop()
+    {
+        using var user32 = LoadLibraryEx(
+            "user32.dll",
+            IntPtr.Zero,
+            LoadLibrarySearchSystem32);
+        if (user32.IsInvalid)
+        {
+            throw NativeFailure(
+                "Could not load the system USER32 library after NativeAOT startup.");
+        }
+
+        var getProcessWindowStation =
+            GetRequiredUser32Export<GetProcessWindowStationDelegate>(
+                user32,
+                "GetProcessWindowStation");
+        var getThreadDesktop = GetRequiredUser32Export<GetThreadDesktopDelegate>(
+            user32,
+            "GetThreadDesktop");
+        var getUserObjectInformation =
+            GetRequiredUser32Export<GetUserObjectInformationDelegate>(
+                user32,
+                "GetUserObjectInformationW");
+
+        var windowStation = getProcessWindowStation();
+        if (windowStation == IntPtr.Zero)
+        {
+            throw NativeFailure(
+                "Could not read the relay process window station.");
+        }
+
+        var desktop = getThreadDesktop(GetCurrentThreadId());
+        if (desktop == IntPtr.Zero)
+        {
+            throw NativeFailure(
+                "Could not read the relay thread desktop.");
+        }
+
+        var actualWindowStation = ReadUserObjectName(
+            getUserObjectInformation,
+            windowStation,
+            "window station");
+        var actualDesktop = ReadUserObjectName(
+            getUserObjectInformation,
+            desktop,
+            "desktop");
+        if (!string.Equals(
+                actualWindowStation,
+                LocalServiceWindowStation,
+                StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(
+                actualDesktop,
+                LocalServiceDesktop,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"The source-token relay is attached to '{actualWindowStation}\\{actualDesktop}' instead of the exact LocalService desktop '{LocalServiceWindowStation}\\{LocalServiceDesktop}'.");
+        }
+    }
+
+    private static TDelegate GetRequiredUser32Export<TDelegate>(
+        SafeLibraryHandle library,
+        string exportName)
+        where TDelegate : Delegate
+    {
+        var address = GetProcAddress(library, exportName);
+        if (address == IntPtr.Zero)
+        {
+            throw NativeFailure(
+                $"Could not resolve system USER32 export '{exportName}'.");
+        }
+
+        return Marshal.GetDelegateForFunctionPointer<TDelegate>(address);
+    }
+
+    private static string ReadUserObjectName(
+        GetUserObjectInformationDelegate getUserObjectInformation,
+        IntPtr userObject,
+        string role)
+    {
+        var sizingSucceeded = getUserObjectInformation(
+            userObject,
+            UserObjectInformationName,
+            IntPtr.Zero,
+            objectInformationLength: 0,
+            out var requiredBytes);
+        var sizingError = Marshal.GetLastPInvokeError();
+        if (sizingSucceeded
+            || sizingError != ErrorInsufficientBuffer
+            || requiredBytes < sizeof(char)
+            || requiredBytes > 2_048
+            || requiredBytes % sizeof(char) != 0)
+        {
+            throw new InvalidDataException(
+                $"The relay {role} name sizing returned Win32 error {sizingError} and an invalid {requiredBytes}-byte native buffer.");
+        }
+
+        using var buffer = new SafeHGlobalHandle(checked((int)requiredBytes));
+        if (!getUserObjectInformation(
+                userObject,
+                UserObjectInformationName,
+                buffer.DangerousGetHandle(),
+                requiredBytes,
+                out var returnedBytes))
+        {
+            throw NativeFailure($"Could not read the relay {role} name.");
+        }
+
+        if (returnedBytes < sizeof(char)
+            || returnedBytes > requiredBytes
+            || returnedBytes % sizeof(char) != 0)
+        {
+            throw new InvalidDataException(
+                $"The relay {role} name returned an invalid {returnedBytes}-byte native buffer.");
+        }
+
+        var rawValue = Marshal.PtrToStringUni(
+            buffer.DangerousGetHandle(),
+            checked((int)returnedBytes / sizeof(char)));
+        if (string.IsNullOrEmpty(rawValue)
+            || rawValue[^1] != '\0'
+            || rawValue[..^1].Contains('\0', StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"The relay {role} name is not exactly one null-terminated string.");
+        }
+
+        var value = rawValue[..^1];
+        if (string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl))
+        {
+            throw new InvalidDataException(
+                $"The relay {role} name is empty or contains control characters.");
+        }
+
+        return value;
     }
 
     private static string NormalizeFinalWindowsPath(string path)
@@ -330,6 +471,31 @@ internal static class WindowsNative
         }
     }
 
+    private sealed class SafeLibraryHandle : SafeHandleZeroOrMinusOneIsInvalid
+    {
+        public SafeLibraryHandle()
+            : base(ownsHandle: true)
+        {
+        }
+
+        protected override bool ReleaseHandle() => FreeLibrary(handle);
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi, SetLastError = true)]
+    private delegate IntPtr GetProcessWindowStationDelegate();
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi, SetLastError = true)]
+    private delegate IntPtr GetThreadDesktopDelegate(uint threadId);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private delegate bool GetUserObjectInformationDelegate(
+        IntPtr userObject,
+        int index,
+        IntPtr objectInformation,
+        uint objectInformationLength,
+        out uint requiredBytes);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandle(
@@ -347,6 +513,35 @@ internal static class WindowsNative
         [Out] char[] filePath,
         uint filePathLength,
         uint flags);
+
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "LoadLibraryExW",
+        CharSet = CharSet.Unicode,
+        ExactSpelling = true,
+        SetLastError = true)]
+    private static extern SafeLibraryHandle LoadLibraryEx(
+        string fileName,
+        IntPtr file,
+        uint flags);
+
+    [DllImport(
+        "kernel32.dll",
+        BestFitMapping = false,
+        CharSet = CharSet.Ansi,
+        ExactSpelling = true,
+        SetLastError = true,
+        ThrowOnUnmappableChar = true)]
+    private static extern IntPtr GetProcAddress(
+        SafeLibraryHandle module,
+        string procedureName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FreeLibrary(IntPtr module);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
 
     [DllImport("advapi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

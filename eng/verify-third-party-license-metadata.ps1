@@ -520,6 +520,62 @@ function Update-Or-Test-Notice {
     }
 }
 
+function Get-TargetPackageReachability {
+    param(
+        [Parameter(Mandatory = $true)] $TargetLibraries,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]] $RootPackageIds
+    )
+
+    $librariesById = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($targetLibrary in @($TargetLibraries.PSObject.Properties)) {
+        if ($targetLibrary.Value.type -ne "package") {
+            continue
+        }
+
+        $parts = $targetLibrary.Name.Split("/")
+        if ($parts.Length -eq 2) {
+            $librariesById[$parts[0]] = $targetLibrary
+        }
+    }
+
+    $reachable = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    $pending = [System.Collections.Generic.Queue[string]]::new()
+    foreach ($rootPackageId in $RootPackageIds) {
+        $pending.Enqueue($rootPackageId)
+    }
+
+    while ($pending.Count -gt 0) {
+        $packageId = $pending.Dequeue()
+        if (-not $librariesById.ContainsKey($packageId)) {
+            continue
+        }
+
+        $targetLibrary = $librariesById[$packageId]
+        $parts = $targetLibrary.Name.Split("/")
+        if ($parts.Length -ne 2) {
+            continue
+        }
+
+        $packageKey = "$($parts[0])@$($parts[1])"
+        if (-not $reachable.Add($packageKey)) {
+            continue
+        }
+
+        $dependencies = $targetLibrary.Value.dependencies
+        if ($null -ne $dependencies) {
+            foreach ($dependency in @($dependencies.PSObject.Properties)) {
+                $pending.Enqueue($dependency.Name)
+            }
+        }
+    }
+
+    return ,$reachable
+}
+
 function Get-SdkAutoReferencedPackageKeys {
     param([Parameter(Mandatory = $true)] $Assets)
 
@@ -529,6 +585,28 @@ function Get-SdkAutoReferencedPackageKeys {
         $framework = @($Assets.project.frameworks.PSObject.Properties | Where-Object {
                 $_.Name.Equals($frameworkName, [System.StringComparison]::OrdinalIgnoreCase)
             } | Select-Object -First 1)
+        $autoReferencedRoots = [System.Collections.Generic.List[string]]::new()
+        $productRoots = [System.Collections.Generic.List[string]]::new()
+        if ($framework.Count -gt 0) {
+            $dependencies = $framework[0].Value.dependencies
+            if ($null -ne $dependencies) {
+                foreach ($dependency in @($dependencies.PSObject.Properties)) {
+                    if ($dependency.Value.autoReferenced -eq $true) {
+                        $autoReferencedRoots.Add($dependency.Name)
+                    }
+                    else {
+                        $productRoots.Add($dependency.Name)
+                    }
+                }
+            }
+        }
+
+        $autoReferencedReachability = Get-TargetPackageReachability `
+            -TargetLibraries $target.Value `
+            -RootPackageIds $autoReferencedRoots.ToArray()
+        $productReachability = Get-TargetPackageReachability `
+            -TargetLibraries $target.Value `
+            -RootPackageIds $productRoots.ToArray()
 
         foreach ($targetLibrary in @($target.Value.PSObject.Properties)) {
             if ($targetLibrary.Value.type -ne "package") {
@@ -540,18 +618,9 @@ function Get-SdkAutoReferencedPackageKeys {
                 continue
             }
 
-            $isSdkAutoReferenced = $false
-            if ($framework.Count -gt 0) {
-                $dependencies = $framework[0].Value.dependencies
-                if ($null -ne $dependencies) {
-                    $dependency = @($dependencies.PSObject.Properties | Where-Object {
-                            $_.Name.Equals($parts[0], [System.StringComparison]::OrdinalIgnoreCase)
-                        } | Select-Object -First 1)
-                    $isSdkAutoReferenced = $dependency.Count -gt 0 -and $dependency[0].Value.autoReferenced -eq $true
-                }
-            }
-
             $key = "$($parts[0])@$($parts[1])"
+            $isSdkAutoReferenced = $autoReferencedReachability.Contains($key) `
+                -and -not $productReachability.Contains($key)
             if (-not $classifications.ContainsKey($key)) {
                 $classifications[$key] = $isSdkAutoReferenced
             }
@@ -582,8 +651,10 @@ function Get-NuGetPackages {
             continue
         }
 
-        # Publish properties can inject SDK build tools into restore assets. Packages
-        # that are auto-referenced in every target are not product dependencies.
+        # Publish properties can inject SDK build tools and RID-specific tool packs
+        # into restore assets. A package reachable only from SDK auto-referenced
+        # roots in every target is a build-tool implementation, not a product
+        # dependency.
         $sdkAutoReferencedPackageKeys = Get-SdkAutoReferencedPackageKeys -Assets $assets
 
         foreach ($library in @($assets.libraries.PSObject.Properties)) {

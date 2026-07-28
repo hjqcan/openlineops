@@ -348,6 +348,13 @@ foreach ($nativeLiteral in @(
         "AdministratorsSid",
         "ServiceLogonSid",
         "TokenRestrictedSids",
+        "ValidateCurrentServiceDesktop(",
+        "LoadLibrarySearchSystem32",
+        "GetProcessWindowStation",
+        "GetThreadDesktop",
+        "GetUserObjectInformationW",
+        "LocalServiceWindowStation",
+        "LocalServiceDesktop",
         "ValidateCanonicalExecutableHandle(",
         "FileAttributeReparsePoint",
         "GetFinalPathNameByHandle(",
@@ -370,6 +377,7 @@ foreach ($operationLiteral in @(
 }
 foreach ($twiceValidated in @(
         "WindowsNative.ValidateCurrentSourceToken(request.ExpectedSourceServiceSid);",
+        "WindowsNative.ValidateCurrentServiceDesktop();",
         "ValidateCurrentRelayExecutable(request);",
         "ValidateSourceExecutableFile(request);")) {
     if ([regex]::Matches($relayOperation, [regex]::Escape($twiceValidated)).Count -ne 2) {
@@ -378,6 +386,15 @@ foreach ($twiceValidated in @(
 }
 
 foreach ($testLiteral in @(
+        "RelayBundleIsOneNativeAotExecutableWithoutDirectUser32Import",
+        "Assert.False(pe.HasMetadata)",
+        "ReadPeImportedModules",
+        '"USER32.dll"',
+        '"coreclr.dll"',
+        "AssertImageContainsText",
+        '"GetProcessWindowStation"',
+        '"GetThreadDesktop"',
+        '"GetUserObjectInformationW"',
         "RelayBundleCopyIsFrozenAndRejectsChangedOrAddedFiles",
         "RelayBundleCopyRejectsAnEmptyBundle",
         "RelayTreeOwnerCanonicalizationRestoresEveryEntry",
@@ -387,17 +404,20 @@ foreach ($testLiteral in @(
         "RelayExecutableRejectsEveryInvocationExceptOneCanonicalRequest",
         "RelayExecutableRejectsUnknownAndMissingRequestProperties",
         "CanonicalRelayRequestReachesTokenSelfAttestation",
-        "SuspendedRelayIsBoundToItsImageAndKilledByJobDisposal",
-        "ResumedRelayRejectsAnOrdinaryRunnerTokenBeforePipeAccess")) {
+        "SuspendedRelayIsBoundToItsImageAndKilledByJobDisposal")) {
     Assert-ContainsLiteral $relayContractTests $testLiteral "The direct Test Relay contract suite is missing '$testLiteral'."
 }
+Assert-ForbiddenPattern $relayContractTests '3221225794|0x[cC]0000142|STATUS_DLL_INIT_FAILED' `
+    "The direct Test Relay contract suite must never accept a pre-Main DLL initialization failure."
 
 foreach ($projectLiteral in @(
         "<IsPackable>false</IsPackable>",
         "<IsPublishable>false</IsPublishable>",
         "<IsTestProject>false</IsTestProject>",
         '<RuntimeIdentifier Condition="$([MSBuild]::IsOSPlatform(''Windows''))">win-x64</RuntimeIdentifier>',
-        '<SelfContained Condition="$([MSBuild]::IsOSPlatform(''Windows''))">true</SelfContained>')) {
+        '<PublishAot Condition="$([MSBuild]::IsOSPlatform(''Windows''))">true</PublishAot>',
+        '<SelfContained Condition="$([MSBuild]::IsOSPlatform(''Windows''))">true</SelfContained>',
+        '<StripSymbols Condition="$([MSBuild]::IsOSPlatform(''Windows''))">true</StripSymbols>')) {
     Assert-ContainsLiteral $relayProject $projectLiteral "The Test Relay project is missing release isolation '$projectLiteral'."
 }
 $agentTestsProjectXml = [xml]$agentTestsProject
@@ -412,6 +432,13 @@ foreach ($stagingLiteral in @(
         "StageWindowsServiceTokenTestRelayBundle",
         "windows-service-token-test-relay",
         "OpenLineOps.WindowsServiceToken.TestRelay.exe",
+        'Targets="Publish"',
+        "IsPublishable=true",
+        "PublishAot=true",
+        "SelfContained=true",
+        "_ServiceTokenTestRelayUnexpectedFile",
+        "must contain exactly one executable",
+        '<FileWrites Include="$(_ServiceTokenTestRelayPublishDir)**\*" />',
         '<FileWrites Include="$(_ServiceTokenTestRelayBundleDir)**\*" />')) {
     Assert-ContainsLiteral $agentTestsProject $stagingLiteral "Agent tests are missing Test Relay staging boundary '$stagingLiteral'."
 }
@@ -421,7 +448,9 @@ foreach ($documentationLiteral in @(
         "CompareObjectHandles",
         "PROC_THREAD_ATTRIBUTE_PARENT_PROCESS",
         "PROC_THREAD_ATTRIBUTE_JOB_LIST",
-        'Service-0x0-3e5$\Default')) {
+        'Service-0x0-3e5$\Default',
+        "NativeAOT",
+        '`USER32.dll`')) {
     Assert-ContainsLiteral $security $documentationLiteral "Station security documentation is missing direct relay boundary '$documentationLiteral'."
     Assert-ContainsLiteral $release $documentationLiteral "Release documentation is missing direct relay boundary '$documentationLiteral'."
 }

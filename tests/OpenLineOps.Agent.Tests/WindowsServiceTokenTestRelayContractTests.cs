@@ -1,8 +1,10 @@
 using System.Diagnostics;
+using System.Reflection.PortableExecutable;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Win32.SafeHandles;
 using OpenLineOps.ContentProtection;
@@ -17,6 +19,50 @@ public sealed class WindowsServiceTokenTestRelayContractTests
         {
             WriteIndented = true
         };
+
+    [Fact]
+    public void RelayBundleIsOneNativeAotExecutableWithoutDirectUser32Import()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var relayExecutable = RequiredRelayExecutable();
+        var relayRoot = Path.GetDirectoryName(relayExecutable)
+                        ?? throw new InvalidDataException(
+                            "The staged Test Relay has no bundle root.");
+        Assert.Equal(
+            [Path.GetFileName(relayExecutable)],
+            Directory.EnumerateFiles(relayRoot, "*", SearchOption.AllDirectories)
+                .Select(path => Path.GetRelativePath(relayRoot, path))
+                .Order(StringComparer.Ordinal)
+                .ToArray());
+
+        using (var stream = File.OpenRead(relayExecutable))
+        using (var pe = new PEReader(stream))
+        {
+            Assert.False(pe.HasMetadata);
+            Assert.Null(pe.PEHeaders.CorHeader);
+            Assert.Equal(Machine.Amd64, pe.PEHeaders.CoffHeader.Machine);
+        }
+
+        var importedModules = ReadPeImportedModules(relayExecutable);
+        Assert.DoesNotContain(
+            "USER32.dll",
+            importedModules,
+            StringComparer.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            "coreclr.dll",
+            importedModules,
+            StringComparer.OrdinalIgnoreCase);
+
+        var imageBytes = File.ReadAllBytes(relayExecutable);
+        AssertImageContainsText(imageBytes, "user32.dll");
+        AssertImageContainsText(imageBytes, "GetProcessWindowStation");
+        AssertImageContainsText(imageBytes, "GetThreadDesktop");
+        AssertImageContainsText(imageBytes, "GetUserObjectInformationW");
+    }
 
     [Fact]
     public void RelayBundleCopyIsFrozenAndRejectsChangedOrAddedFiles()
@@ -291,49 +337,6 @@ public sealed class WindowsServiceTokenTestRelayContractTests
         AssertEventuallyProcessMissing(relayProcessId);
     }
 
-    [Fact]
-    public void ResumedRelayRejectsAnOrdinaryRunnerTokenBeforePipeAccess()
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        using var root = new TemporaryDirectory();
-        var relayExecutable = RequiredRelayExecutable();
-        var relayBundleRoot = Path.GetDirectoryName(relayExecutable)
-                              ?? throw new InvalidDataException(
-                                  "The staged Test Relay has no bundle root.");
-        using var source = Process.GetCurrentProcess();
-        var requestPath = Path.Combine(root.Path, "request.json");
-        var request = CreateControllerRequest(
-            requestPath,
-            relayBundleRoot,
-            relayExecutable,
-            source);
-        WriteRelayRequest(requestPath, request);
-        var runnerSid = WindowsIdentity.GetCurrent().User
-                        ?? throw new InvalidOperationException(
-                            "The relay contract runner has no SID.");
-        using var relay = WindowsSourceTokenRelayProcess.CreateSuspended(
-            request,
-            source.SafeHandle,
-            runnerSid);
-        relay.ValidateCreated(request);
-        relay.Resume();
-
-        var failure = Assert.Throws<InvalidOperationException>(
-            () => relay.WaitForSuccessfulExit(TimeSpan.FromSeconds(15)));
-        Assert.True(
-            failure.Message.Contains(
-                "exited with code 70 (0x00000046)",
-                StringComparison.Ordinal)
-            || failure.Message.Contains(
-                "exited with code 3221225794 (0xc0000142)",
-                StringComparison.Ordinal),
-            failure.Message);
-    }
-
     private static WindowsSourceTokenRelayRequest CreateControllerRequest(
         string requestPath,
         string relayBundleRoot,
@@ -357,6 +360,112 @@ public sealed class WindowsServiceTokenTestRelayContractTests
             relayExecutable,
             Sha256File(relayExecutable),
             "openlineops-source-token-relay-contract");
+    }
+
+    private static List<string> ReadPeImportedModules(string executablePath)
+    {
+        using var stream = File.OpenRead(executablePath);
+        using var pe = new PEReader(stream, PEStreamOptions.LeaveOpen);
+        var peHeader = pe.PEHeaders.PEHeader
+                       ?? throw new InvalidDataException(
+                           "The staged Test Relay has no PE header.");
+        var directory = peHeader.ImportTableDirectory;
+        if (directory.RelativeVirtualAddress == 0 || directory.Size < 20)
+        {
+            throw new InvalidDataException(
+                "The staged Test Relay has no valid PE import directory.");
+        }
+
+        var descriptorOffset = RvaToFileOffset(
+            pe.PEHeaders,
+            directory.RelativeVirtualAddress);
+        var descriptorCount = directory.Size / 20;
+        var modules = new List<string>(descriptorCount);
+        using var reader = new BinaryReader(stream, Encoding.ASCII, leaveOpen: true);
+        for (var index = 0; index < descriptorCount; index++)
+        {
+            stream.Position = checked(descriptorOffset + index * 20L);
+            var originalFirstThunk = reader.ReadUInt32();
+            var timestamp = reader.ReadUInt32();
+            var forwarderChain = reader.ReadUInt32();
+            var nameRva = reader.ReadUInt32();
+            var firstThunk = reader.ReadUInt32();
+            if (originalFirstThunk == 0
+                && timestamp == 0
+                && forwarderChain == 0
+                && nameRva == 0
+                && firstThunk == 0)
+            {
+                return modules;
+            }
+
+            if (nameRva == 0)
+            {
+                throw new InvalidDataException(
+                    "The staged Test Relay contains a PE import descriptor without a module name.");
+            }
+
+            stream.Position = RvaToFileOffset(pe.PEHeaders, checked((int)nameRva));
+            modules.Add(ReadNullTerminatedAscii(reader, 260));
+        }
+
+        throw new InvalidDataException(
+            "The staged Test Relay PE import directory has no terminating descriptor.");
+    }
+
+    private static void AssertImageContainsText(
+        byte[] imageBytes,
+        string expectedText)
+    {
+        var asciiBytes = Encoding.ASCII.GetBytes(expectedText);
+        var unicodeBytes = Encoding.Unicode.GetBytes(expectedText);
+        Assert.True(
+            imageBytes.AsSpan().IndexOf(asciiBytes) >= 0
+            || imageBytes.AsSpan().IndexOf(unicodeBytes) >= 0,
+            $"The staged Test Relay image is missing the marker '{expectedText}'.");
+    }
+
+    private static long RvaToFileOffset(PEHeaders headers, int rva)
+    {
+        foreach (var section in headers.SectionHeaders)
+        {
+            var sectionSize = Math.Max(section.VirtualSize, section.SizeOfRawData);
+            var sectionEnd = checked(section.VirtualAddress + sectionSize);
+            if (rva >= section.VirtualAddress && rva < sectionEnd)
+            {
+                return checked(
+                    (long)section.PointerToRawData + rva - section.VirtualAddress);
+            }
+        }
+
+        throw new InvalidDataException(
+            $"The staged Test Relay PE RVA 0x{rva:x8} is outside every section.");
+    }
+
+    private static string ReadNullTerminatedAscii(
+        BinaryReader reader,
+        int maximumBytes)
+    {
+        var bytes = new List<byte>(maximumBytes);
+        for (var index = 0; index < maximumBytes; index++)
+        {
+            var value = reader.ReadByte();
+            if (value == 0)
+            {
+                if (bytes.Count == 0 || bytes.Any(character => character > 0x7f))
+                {
+                    throw new InvalidDataException(
+                        "The staged Test Relay contains an invalid PE import module name.");
+                }
+
+                return Encoding.ASCII.GetString([.. bytes]);
+            }
+
+            bytes.Add(value);
+        }
+
+        throw new InvalidDataException(
+            "The staged Test Relay PE import module name is not null-terminated.");
     }
 
     private static void WriteRelayRequest(

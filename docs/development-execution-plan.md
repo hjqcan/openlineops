@@ -265,8 +265,12 @@ Test Relay suspended through
 kill-on-close job with an active-process limit of one. The source process being
 in another job is rejected instead of relying on breakaway behavior. The
 relay explicitly binds `Service-0x0-3e5$\Default`, the LocalService
-noninteractive desktop, so its `USER32`-dependent apphost and CoreCLR never use
-the interactive test runner's desktop. Empty, inherited and interactive desktop
+noninteractive desktop, never the interactive test runner's desktop. It is one
+NativeAOT executable without CLR metadata, a `coreclr.dll` bootstrap or a
+direct `USER32.dll` import; its PE shape and exact one-file bundle are
+behavioral contracts. Inside its entrypoint it resolves the desktop APIs from
+system USER32 and proves `Service-0x0-3e5$\Default` before pipe access and
+again after the authenticated receipt. Empty, inherited and interactive desktop
 selectors are rejected, and the source Station plus suspended and running relay
 must all remain in Session 0. The create-only Station handle is closed
 immediately when native creation returns, before relay validation, resume, pipe

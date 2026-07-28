@@ -4,9 +4,11 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Projects.Application.Projects;
+using OpenLineOps.Runtime.Api.HostedServices;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
@@ -73,6 +75,8 @@ public sealed class ProductionRunsApiTests : IClassFixture<OpenLineOpsApiWebAppl
     [Fact]
     public async Task GetByIdReturnsOperationDualAxesAndRejectsNonCanonicalIdentity()
     {
+        using var factory = CreateManualRunFactory();
+        using var client = factory.CreateAuthenticatedClient();
         var runId = ProductionRunId.New();
         var createdAtUtc = new DateTimeOffset(2026, 7, 11, 9, 0, 0, TimeSpan.Zero);
         var operationPlan = OperationPlan();
@@ -92,8 +96,8 @@ public sealed class ProductionRunsApiTests : IClassFixture<OpenLineOpsApiWebAppl
             createdAtUtc,
             [operationPlan.Definition],
             TerminalRoutes(operationPlan.Definition.OperationId));
-        var repository = _factory.Services.GetRequiredService<IProductionRunRepository>();
-        var materials = _factory.Services.GetRequiredService<
+        var repository = factory.Services.GetRequiredService<IProductionRunRepository>();
+        var materials = factory.Services.GetRequiredService<
             OpenLineOps.Runtime.Application.Materials.IProductionMaterialRepository>();
         var unit = OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnit.Register(
             run.ProductionUnitId,
@@ -137,7 +141,7 @@ public sealed class ProductionRunsApiTests : IClassFixture<OpenLineOpsApiWebAppl
             CreateExecutionEvidence(run, operation, createdAtUtc.AddSeconds(3))).Succeeded);
         await repository.SaveAsync(run, 0);
 
-        using var response = await _client.GetAsync($"/api/production-runs/{runId.Value:D}");
+        using var response = await client.GetAsync($"/api/production-runs/{runId.Value:D}");
         using var document = await ReadJsonAsync(response);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -154,7 +158,7 @@ public sealed class ProductionRunsApiTests : IClassFixture<OpenLineOpsApiWebAppl
         Assert.Equal(7, Assert.Single(operationResponse.GetProperty("resources").EnumerateArray())
             .GetProperty("fencingToken").GetInt64());
 
-        using var nonCanonical = await _client.GetAsync(
+        using var nonCanonical = await client.GetAsync(
             $"/api/production-runs/{runId.Value.ToString("D").ToUpperInvariant()}");
         Assert.Equal(HttpStatusCode.BadRequest, nonCanonical.StatusCode);
     }
@@ -162,6 +166,8 @@ public sealed class ProductionRunsApiTests : IClassFixture<OpenLineOpsApiWebAppl
     [Fact]
     public async Task ReconcileCommandRequiresStrictEvidenceAndIsDurablyIdempotent()
     {
+        using var factory = CreateManualRunFactory();
+        using var client = factory.CreateAuthenticatedClient();
         var runId = ProductionRunId.New();
         var now = DateTimeOffset.UtcNow.AddMinutes(-1);
         var operationPlan = OperationPlan();
@@ -181,8 +187,8 @@ public sealed class ProductionRunsApiTests : IClassFixture<OpenLineOpsApiWebAppl
             now,
             [operationPlan.Definition],
             TerminalRoutes(operationPlan.Definition.OperationId));
-        var repository = _factory.Services.GetRequiredService<IProductionRunRepository>();
-        var materials = _factory.Services.GetRequiredService<
+        var repository = factory.Services.GetRequiredService<IProductionRunRepository>();
+        var materials = factory.Services.GetRequiredService<
             OpenLineOps.Runtime.Application.Materials.IProductionMaterialRepository>();
         var unit = OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnit.Register(
             run.ProductionUnitId,
@@ -240,7 +246,7 @@ public sealed class ProductionRunsApiTests : IClassFixture<OpenLineOpsApiWebAppl
                 }
             }
         };
-        using var response = await _client.PostAsJsonAsync(
+        using var response = await client.PostAsJsonAsync(
             $"/api/production-runs/{runId.Value:D}/commands/Reconcile",
             request);
         using var document = await ReadJsonAsync(response);
@@ -254,12 +260,12 @@ public sealed class ProductionRunsApiTests : IClassFixture<OpenLineOpsApiWebAppl
             ApiTestAuthentication.StandardActorId,
             recovery.GetProperty("actorId").GetString());
 
-        using var duplicate = await _client.PostAsJsonAsync(
+        using var duplicate = await client.PostAsJsonAsync(
             $"/api/production-runs/{runId.Value:D}/commands/Reconcile",
             request);
         Assert.Equal(HttpStatusCode.OK, duplicate.StatusCode);
 
-        using var mismatch = await _client.PostAsJsonAsync(
+        using var mismatch = await client.PostAsJsonAsync(
             $"/api/production-runs/{runId.Value:D}/commands/Reconcile",
             new
             {
@@ -278,7 +284,7 @@ public sealed class ProductionRunsApiTests : IClassFixture<OpenLineOpsApiWebAppl
             });
         Assert.Equal(HttpStatusCode.Conflict, mismatch.StatusCode);
 
-        using var uppercase = await _client.PostAsJsonAsync(
+        using var uppercase = await client.PostAsJsonAsync(
             $"/api/production-runs/{runId.Value:D}/commands/Reconcile",
             new
             {
@@ -297,6 +303,18 @@ public sealed class ProductionRunsApiTests : IClassFixture<OpenLineOpsApiWebAppl
             });
         Assert.Equal(HttpStatusCode.BadRequest, uppercase.StatusCode);
     }
+
+    private WebApplicationFactory<Program> CreateManualRunFactory() =>
+        _factory.WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+        {
+            var coordinator = services.SingleOrDefault(descriptor =>
+                descriptor.ServiceType == typeof(IHostedService)
+                && descriptor.ImplementationType
+                == typeof(ProductionRunCoordinatorHostedService))
+                ?? throw new InvalidOperationException(
+                    "The API test host is missing its Production Run coordinator registration.");
+            services.Remove(coordinator);
+        }));
 
     private static OperationExecutionPlan OperationPlan() => new(
         "operation.main",

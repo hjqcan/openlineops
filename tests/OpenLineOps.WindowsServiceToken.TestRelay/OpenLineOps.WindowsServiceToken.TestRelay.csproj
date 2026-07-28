@@ -9,7 +9,9 @@
     <IsPublishable>false</IsPublishable>
     <IsTestProject>false</IsTestProject>
     <RuntimeIdentifier Condition="$([MSBuild]::IsOSPlatform('Windows'))">win-x64</RuntimeIdentifier>
+    <PublishAot Condition="$([MSBuild]::IsOSPlatform('Windows'))">true</PublishAot>
     <SelfContained Condition="$([MSBuild]::IsOSPlatform('Windows'))">true</SelfContained>
+    <StripSymbols Condition="$([MSBuild]::IsOSPlatform('Windows'))">true</StripSymbols>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>

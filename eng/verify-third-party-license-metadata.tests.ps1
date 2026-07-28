@@ -84,21 +84,43 @@ function Write-ProjectAssets {
         $targetPackages = [ordered]@{}
         foreach ($dependency in $framework.Value.GetEnumerator()) {
             $allPackageIds.Add([string] $dependency.Key) | Out-Null
-            if ($dependency.Value -cne "transitive") {
+            $dependencyKind = if ($dependency.Value -is [string]) {
+                [string] $dependency.Value
+            }
+            else {
+                [string] $dependency.Value.Kind
+            }
+            $dependencyEdges = if ($dependency.Value -is [string]) {
+                $null
+            }
+            else {
+                $dependency.Value.Dependencies
+            }
+            if ($dependencyKind -cne "transitive") {
                 $dependencyDocument = [ordered]@{
                     target = "Package"
                     version = "[1.0.0, )"
                 }
-                if ($dependency.Value -ceq "auto") {
+                if ($dependencyKind -ceq "auto") {
                     $dependencyDocument.autoReferenced = $true
                 }
 
                 $dependencies[[string] $dependency.Key] = $dependencyDocument
             }
 
-            $targetPackages["$($dependency.Key)/1.0.0"] = [ordered]@{
+            $targetPackage = [ordered]@{
                 type = "package"
             }
+            if ($null -ne $dependencyEdges -and $dependencyEdges.Count -gt 0) {
+                $targetPackage.dependencies = [ordered]@{}
+                foreach ($edge in $dependencyEdges.GetEnumerator()) {
+                    $allPackageIds.Add([string] $edge.Key) | Out-Null
+                    $targetPackage.dependencies[[string] $edge.Key] =
+                        [string] $edge.Value
+                }
+            }
+
+            $targetPackages["$($dependency.Key)/1.0.0"] = $targetPackage
         }
 
         $targetName = [string] $framework.Key
@@ -317,6 +339,39 @@ $mixedTransitiveProjects = @(
         }
     })
 
+$sdkAutoTransitiveProjects = @(
+    [pscustomobject]@{
+        Name = "NativePublishApp"
+        Frameworks = [ordered]@{
+            "net10.0/win-x64" = [ordered]@{
+                "Fixture.Product" = "declared"
+                "Fixture.SdkTool" = [ordered]@{
+                    Kind = "auto"
+                    Dependencies = [ordered]@{
+                        "Fixture.SdkRuntime" = "1.0.0"
+                    }
+                }
+                "Fixture.SdkRuntime" = "transitive"
+            }
+        }
+    })
+
+$declaredTransitiveProjects = @(
+    [pscustomobject]@{
+        Name = "DeclaredTransitiveApp"
+        Frameworks = [ordered]@{
+            "net10.0" = [ordered]@{
+                "Fixture.Product" = [ordered]@{
+                    Kind = "declared"
+                    Dependencies = [ordered]@{
+                        "Fixture.ProductRuntime" = "1.0.0"
+                    }
+                }
+                "Fixture.ProductRuntime" = "transitive"
+            }
+        }
+    })
+
 try {
     if (Test-Path -LiteralPath $ResolvedWorkRoot) {
         Remove-Item -LiteralPath $ResolvedWorkRoot -Recurse -Force
@@ -343,6 +398,14 @@ try {
         -Name "mixed-transitive-reference" `
         -Projects $mixedTransitiveProjects `
         -ExpectedNuGetPackages @("Fixture.Product", "Fixture.SdkTool")
+    Invoke-Case `
+        -Name "sdk-auto-transitive-closure" `
+        -Projects $sdkAutoTransitiveProjects `
+        -ExpectedNuGetPackages @("Fixture.Product")
+    Invoke-Case `
+        -Name "declared-transitive-closure" `
+        -Projects $declaredTransitiveProjects `
+        -ExpectedNuGetPackages @("Fixture.Product", "Fixture.ProductRuntime")
 }
 finally {
     if (Test-Path -LiteralPath $ResolvedWorkRoot) {
