@@ -127,6 +127,22 @@ public sealed class WindowsServiceTokenTestRelayContractTests
     }
 
     [Fact]
+    public void CompareObjectHandlesLoadsFromDocumentedKernelBaseDll()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var process = Process.GetCurrentProcess();
+
+        Assert.True(
+            WindowsServiceTokenTestBridge.CompareObjectHandles(
+                process.SafeHandle,
+                process.SafeHandle));
+    }
+
+    [Fact]
     public void PipeClientRightsContainOnlyProtocolAccess()
     {
         if (!OperatingSystem.IsWindows())

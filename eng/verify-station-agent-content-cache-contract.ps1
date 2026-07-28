@@ -209,6 +209,7 @@ Assert-ForbiddenPattern $directRelayImplementation '\b(?:V|v)[0-9]+\b' "The dire
 foreach ($bridgeLiteral in @(
         "ProcessCreateProcess = 0x00000080",
         "OpenExactSourceCreationProcess(",
+        '[DllImport("kernelbase.dll", SetLastError = true, ExactSpelling = true)]',
         "CompareObjectHandles(retainedSourceProcess, process)",
         "using (var createOnlySource = OpenExactSourceCreationProcess(",
         "WindowsSourceTokenRelayProcess.CreateSuspended(",
@@ -256,6 +257,10 @@ Assert-ContainsLiteral $openExactSource "OpenProcess(" "The direct bridge does n
 Assert-ContainsLiteral $openExactSource "ProcessCreateProcess" "The direct bridge does not request only PROCESS_CREATE_PROCESS."
 Assert-ContainsLiteral $openExactSource "inheritHandle: false" "The direct bridge source capability is inheritable."
 Assert-ContainsLiteral $openExactSource "CompareObjectHandles(retainedSourceProcess, process)" "The direct bridge does not bind the create-only capability to the retained Station process object."
+$compareObjectHandlesBindingPattern = '\[DllImport\("kernelbase\.dll", SetLastError = true, ExactSpelling = true\)\]\s*\[return: MarshalAs\(UnmanagedType\.Bool\)\]\s*internal static extern bool CompareObjectHandles\('
+if ([regex]::Matches($relayBridge, $compareObjectHandlesBindingPattern).Count -ne 1) {
+    throw "CompareObjectHandles must have exactly one BOOL binding to its documented Kernelbase.dll runtime module."
+}
 Assert-ContainsLiteral $openExactSource "throw new Win32Exception(" "The direct bridge does not fail closed when exact create-only access is denied."
 Assert-ForbiddenPattern $openExactSource 'catch|ProcessCreateProcess\s*\|' "The exact source process opener contains a fallback or adds rights beyond PROCESS_CREATE_PROCESS."
 if ([regex]::Matches($relayBridge, [regex]::Escape("OpenProcess(")).Count -ne 2) {
@@ -374,6 +379,7 @@ foreach ($testLiteral in @(
         "RelayBundleCopyRejectsAnEmptyBundle",
         "RelayTreeOwnerCanonicalizationRestoresEveryEntry",
         "ExactProcessHandleRejectsPidAndCreationTimeDrift",
+        "CompareObjectHandlesLoadsFromDocumentedKernelBaseDll",
         "PipeClientRightsContainOnlyProtocolAccess",
         "RelayExecutableRejectsEveryInvocationExceptOneCanonicalRequest",
         "RelayExecutableRejectsUnknownAndMissingRequestProperties",

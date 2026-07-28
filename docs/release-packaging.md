@@ -183,7 +183,9 @@ test-only runner creates it directly from a fully validated Station parent with
 `PROCESS_CREATE_PROCESS`, `CompareObjectHandles`,
 `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` and a private
 `PROC_THREAD_ATTRIBUTE_JOB_LIST`; no Test Relay executable belongs to a release
-candidate.
+candidate. The handle comparison import is pinned to the documented
+`Kernelbase.dll` runtime module and is exercised by the Windows contract suite
+before any staged service scenario.
 
 See `docs/station-agent-deployment.md` and
 `docs/headless-runner.md` for deployment and invocation.

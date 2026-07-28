@@ -1302,9 +1302,9 @@ internal static class WindowsServiceTokenTestBridge
         [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
         uint processId);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
+    [DllImport("kernelbase.dll", SetLastError = true, ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CompareObjectHandles(
+    internal static extern bool CompareObjectHandles(
         SafeProcessHandle firstObjectHandle,
         SafeProcessHandle secondObjectHandle);
 

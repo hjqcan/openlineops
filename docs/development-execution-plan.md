@@ -254,7 +254,9 @@ before process creation, again before resume, and after successful completion.
 The runner opens the retained Station PID with only
 `PROCESS_CREATE_PROCESS`, does not make that handle inheritable, and uses
 `CompareObjectHandles` to prove that this new handle denotes the same kernel
-process object as the already-retained Station handle. Denial or an object
+process object as the already-retained Station handle. The call is bound to its
+documented `Kernelbase.dll` runtime module and is executed by a Windows contract
+test before the staged service gates. Denial, import failure or an object
 mismatch is a hard failure. There is no process-DACL lease or mutation and no
 compatibility path. With that create-only handle, the runner creates the fixed
 Test Relay suspended through

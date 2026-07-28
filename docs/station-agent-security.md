@@ -56,8 +56,10 @@ exact relative path, length and SHA-256 inventory.
 The only source-process capability acquired for relay creation is a
 non-inheritable `PROCESS_CREATE_PROCESS` handle. `CompareObjectHandles` must
 prove that it refers to the same kernel process object as the already-retained
-Station handle; access denial or comparison failure stops the E2E. The runner
-passes this handle only to
+Station handle; the native call is imported from its documented
+`Kernelbase.dll` runtime module, and a Windows contract test executes the
+binding before staged service E2E begins. Access denial, import failure or
+comparison failure stops the E2E. The runner passes this handle only to
 `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` while creating the fixed relay
 suspended. The same `STARTUPINFOEX` supplies a private job through
 `PROC_THREAD_ATTRIBUTE_JOB_LIST`, atomically containing the relay before its
