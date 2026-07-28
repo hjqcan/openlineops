@@ -467,6 +467,11 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
         FileSystemRights.Delete
         | FileSystemRights.DeleteSubdirectoriesAndFiles;
 
+    [SupportedOSPlatform("windows")]
+    internal static FileSystemRights CacheWriterPreSealRights =>
+        FileSystemRights.Modify
+        | FileSystemRights.TakeOwnership;
+
     public void ProvisionCacheNamespace(
         string cacheRootDirectory,
         string windowsServiceName,
@@ -1853,7 +1858,7 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
 
         security.AddAccessRule(new FileSystemAccessRule(
             identities.StationService,
-            FileSystemRights.Modify,
+            CacheWriterPreSealRights,
             InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
             PropagationFlags.InheritOnly,
             AccessControlType.Allow));
@@ -1927,7 +1932,7 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
         SecurityIdentifier cacheWriter) => HasCacheBoundaryAllowRule(
         rules,
         cacheWriter,
-        FileSystemRights.Modify,
+        CacheWriterPreSealRights,
         InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
         PropagationFlags.InheritOnly);
 
@@ -2273,7 +2278,7 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
             || !HasInheritedPreSealRule(
                 rules,
                 identities.StationService,
-                FileSystemRights.Modify,
+                CacheWriterPreSealRights,
                 inheritanceFlags))
         {
             throw new InvalidDataException(
@@ -2716,7 +2721,7 @@ public sealed class ImmutableContentProtector : IImmutableContentProtector
                && HasInheritedPreSealRule(
                    rules,
                    identities.StationService,
-                   FileSystemRights.Modify,
+                   CacheWriterPreSealRights,
                    inheritanceFlags);
     }
 

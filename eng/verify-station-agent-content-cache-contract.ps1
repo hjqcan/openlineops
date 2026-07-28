@@ -143,6 +143,17 @@ Assert-ContainsLiteral $contentProtector "must be fully stopped" `
     "Immutable content administration does not fail closed while the Station service can run."
 Assert-ContainsLiteral $contentProtector "TokenAccessLevels.Query | TokenAccessLevels.Duplicate" `
     "Immutable content cleanup administrator classification does not request the token duplication right required by WindowsPrincipal role checks."
+if ($contentProtector -cnotmatch 'internal static FileSystemRights CacheWriterPreSealRights =>\s*FileSystemRights\.Modify\s*\|\s*FileSystemRights\.TakeOwnership;') {
+    throw "The pre-seal cache writer must use only Modify and TakeOwnership so it can canonicalize LocalService-owned content to the exact owner-eligible service SID."
+}
+$cacheWriterPreSealRightsReferences = [regex]::Matches(
+    $contentProtector,
+    "\bCacheWriterPreSealRights\b").Count
+if ($cacheWriterPreSealRightsReferences -ne 5) {
+    throw "Every pre-seal cache-writer ACL application and verifier must use the single canonical rights boundary."
+}
+Assert-ContainsLiteral $contentProtectorTests "CacheWriterPreSealRightsPermitOnlyContentMutationAndOwnerCanonicalization" `
+    "Content protection tests do not lock the bounded service-SID ownership canonicalization right."
 Assert-ContainsLiteral $transactionLock "TokenAccessLevels.Query | TokenAccessLevels.Duplicate" `
     "Immutable content transaction-lock owner classification does not request the token duplication right required by WindowsPrincipal role checks."
 foreach ($directTokenConsumer in @($agentStagedE2E, $studioHarness)) {

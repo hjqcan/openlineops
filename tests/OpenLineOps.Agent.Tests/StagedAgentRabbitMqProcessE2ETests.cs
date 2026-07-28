@@ -3343,57 +3343,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     }
 
     [SupportedOSPlatform("windows")]
-    private static void RequireFileSecurityMutationDenied(string path)
-    {
-        var accessSecurity = FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
-        accessSecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        RequireExactAccessDenied(
-            () => FileSystemAclExtensions.SetAccessControl(new FileInfo(path), accessSecurity),
-            $"write the immutable file DACL '{path}'");
-        var ownerSecurity = FileSystemAclExtensions.GetAccessControl(new FileInfo(path));
-        ownerSecurity.SetOwner(new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null));
-        RequireExactAccessDenied(
-            () => FileSystemAclExtensions.SetAccessControl(new FileInfo(path), ownerSecurity),
-            $"write the immutable file owner '{path}'");
-    }
-
-    [SupportedOSPlatform("windows")]
-    private static void RequireDirectorySecurityMutationDenied(string path)
-    {
-        var accessSecurity = FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path));
-        accessSecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        RequireExactAccessDenied(
-            () => FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(path), accessSecurity),
-            $"write the immutable directory DACL '{path}'");
-        var ownerSecurity = FileSystemAclExtensions.GetAccessControl(new DirectoryInfo(path));
-        ownerSecurity.SetOwner(new SecurityIdentifier(WellKnownSidType.LocalServiceSid, null));
-        RequireExactAccessDenied(
-            () => FileSystemAclExtensions.SetAccessControl(new DirectoryInfo(path), ownerSecurity),
-            $"write the immutable directory owner '{path}'");
-    }
-
-    private static void RequireExactAccessDenied(Action mutation, string operation)
-    {
-        try
-        {
-            mutation();
-        }
-        catch (UnauthorizedAccessException exception)
-            when ((exception.HResult & 0xffff) == ErrorAccessDenied)
-        {
-            return;
-        }
-        catch (Win32Exception exception)
-            when (exception.NativeErrorCode == ErrorAccessDenied)
-        {
-            return;
-        }
-
-        throw new InvalidOperationException(
-            $"The exact Station service token did not receive ERROR_ACCESS_DENIED while attempting to {operation}.");
-    }
-
-    [SupportedOSPlatform("windows")]
     private static void RequireNativeFileAccessAllowed(
         string path,
         uint desiredAccess,

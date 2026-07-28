@@ -170,9 +170,10 @@ and apply exact grants and denials:
 
 - SYSTEM and Administrators: full control for installation and controlled
   removal;
-- the exact Agent service SID: the minimum create/read/execute authority needed
-  for transactional installation, with frozen mutation, deletion, permission
-  changes, ownership changes, and cache-root replacement denied;
+- the exact Agent service SID: create/read/execute authority on the cache
+  boundary plus an inherit-only pre-seal grant on newly created descendants;
+  frozen mutation, deletion, permission changes, ownership changes, and
+  cache-root replacement are denied;
 - the OpenLineOps external-program content capability SID: read and execute,
   with write, rename, delete, permission changes, and ownership changes
   explicitly denied.
@@ -180,6 +181,11 @@ and apply exact grants and denials:
 The service-SID and capability read grants are both required by the
 AppContainer dual-principal access check. Every Job profile receives the content
 capability while each vendor invocation retains its own writable workspace.
+The pre-seal descendant grant contains `Modify` and `TakeOwnership`, but not
+`ChangePermissions`. `TakeOwnership` is required for the owner-eligible exact
+service SID to replace the inherited LocalService owner on each object it just
+created. The inherit-only grant never applies to the cache boundary and sealing
+replaces it with the exact read-only ACL before content becomes executable.
 The administrator-owned anchor and cache boundary use their exact protected
 ACLs. Frozen content and marker objects are Station-owned. A cleanup transition
 preserves its proven Station-service or LocalService pre-transition owner. Both

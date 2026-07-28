@@ -86,6 +86,24 @@ public sealed class ImmutableContentProtectorTests
 
     [Fact]
     [SupportedOSPlatform("windows")]
+    public void CacheWriterPreSealRightsPermitOnlyContentMutationAndOwnerCanonicalization()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        Assert.Equal(
+            FileSystemRights.Modify | FileSystemRights.TakeOwnership,
+            ImmutableContentProtector.CacheWriterPreSealRights);
+        Assert.Equal(
+            (FileSystemRights)0,
+            ImmutableContentProtector.CacheWriterPreSealRights
+            & FileSystemRights.ChangePermissions);
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
     public void WindowsRestrictedTokenPredicateUsesTheNativeSecurityBoundary()
     {
         if (!OperatingSystem.IsWindows())
