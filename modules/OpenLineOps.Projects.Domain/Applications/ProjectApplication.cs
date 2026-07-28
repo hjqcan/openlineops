@@ -90,7 +90,7 @@ public sealed class ProjectApplication : Entity<ProjectApplicationId>
             || Path.IsPathRooted(projectFilePath)
             || projectFilePath.Contains('\\')
             || !string.Equals(projectFilePath, projectFilePath.Trim(), StringComparison.Ordinal)
-            || !projectFilePath.EndsWith(".oloapp", StringComparison.OrdinalIgnoreCase))
+            || !projectFilePath.EndsWith(".oloapp", StringComparison.Ordinal))
         {
             throw new ArgumentException(
                 "Application project file path must be a forward-slash relative .oloapp path.",

@@ -41,6 +41,21 @@ public sealed class RunnerProjectPathResolverTests : IDisposable
     }
 
     [Fact]
+    public void ResolveProjectTargetRejectsUppercaseProjectExtension()
+    {
+        Directory.CreateDirectory(_temporaryDirectory);
+        var manifestPath = Path.Combine(_temporaryDirectory, "line-a.OLOPROJ");
+        File.WriteAllText(manifestPath, "{}");
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            RunnerProjectPathResolver.ResolveProjectTarget(
+                manifestPath,
+                Directory.GetCurrentDirectory()));
+
+        Assert.Contains(AutomationProjectFileConvention.ProjectFileExtension, exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ResolveProjectTargetAcceptsExistingDirectory()
     {
         Directory.CreateDirectory(_temporaryDirectory);

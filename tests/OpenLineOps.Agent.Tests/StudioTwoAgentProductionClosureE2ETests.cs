@@ -480,8 +480,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             "processTreeTerminated",
             "trace",
             "screenshots");
+        var vendorCrashScenario = StudioRequiredObject(scenarios, "vendorCrash");
         StudioRequireExactProperties(
-            StudioRequiredObject(scenarios, "vendorCrash"),
+            vendorCrashScenario,
             "vendor Crash scenario",
             "status",
             "unit",
@@ -489,8 +490,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             "trace",
             "incidents",
             "screenshots");
+        var recoveryScenario = StudioRequiredObject(scenarios, "recovery");
         StudioRequireExactProperties(
-            StudioRequiredObject(scenarios, "recovery"),
+            recoveryScenario,
             "recovery scenario",
             "status",
             "unit",
@@ -500,9 +502,49 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             "recoveryRequired",
             "terminal",
             "noAutomaticReplay",
+            "projectSessionRehydrated",
+            "backendSessionRotated",
+            "runtimeHubReconnected",
+            "runtimeHubEventDelivery",
+            "operationsProjectionRebuilt",
             "recoveryDecisions",
             "trace",
             "screenshots");
+        if (!StudioRequiredBoolean(recoveryScenario, "projectSessionRehydrated")
+            || !StudioRequiredBoolean(recoveryScenario, "backendSessionRotated")
+            || !StudioRequiredBoolean(recoveryScenario, "runtimeHubReconnected")
+            || !StudioRequiredBoolean(recoveryScenario, "operationsProjectionRebuilt"))
+        {
+            throw new InvalidDataException(
+                "Packaged Studio recovery did not prove Project rehydration, session rotation, Runtime Hub reconnection, and Operations projection rebuild.");
+        }
+
+        var runtimeHubEventDelivery = StudioRequiredObject(
+            recoveryScenario,
+            "runtimeHubEventDelivery");
+        StudioRequireExactProperties(
+            runtimeHubEventDelivery,
+            "recovery Runtime Hub event delivery",
+            "eventName",
+            "receivedCount",
+            "runtimeIncidentId");
+        StudioRequireExactString(
+            runtimeHubEventDelivery,
+            "eventName",
+            "AlarmAcknowledged");
+        _ = StudioRequiredInt64(runtimeHubEventDelivery, "receivedCount");
+        var deliveredRuntimeIncidentId = StudioRequiredString(
+            runtimeHubEventDelivery,
+            "runtimeIncidentId");
+        var vendorCrashIncidentIds = StudioRequiredArray(vendorCrashScenario, "incidents")
+            .EnumerateArray()
+            .Select(incident => StudioRequiredString(incident, "runtimeIncidentId"))
+            .ToHashSet(StringComparer.Ordinal);
+        if (!vendorCrashIncidentIds.Contains(deliveredRuntimeIncidentId))
+        {
+            throw new InvalidDataException(
+                "Recovery Runtime Hub event delivery is not bound to a Vendor Crash Incident.");
+        }
 
         var handoffImmutableRunTrace = LoadStudioImmutableRunTrace(
             StudioRequiredObject(root, "immutableRunTrace"),

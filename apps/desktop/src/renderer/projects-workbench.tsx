@@ -35,9 +35,12 @@ interface ProjectsWorkbenchProps {
   activeWorkspace: AutomationProjectWorkspaceResponse | null;
   activeApplicationId: string | null;
   isBackendHealthy: boolean;
+  redactLocalPaths: boolean;
   statusMessage: string;
   onActiveApplicationChanged(applicationId: string): void;
-  onWorkspaceChanged(workspace: AutomationProjectWorkspaceResponse): void;
+  onWorkspaceChangeRequested(): Promise<boolean>;
+  onWorkspaceOpened(workspace: AutomationProjectWorkspaceResponse): Promise<boolean>;
+  onWorkspaceChanged(workspace: AutomationProjectWorkspaceResponse): Promise<boolean>;
   onMessage(message: string): void;
 }
 
@@ -83,8 +86,11 @@ export function ProjectsWorkbench({
   activeWorkspace,
   activeApplicationId,
   isBackendHealthy,
+  redactLocalPaths,
   statusMessage,
   onActiveApplicationChanged,
+  onWorkspaceChangeRequested,
+  onWorkspaceOpened,
   onWorkspaceChanged,
   onMessage
 }: ProjectsWorkbenchProps): React.ReactElement {
@@ -100,6 +106,7 @@ export function ProjectsWorkbench({
   const projectSearchRef = useRef<HTMLInputElement>(null);
   const startDialogRef = useRef<HTMLDialogElement>(null);
   const dialogReturnFocusRef = useRef<HTMLElement | null>(null);
+  const workspaceTransitionRef = useRef(false);
 
   const activeApplications = activeWorkspace?.project.applications ?? [];
   const activeSnapshots = activeWorkspace?.project.snapshots ?? [];
@@ -114,10 +121,15 @@ export function ProjectsWorkbench({
         { label: 'Schema', value: String(activeWorkspace.manifest.formatVersion) },
         { label: 'Product', value: activeWorkspace.manifest.product },
         { label: 'Updated', value: formatDate(activeWorkspace.manifest.updatedAtUtc) },
-        { label: 'Manifest', value: activeWorkspace.manifestPath }
+        {
+          label: 'Manifest',
+          value: redactLocalPaths
+            ? pathLeafName(activeWorkspace.manifestPath)
+            : activeWorkspace.manifestPath
+        }
       ]
       : [],
-    [activeWorkspace]);
+    [activeWorkspace, redactLocalPaths]);
   const startProjectGroups = useMemo(
     () => buildStartProjectGroups(projects, recentProjects, projectSearch),
     [projectSearch, projects, recentProjects]);
@@ -212,27 +224,50 @@ export function ProjectsWorkbench({
       return;
     }
 
-    setBusy(true);
+    if (workspaceTransitionRef.current) {
+      onMessage('Another project transition is already in progress');
+      return;
+    }
+
+    workspaceTransitionRef.current = true;
     try {
-      const response = await createAutomationProjectWorkspace(request);
-      if (!response.ok || !response.body) {
-        onMessage(`Project create failed: ${response.status} ${response.text}`);
+      if (!await onWorkspaceChangeRequested()) {
         return;
       }
 
-      onWorkspaceChanged(response.body);
-      setShowStartCenter(false);
-      setStartDialog(null);
-      setOpenPath(response.body.project.projectPath);
-      rememberProject(response.body);
-      onMessage(`Project created ${response.body.project.projectId}`);
-      await refreshProjects().catch(error => onMessage(`Project list refresh failed: ${String(error)}`));
-    } catch (error) {
-      onMessage(`Project create failed: ${String(error)}`);
+      setBusy(true);
+      try {
+        const response = await createAutomationProjectWorkspace(request);
+        if (!response.ok || !response.body) {
+          onMessage(`Project create failed: ${response.status} ${response.text}`);
+          return;
+        }
+
+        if (!await onWorkspaceOpened(response.body)) {
+          return;
+        }
+        setShowStartCenter(false);
+        setStartDialog(null);
+        setOpenPath(response.body.project.projectPath);
+        rememberProject(response.body);
+        onMessage(`Project created ${response.body.project.projectId}`);
+        await refreshProjects().catch(error => onMessage(`Project list refresh failed: ${String(error)}`));
+      } catch (error) {
+        onMessage(`Project create failed: ${String(error)}`);
+      } finally {
+        setBusy(false);
+      }
     } finally {
-      setBusy(false);
+      workspaceTransitionRef.current = false;
     }
-  }, [draft, onMessage, onWorkspaceChanged, refreshProjects, rememberProject]);
+  }, [
+    draft,
+    onMessage,
+    onWorkspaceChangeRequested,
+    onWorkspaceOpened,
+    refreshProjects,
+    rememberProject
+  ]);
 
   const openWorkspace = useCallback(async (projectPath = openPath) => {
     const normalizedPath = projectPath.trim();
@@ -241,27 +276,58 @@ export function ProjectsWorkbench({
       return;
     }
 
-    setBusy(true);
+    if (workspaceTransitionRef.current) {
+      onMessage('Another project transition is already in progress');
+      return;
+    }
+
+    const opensActiveWorkspace = activeWorkspace !== null
+      && (normalizeProjectPath(normalizedPath) === normalizeProjectPath(activeWorkspace.manifestPath)
+        || normalizeProjectPath(normalizedPath) === normalizeProjectPath(activeWorkspace.project.projectPath));
+    workspaceTransitionRef.current = true;
     try {
-      const response = await openAutomationProjectWorkspace({ projectPath: normalizedPath });
-      if (!response.ok || !response.body) {
-        onMessage(`Project open failed: ${response.status} ${response.text}`);
+      if (!opensActiveWorkspace && !await onWorkspaceChangeRequested()) {
         return;
       }
 
-      onWorkspaceChanged(response.body);
-      setShowStartCenter(false);
-      setStartDialog(null);
-      setOpenPath(response.body.project.projectPath);
-      rememberProject(response.body);
-      onMessage(`Project opened ${response.body.project.projectId}`);
-      await refreshProjects().catch(error => onMessage(`Project list refresh failed: ${String(error)}`));
-    } catch (error) {
-      onMessage(`Project open failed: ${String(error)}`);
+      setBusy(true);
+      try {
+        const response = await openAutomationProjectWorkspace({ projectPath: normalizedPath });
+        if (!response.ok || !response.body) {
+          onMessage(`Project open failed: ${response.status} ${response.text}`);
+          return;
+        }
+
+        const changed = opensActiveWorkspace
+          ? await onWorkspaceChanged(response.body)
+          : await onWorkspaceOpened(response.body);
+        if (!changed) {
+          return;
+        }
+        setShowStartCenter(false);
+        setStartDialog(null);
+        setOpenPath(response.body.project.projectPath);
+        rememberProject(response.body);
+        onMessage(`Project opened ${response.body.project.projectId}`);
+        await refreshProjects().catch(error => onMessage(`Project list refresh failed: ${String(error)}`));
+      } catch (error) {
+        onMessage(`Project open failed: ${String(error)}`);
+      } finally {
+        setBusy(false);
+      }
     } finally {
-      setBusy(false);
+      workspaceTransitionRef.current = false;
     }
-  }, [onMessage, onWorkspaceChanged, openPath, refreshProjects, rememberProject]);
+  }, [
+    activeWorkspace,
+    onMessage,
+    onWorkspaceChangeRequested,
+    onWorkspaceChanged,
+    onWorkspaceOpened,
+    openPath,
+    refreshProjects,
+    rememberProject
+  ]);
 
   const saveManifest = useCallback(async () => {
     if (!activeWorkspace) {
@@ -276,9 +342,11 @@ export function ProjectsWorkbench({
         return;
       }
 
-      onWorkspaceChanged(response.body);
+      if (!await onWorkspaceChanged(response.body)) {
+        return;
+      }
       rememberProject(response.body);
-      onMessage(`Manifest saved ${response.body.manifestPath}`);
+      onMessage(`Manifest saved ${pathLeafName(response.body.manifestPath)}`);
     } finally {
       setBusy(false);
     }
@@ -312,7 +380,9 @@ export function ProjectsWorkbench({
         return;
       }
 
-      onWorkspaceChanged(savedWorkspace.body);
+      if (!await onWorkspaceChanged(savedWorkspace.body)) {
+        return;
+      }
       onActiveApplicationChanged(applicationId);
       setApplicationDraft(createApplicationDraft());
       onMessage(`Application created ${applicationId}`);
@@ -347,7 +417,9 @@ export function ProjectsWorkbench({
       }
 
       const imported = response.body.project.applications.find(application => !existingIds.has(application.applicationId));
-      onWorkspaceChanged(response.body);
+      if (!await onWorkspaceChanged(response.body)) {
+        return;
+      }
       rememberProject(response.body);
       if (imported) {
         onActiveApplicationChanged(imported.applicationId);
@@ -447,7 +519,10 @@ export function ProjectsWorkbench({
 
           <div className="project-overview-content">
             <aside className="project-overview-summary">
-              <ProjectIdentity workspace={activeWorkspace} />
+              <ProjectIdentity
+                workspace={activeWorkspace}
+                redactLocalPaths={redactLocalPaths}
+              />
               <ManifestFacts rows={manifestRows} />
               <ProjectApplications
                 applications={activeApplications}
@@ -590,7 +665,7 @@ export function ProjectsWorkbench({
                       <FolderKanban size={20} />
                       <span>
                         <strong>{item.displayName}</strong>
-                        <small>{item.projectPath}</small>
+                        <small>{redactLocalPaths ? pathLeafName(item.projectPath) : item.projectPath}</small>
                       </span>
                       <span className="project-start-project-meta">
                         {item.lastOpenedAtUtc ? <time>{formatRecentTime(item.lastOpenedAtUtc)}</time> : null}
@@ -668,6 +743,7 @@ export function ProjectsWorkbench({
                 className="project-start-back-button"
                 onClick={() => setShowStartCenter(false)}
                 disabled={busy}
+                data-testid="back-to-project-workspace"
               >
                 Back to {activeWorkspace.project.displayName}
               </button>
@@ -772,7 +848,13 @@ export function ProjectsWorkbench({
             )}
 
             <footer>
-              <button type="button" className="button ghost" onClick={closeStartDialog} disabled={busy}>
+              <button
+                type="button"
+                className="button ghost"
+                onClick={closeStartDialog}
+                disabled={busy}
+                data-testid="cancel-project-start-dialog"
+              >
                 Cancel
               </button>
               {startDialog === 'new-project' ? (
@@ -891,16 +973,22 @@ function PathField({
 }
 
 function ProjectIdentity({
-  workspace
+  workspace,
+  redactLocalPaths
 }: {
   workspace: AutomationProjectWorkspaceResponse;
+  redactLocalPaths: boolean;
 }): React.ReactElement {
   return (
     <div className="project-identity">
       <FolderKanban size={22} />
       <div>
         <strong>{workspace.project.displayName}</strong>
-        <span>{workspace.project.projectPath}</span>
+        <span>
+          {redactLocalPaths
+            ? `${pathLeafName(workspace.project.projectPath)} · local Project`
+            : workspace.project.projectPath}
+        </span>
       </div>
     </div>
   );
@@ -1052,7 +1140,7 @@ function buildStartProjectGroups(
     items.push({
       projectPath: recent.projectPath,
       projectId,
-      displayName: project?.displayName ?? recent.displayName ?? projectFolderName(recent.projectPath),
+      displayName: project?.displayName ?? recent.displayName ?? pathLeafName(recent.projectPath),
       activeSnapshotId: project?.activeSnapshotId ?? recent.activeSnapshotId ?? null,
       lastOpenedAtUtc: recent.lastOpenedAtUtc
     });
@@ -1115,11 +1203,15 @@ function buildStartProjectGroups(
 }
 
 function normalizeProjectPath(projectPath: string): string {
-  return projectPath.trim().replace(/[\\/]+$/, '').toLocaleLowerCase();
+  return projectPath
+    .trim()
+    .replaceAll('/', '\\')
+    .replace(/[\\]+$/, '')
+    .toLocaleLowerCase('en-US');
 }
 
-function projectFolderName(projectPath: string): string {
-  return projectPath
+export function pathLeafName(sourcePath: string): string {
+  return sourcePath
     .trim()
     .split(/[\\/]/)
     .filter(Boolean)

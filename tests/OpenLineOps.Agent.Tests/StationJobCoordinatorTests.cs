@@ -437,6 +437,24 @@ public sealed class StationJobCoordinatorTests
             await coordinator.HandleAsync(request));
         var persisted = await store.GetAsync(new StationJobId(request.JobId));
         Assert.Equal(StationJobStatus.RecoveryRequired, persisted!.Job.Status);
+        Assert.Contains(
+            "Synthetic isolation cleanup failure.",
+            persisted.Job.FailureReason,
+            StringComparison.Ordinal);
+        var acceptedOutbox = Assert.Single(await store.ListPendingOutboxAsync(10, Now));
+        Assert.Equal(StationAgentMessageKinds.JobAccepted, acceptedOutbox.Kind);
+        await store.AcknowledgeOutboxAsync(acceptedOutbox.MessageId, Now);
+        var recoveryOutbox = Assert.Single(await store.ListPendingOutboxAsync(10, Now));
+        Assert.Equal(StationAgentMessageKinds.JobRecoveryRequired, recoveryOutbox.Kind);
+        var recoveryMessage = JsonSerializer.Deserialize<StationJobRecoveryRequired>(
+            recoveryOutbox.PayloadJson,
+            MessageJsonOptions);
+        Assert.NotNull(recoveryMessage);
+        Assert.Equal(request.JobId, recoveryMessage.JobId);
+        Assert.Contains(
+            "Synthetic isolation cleanup failure.",
+            recoveryMessage.Reason,
+            StringComparison.Ordinal);
 
         var recovered = await coordinator.RecoverAsync();
 

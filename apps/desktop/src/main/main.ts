@@ -69,6 +69,10 @@ import {
   inspectExternalProgramDirectory,
   type ExternalProgramDirectoryIdentity
 } from './external-program-directory-import-security.js';
+import {
+  bindActiveProjectStartupWorkspace,
+  resolveActiveProjectFile
+} from './backend-project-session.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -84,6 +88,8 @@ let trustedRendererDocumentUrl: string | null = null;
 let activeBackendSession: ActiveBackendSession | null = null;
 let backendStartPromise: Promise<BackendStatus> | null = null;
 let pendingHandshakePath: string | null = null;
+let activeProjectFilePath: string | null = null;
+let backendStatusSequence = 0;
 const recentLogs: string[] = [];
 
 const ownsPrimaryInstance = app.requestSingleInstanceLock();
@@ -132,6 +138,7 @@ interface DesktopBaseConfig {
   apiActorId: string;
   logPath: string;
   isPackaged: boolean;
+  publicEvidenceMode: boolean;
 }
 
 interface ActiveBackendSession {
@@ -169,7 +176,8 @@ function createDesktopBaseConfig(apiActorId: string): DesktopBaseConfig {
   return {
     apiActorId,
     logPath,
-    isPackaged: app.isPackaged
+    isPackaged: app.isPackaged,
+    publicEvidenceMode: process.env.OPENLINEOPS_PUBLIC_EVIDENCE_MODE === '1'
   };
 }
 
@@ -198,8 +206,10 @@ function createDesktopConfig(session: ActiveBackendSession): DesktopConfig {
 function createBackendLaunchConfig(
   apiCredentialProvisioning: LocalApiCredentials,
   handshakePath: string,
-  handshakeNonce: string
+  handshakeNonce: string,
+  projectFilePath: string | null
 ): BackendLaunchConfig {
+  const launchProjectFilePath = resolveActiveProjectFile(projectFilePath);
   const stationPackages = provisionLocalStationPackages();
   if (!app.isPackaged) {
     const appPath = app.getAppPath();
@@ -244,7 +254,7 @@ function createBackendLaunchConfig(
       executablePath: 'dotnet',
       arguments: [apiAssemblyPath, '--urls', 'http://127.0.0.1:0'],
       workingDirectory: path.dirname(apiAssemblyPath),
-      environment: {
+      environment: bindActiveProjectStartupWorkspace({
         ...process.env,
         ...stationPackages.environment,
         ...apiCredentialProvisioning.environment,
@@ -276,7 +286,7 @@ function createBackendLaunchConfig(
         OpenLineOps__Devices__ExternalProgramHost__EvidenceRootPath: traceArtifactRoot,
         OpenLineOps__Devices__ExternalProgramHost__AppContainerProfileName:
           'OpenLineOps.Studio.ExternalPrograms'
-      },
+      }, launchProjectFilePath),
       packagedRuntimeBinding: null
     };
   }
@@ -299,7 +309,7 @@ function createBackendLaunchConfig(
     executablePath: path.join(apiDirectory, 'OpenLineOps.Api.exe'),
     arguments: ['--urls', 'http://127.0.0.1:0'],
     workingDirectory: apiDirectory,
-    environment: {
+    environment: bindActiveProjectStartupWorkspace({
       ...process.env,
       ...stationPackages.environment,
       ...apiCredentialProvisioning.environment,
@@ -351,7 +361,7 @@ function createBackendLaunchConfig(
       OpenLineOps__Devices__ExternalProgramHost__AppContainerProfileName:
         'OpenLineOps.Studio.ExternalPrograms',
       OpenLineOps__Desktop__AllowedOrigins__0: 'null'
-    },
+    }, launchProjectFilePath),
     packagedRuntimeBinding: runtimeBinding
   };
 }
@@ -693,7 +703,13 @@ ipcMain.handle('backend:stop', async event => {
       backendStartedAtUtc = null;
     }
   }
-  return getBackendStatus();
+  const status = await getBackendStatus();
+  await notifyBackendStatusChanged(status);
+  return status;
+});
+ipcMain.handle('desktop:set-active-project-file', (event, projectFilePath: string | null) => {
+  assertTrustedRendererIpcSender(event);
+  activeProjectFilePath = resolveActiveProjectFile(projectFilePath);
 });
 ipcMain.on('desktop:close-response', (event, requestId: number, allowClose: boolean) => {
   try {
@@ -736,14 +752,26 @@ async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
     throw new Error('Backend process exists without one authenticated Studio session.');
   }
 
+  const launchProjectFilePath = resolveActiveProjectFile(activeProjectFilePath);
   const nonce = randomBytes(32).toString('base64url');
   const sessionCredentials = deriveBackendSessionCredentials(requireApiCredentials(), nonce);
   const handshakePath = createBackendHandshakePlaceholder();
   pendingHandshakePath = handshakePath;
-  const launch = createBackendLaunchConfig(sessionCredentials, handshakePath, nonce);
-  launch.packagedRuntimeBinding?.verify();
+  let launch: BackendLaunchConfig;
+  try {
+    launch = createBackendLaunchConfig(
+      sessionCredentials,
+      handshakePath,
+      nonce,
+      launchProjectFilePath);
+  } catch (error) {
+    cleanupBackendHandshakeFile(handshakePath);
+    pendingHandshakePath = null;
+    throw error;
+  }
   let child: ChildProcessWithoutNullStreams;
   try {
+    launch.packagedRuntimeBinding?.verify();
     child = spawn(
       launch.executablePath,
       launch.arguments,
@@ -753,7 +781,15 @@ async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
         windowsHide: true
       });
   } catch (error) {
-    launch.packagedRuntimeBinding?.rollback();
+    cleanupBackendHandshakeFile(handshakePath);
+    pendingHandshakePath = null;
+    try {
+      launch.packagedRuntimeBinding?.rollback();
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [error, rollbackError],
+        'Backend launch failed and its pending runtime state could not be rolled back.');
+    }
     throw error;
   }
   if (child.pid === undefined) {
@@ -776,6 +812,7 @@ async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
       lastExitCode = -1;
     }
     appendLog(`OpenLineOps.Api failed to start: ${error.message}`);
+    void notifyBackendStatusChanged();
   });
   child.on('exit', code => {
     clearBackendSession(child);
@@ -785,6 +822,7 @@ async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
       lastExitCode = code;
     }
     appendLog(`OpenLineOps.Api exited with code ${code ?? 'unknown'}.`);
+    void notifyBackendStatusChanged();
   });
 
   try {
@@ -804,7 +842,9 @@ async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
     };
     launch.packagedRuntimeBinding?.verify();
     launch.packagedRuntimeBinding?.commit();
-    return getBackendStatus();
+    const status = await getBackendStatus();
+    await notifyBackendStatusChanged(status);
+    return status;
   } catch (error) {
     try {
       await terminateBackendProcessTree(child);
@@ -1224,6 +1264,23 @@ async function getBackendStatus(): Promise<BackendStatus> {
     lastExitCode,
     recentLogs: recentLogs.slice(-80)
   };
+}
+
+async function notifyBackendStatusChanged(status?: BackendStatus): Promise<void> {
+  const sequence = ++backendStatusSequence;
+  try {
+    const currentStatus = status ?? await getBackendStatus();
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('backend:status-changed', {
+        sequence,
+        status: currentStatus
+      });
+    }
+  } catch (error) {
+    appendLog(`Backend status notification failed: ${error instanceof Error
+      ? error.message
+      : String(error)}`);
+  }
 }
 
 async function apiRequest<T = unknown>(

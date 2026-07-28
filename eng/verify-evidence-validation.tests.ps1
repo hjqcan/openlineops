@@ -330,6 +330,95 @@ Reset-ProductionFixture
 Reset-ProductionFixture
 $summaryPath = Join-Path $productionRunRoot "summary.json"
 $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+$summary.studioAuthoring.screenshot.PSObject.Properties.Remove("uiInspection")
+Write-Json -Path $summaryPath -Value $summary
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "production screenshot missing visible UI inspection" `
+    -Pattern "must contain exactly|uiInspection" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+Reset-ProductionFixture
+$summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+$summary.studioAuthoring.screenshot.uiInspection.absolutePathCount = 1
+Write-Json -Path $summaryPath -Value $summary
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "production screenshot reports visible absolute path" `
+    -Pattern "visible UI contains an absolute path" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+Reset-ProductionFixture
+$summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+$summary.scenarios.recovery.PSObject.Properties.Remove("projectSessionRehydrated")
+Write-Json -Path $summaryPath -Value $summary
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "production recovery omits active Project rehydration" `
+    -Pattern "exact properties|projectSessionRehydrated" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+Reset-ProductionFixture
+$summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+$summary.scenarios.recovery.projectSessionRehydrated = $false
+Write-Json -Path $summaryPath -Value $summary
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "production recovery did not rehydrate active Project" `
+    -Pattern "active Project rehydration" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+foreach ($proof in @(
+        [pscustomobject]@{
+            Field = "backendSessionRotated"
+            Name = "production recovery did not rotate authenticated backend session"
+            Pattern = "backend session rotation"
+        },
+        [pscustomobject]@{
+            Field = "runtimeHubReconnected"
+            Name = "production recovery did not reconnect Runtime Hub"
+            Pattern = "Runtime Hub reconnection"
+        },
+        [pscustomobject]@{
+            Field = "operationsProjectionRebuilt"
+            Name = "production recovery did not rebuild Operations Projection"
+            Pattern = "Operations Projection rebuild"
+        })) {
+    Reset-ProductionFixture
+    $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+    $summary.scenarios.recovery.($proof.Field) = $false
+    Write-Json -Path $summaryPath -Value $summary
+    Update-ProductionEvidenceManifest $productionRunRoot
+    Invoke-ExpectedFailure `
+        -Name $proof.Name `
+        -Pattern $proof.Pattern `
+        -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+}
+
+Reset-ProductionFixture
+$summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+$summary.scenarios.recovery.runtimeHubEventDelivery.receivedCount = 0
+Write-Json -Path $summaryPath -Value $summary
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "production recovery has no post-restart Runtime Hub event delivery" `
+    -Pattern "event delivery count" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+Reset-ProductionFixture
+$summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+$summary.scenarios.recovery.runtimeHubEventDelivery.runtimeIncidentId =
+    "incident-not-in-vendor-crash"
+Write-Json -Path $summaryPath -Value $summary
+Update-ProductionEvidenceManifest $productionRunRoot
+Invoke-ExpectedFailure `
+    -Name "production recovery Runtime Hub event is not bound to Vendor Crash Incident" `
+    -Pattern "must identify a Vendor Crash Incident" `
+    -Action { & $ProductionVerifier -EvidenceRoot $productionParent -RequirePassed }
+
+Reset-ProductionFixture
+$summaryPath = Join-Path $productionRunRoot "summary.json"
+$summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
 $summary.externalProgramTrial.directoryImport.entryPoint = "files/bin/not-imported.exe"
 Write-Json -Path $summaryPath -Value $summary
 Update-ProductionEvidenceManifest $productionRunRoot

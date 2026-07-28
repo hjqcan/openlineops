@@ -291,6 +291,7 @@ function createHarness() {
     environment: {
       OPENLINEOPS_REPO_ROOT: repoRoot,
       OPENLINEOPS_DESKTOP_LOG_PATH: path.join(privateExecutionRoot, 'desktop-logs'),
+      OPENLINEOPS_PUBLIC_EVIDENCE_MODE: '1',
       OPENLINEOPS_E2E_TRACE_ARTIFACT_SAVE_ROOT: traceArtifactSaveRoot,
       OPENLINEOPS_E2E_ALLOW_EXTERNAL_PROGRAM_DIRECTORY_DIALOG_BYPASS: '1',
       OPENLINEOPS_E2E_EXTERNAL_PROGRAM_DIRECTORY_PATH: vendorProgramDirectory
@@ -1795,23 +1796,94 @@ async function runRecoveryScenario() {
     processes => hasSpawnChildProcessTree(processes, 'SpawnChildDelayRecovery'),
     'recovery vendor parent and child');
   const backend = await harness.evaluate('window.openlineopsDesktop.getBackendStatus()');
+  const backendConfig = await harness.evaluate('window.openlineopsDesktop.getConfig()');
   assert(Number.isInteger(backend.pid) && backend.pid > 0, 'Packaged backend PID is unavailable.');
   await execFileAsync(
     windowsSystemExecutablePath('taskkill.exe'),
     ['/PID', String(backend.pid), '/F'],
     { windowsHide: true });
   await harness.waitFor(
-    '(async () => (await window.openlineopsDesktop.getBackendStatus()).health === "Unreachable")()',
+    '(async () => {'
+      + ' const status = await window.openlineopsDesktop.getBackendStatus();'
+      + ' return status.isRunning === false'
+      + ' && status.health === "Unreachable"'
+      + ' && status.pid === null'
+      + ' && status.apiBaseUrl === null;'
+      + ' })()',
     20_000,
-    'the forced Coordinator crash');
+    'the forced Coordinator process exit');
+  await harness.waitFor(
+    '(() => document.querySelector("[data-testid=\\"start-backend\\"]")'
+      + ' && document.querySelector(".ide-health-label")?.textContent?.includes("Unreachable")'
+      + ' && document.querySelector("[data-testid=\\"run-active-project\\"]")?.disabled === true)()',
+    20_000,
+    'the renderer to observe the crashed backend session');
   await waitForVendorProcesses(
     processes => vendorProcesses.every(previous => !processes.some(current => current.processId === previous.processId)),
     'Job Object to kill the interrupted vendor process tree');
-  await harness.evaluate('window.openlineopsDesktop.startBackend()');
+  const restartedBackend = await harness.evaluate('window.openlineopsDesktop.startBackend()');
   await harness.waitFor(
     '(async () => (await window.openlineopsDesktop.getBackendStatus()).health === "Healthy")()',
     60_000,
     'Coordinator restart');
+  const restartedBackendConfig = await harness.evaluate('window.openlineopsDesktop.getConfig()');
+  assert(
+    Number.isInteger(restartedBackend.pid)
+      && restartedBackend.pid > 0
+      && restartedBackend.pid !== backend.pid,
+    'Coordinator restart did not rotate the backend process identity.');
+  assert(
+    restartedBackendConfig.apiAccessToken !== backendConfig.apiAccessToken,
+    'Coordinator restart did not rotate the authenticated API session token.');
+  await harness.waitFor(
+    '(() => document.querySelector(".rail-footer .status-pill")?.textContent?.trim() === "Connected"'
+      + ' && document.querySelector("[data-testid=\\"run-active-project\\"]")?.disabled === false)()',
+    60_000,
+    'the renderer to reconnect its authenticated Runtime Hub session');
+  await harness.evaluate('window.__openlineopsSmokeEvents = {}');
+  const persistedCrashIncidentId =
+    summary.scenarios.vendorCrash?.incidents?.[0]?.runtimeIncidentId;
+  assert(
+    typeof persistedCrashIncidentId === 'string' && persistedCrashIncidentId.length > 0,
+    'The Crash scenario did not retain a Runtime Alarm identity for reconnect verification.');
+  const persistedAlarms = (await expectApi(
+    '/api/runtime/monitoring/alarms?includeAcknowledged=false',
+    {},
+    200,
+    'persisted Runtime Alarms after Coordinator restart')).body.items ?? [];
+  assert(
+    persistedAlarms.some(alarm => alarm.alarmId === persistedCrashIncidentId),
+    'The Crash Runtime Alarm was not rebuilt after Coordinator restart.');
+  await expectApi(
+    `/api/runtime/monitoring/alarms/${encodeURIComponent(persistedCrashIncidentId)}/acknowledgements`,
+    { method: 'POST', body: {} },
+    200,
+    'acknowledge the persisted Crash Runtime Alarm through the restarted Coordinator');
+  const runtimeHubEventCount = await harness.waitFor(
+    '(() => window.__openlineopsSmokeEvents?.AlarmAcknowledged ?? 0)()',
+    30_000,
+    'the restarted Runtime Hub to deliver an AlarmAcknowledged event');
+  await openOperationsDashboard(unit.runId);
+  await harness.waitFor(
+    'document.querySelector("[data-testid=\\"operations-workbench\\"]")'
+      + '?.textContent?.includes("Projection connected")',
+    30_000,
+    'the recovered production monitoring projection');
+  const projectApplicationBase =
+    `/api/automation-projects/${encodeURIComponent(fixture.projectId)}`
+    + `/applications/${encodeURIComponent(fixture.applicationId)}`;
+  await expectApi(
+    `${projectApplicationBase}/topologies/${encodeURIComponent(fixture.topologyId)}`
+      + `?snapshotId=${encodeURIComponent(fixture.snapshotId)}`,
+    {},
+    200,
+    'published topology rehydrated with the active Project after Coordinator restart');
+  await expectApi(
+    `${projectApplicationBase}/layouts/${encodeURIComponent(fixture.layoutId)}`
+      + `?snapshotId=${encodeURIComponent(fixture.snapshotId)}`,
+    {},
+    200,
+    'published layout rehydrated with the active Project after Coordinator restart');
   const recoveryRequired = await waitForRun(
     unit.runId,
     run => run.controlState === 'RecoveryRequired' && !run.isTerminal,
@@ -1820,7 +1892,6 @@ async function runRecoveryScenario() {
     recoveryRequired.operations.filter(operation => operation.operationId === fixture.operationTest).length === 1,
     'Interrupted vendor Operation was replayed automatically.');
   assert((await listVendorProcesses()).length === 0, 'A vendor process was replayed after restart.');
-  await openOperationsDashboard(unit.runId);
   const requiredScreenshot = await recordScreenshot('scenario-recovery-required-no-replay');
   await harness.click(`active-run-${unit.runId}`);
   await harness.click('production-command-Reconcile');
@@ -1853,6 +1924,15 @@ async function runRecoveryScenario() {
     recoveryRequired: compactRun(recoveryRequired),
     terminal: compactRun(terminal),
     noAutomaticReplay: true,
+    projectSessionRehydrated: true,
+    backendSessionRotated: true,
+    runtimeHubReconnected: runtimeHubEventCount > 0,
+    runtimeHubEventDelivery: {
+      eventName: 'AlarmAcknowledged',
+      receivedCount: runtimeHubEventCount,
+      runtimeIncidentId: persistedCrashIncidentId
+    },
+    operationsProjectionRebuilt: true,
     recoveryDecisions: terminal.recoveryDecisions.map(publicRecoveryDecision),
     trace: compactTrace(trace),
     screenshots: [requiredScreenshot, decisionScreenshot]
@@ -2608,13 +2688,93 @@ function publicLineState(state) {
 }
 
 async function recordScreenshot(name) {
+  const visibleText = await harness.evaluate(`(() => {
+    const isVisible = element => {
+      if (!(element instanceof HTMLElement)) return false;
+      if (element.closest('[aria-hidden="true"]')) return false;
+      const style = getComputedStyle(element);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+      if (element instanceof HTMLDialogElement && !element.open) return false;
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const values = [];
+    for (const element of document.querySelectorAll('input, textarea, select')) {
+      if (!isVisible(element)) continue;
+      if (element instanceof HTMLInputElement && element.type === 'password') {
+        values.push('[password control]');
+      } else if (element instanceof HTMLSelectElement) {
+        values.push(element.selectedOptions[0]?.textContent ?? element.value);
+      } else {
+        values.push(element.value);
+      }
+    }
+    for (const element of document.querySelectorAll('[title], [aria-label]')) {
+      if (!isVisible(element)) continue;
+      const title = element.getAttribute('title');
+      const ariaLabel = element.getAttribute('aria-label');
+      if (title) values.push(title);
+      if (ariaLabel) values.push(ariaLabel);
+    }
+    return [document.body?.innerText ?? '', ...values].join('\\n');
+  })()`);
+  const uiInspection = inspectPublicEvidenceUiText(name, visibleText);
   const filePath = path.join(screenshotRoot, `${name}.png`);
   await harness.screenshot(filePath);
   return {
     name,
     path: toEvidenceRelativePath(filePath),
     sha256: await sha256File(filePath),
-    sizeBytes: (await fs.stat(filePath)).size
+    sizeBytes: (await fs.stat(filePath)).size,
+    uiInspection
+  };
+}
+
+function inspectPublicEvidenceUiText(screenshotName, visibleText) {
+  assert(
+    typeof visibleText === 'string' && visibleText.length > 0,
+    `Screenshot ${screenshotName} has no inspectable visible UI text.`);
+  const lowerText = visibleText.toLowerCase();
+  for (const privatePath of [
+    privateExecutionRoot,
+    userDataDirectory,
+    projectPath,
+    sourceProjectPath,
+    repoRoot
+  ]) {
+    if (typeof privatePath === 'string' && privatePath.length > 0) {
+      assert(
+        !lowerText.includes(privatePath.toLowerCase()),
+        `Screenshot ${screenshotName} visible UI exposes a private absolute path.`);
+    }
+  }
+
+  const absolutePathMatches = visibleText.match(
+    /(?:^|[\s("'`<\[])((?:[A-Za-z]:[\\/])|(?:\\\\[^\\/\s]+[\\/]))/gmu) ?? [];
+  assert(
+    absolutePathMatches.length === 0,
+    `Screenshot ${screenshotName} visible UI contains an absolute filesystem path.`);
+  const runtimeErrorPatterns = [
+    /Published topology load failed/giu,
+    /\b2D layout refresh failed:/giu,
+    /\bRefresh failed:/giu,
+    /\bResync failed:/giu,
+    /\bRuntime monitor subscription failed:/giu,
+    /\bProduction run synchronization failed:/giu,
+    /\bProject list failed:/giu
+  ];
+  const runtimeErrorCount = runtimeErrorPatterns.reduce(
+    (count, pattern) => count + (visibleText.match(pattern)?.length ?? 0),
+    0);
+  assert(
+    runtimeErrorCount === 0,
+    `Screenshot ${screenshotName} visible UI contains a runtime synchronization error.`);
+
+  return {
+    status: 'passed',
+    visibleTextSha256: createHash('sha256').update(visibleText, 'utf8').digest('hex'),
+    absolutePathCount: absolutePathMatches.length,
+    runtimeErrorCount
   };
 }
 

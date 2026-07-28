@@ -94,7 +94,7 @@ public sealed record ProjectApplicationWorkspaceScope
         if (!string.Equals(
                 Path.GetExtension(segments[^1]),
                 ".oloapp",
-                StringComparison.OrdinalIgnoreCase))
+                StringComparison.Ordinal))
         {
             throw new ArgumentException(
                 "Application project path must reference a .oloapp file.",
@@ -129,49 +129,11 @@ public sealed record ProjectApplicationWorkspaceScope
         string applicationProjectFilePath)
     {
         var projectRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(projectPath));
-        if (File.Exists(projectRoot))
-        {
-            throw new InvalidDataException(
-                $"Project path '{projectRoot}' is a file, not a directory.");
-        }
-
-        RejectReparsePointIfPresent(projectRoot);
-
-        var relativePath = Path.GetRelativePath(projectRoot, applicationProjectFilePath);
-        var currentPath = projectRoot;
-        var segments = relativePath.Split(
-            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
-            StringSplitOptions.RemoveEmptyEntries);
-        for (var index = 0; index < segments.Length; index++)
-        {
-            currentPath = Path.Combine(currentPath, segments[index]);
-            if (index < segments.Length - 1 && File.Exists(currentPath))
-            {
-                throw new InvalidDataException(
-                    $"Application project path component '{currentPath}' is a file, not a directory.");
-            }
-
-            if (index == segments.Length - 1 && Directory.Exists(currentPath))
-            {
-                throw new InvalidDataException(
-                    $"Application project file path '{currentPath}' is a directory, not a file.");
-            }
-
-            RejectReparsePointIfPresent(currentPath);
-        }
-    }
-
-    private static void RejectReparsePointIfPresent(string path)
-    {
-        if (!Directory.Exists(path) && !File.Exists(path))
-        {
-            return;
-        }
-
-        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-        {
-            throw new InvalidDataException(
-                $"Application project path '{path}' is a reparse point and is not supported.");
-        }
+        ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+            projectRoot,
+            "Project directory");
+        ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+            applicationProjectFilePath,
+            "Application project file");
     }
 }

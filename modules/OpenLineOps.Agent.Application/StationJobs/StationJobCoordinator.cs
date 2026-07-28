@@ -328,11 +328,20 @@ public sealed class StationJobCoordinator
         }
         catch (StationRuntimeIsolationCleanupException exception)
         {
-            job.RequireRecovery(
+            var reason =
                 "Station runtime isolation cleanup failed after execution. "
                 + "The Agent must retry cleanup during restart before the Job can be reconciled. "
-                + exception.Message);
-            await _store.SaveAsync(job, revision, [], CancellationToken.None)
+                + CanonicalCleanupDiagnostic(exception.Message);
+            job.RequireRecovery(reason);
+            var recoveryRequired = CreateRecoveryRequired(
+                job,
+                reason,
+                checked(revision + 1));
+            await _store.SaveAsync(
+                    job,
+                    revision,
+                    [recoveryRequired],
+                    CancellationToken.None)
                 .ConfigureAwait(false);
             _executions.Forget(job.Id);
             throw;
@@ -390,6 +399,19 @@ public sealed class StationJobCoordinator
             .ConfigureAwait(false);
         _executions.Forget(job.Id);
         return job.ToSnapshot();
+    }
+
+    private static string CanonicalCleanupDiagnostic(string message)
+    {
+        const int maximumLength = 1536;
+        var canonical = string.Join(
+            " ",
+            message
+                .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+                .Select(static segment => segment.Trim()));
+        return canonical.Length <= maximumLength
+            ? canonical
+            : canonical[..maximumLength];
     }
 
     private async ValueTask<StationJobSnapshot> CompleteCanceledAsync(

@@ -939,46 +939,7 @@ function Test-IsExcludedSourcePath {
     param([Parameter(Mandatory = $true)][string] $RelativePath)
 
     $normalizedPath = $RelativePath.Replace([System.IO.Path]::DirectorySeparatorChar, '/')
-    $segments = $normalizedPath.Split('/', [System.StringSplitOptions]::RemoveEmptyEntries)
-    $excludedSegments = @(
-        ".git",
-        ".vs",
-        ".vscode",
-        ".idea",
-        "artifacts",
-        "output",
-        "data",
-    "logs",
-    "node_modules",
-    "bin",
-    "obj",
-    "dist",
-    "dist-electron",
-    "release",
-    "TestResults",
-    "coverage"
-    )
-
-    foreach ($segment in $segments) {
-        if ($excludedSegments -contains $segment) {
-            return $true
-        }
-    }
-
-    $fileName = [System.IO.Path]::GetFileName($normalizedPath)
-    if ($fileName -match '\.(user|suo|rsuser|userosscache|sln\.docstates|tsbuildinfo|trx|coverage)$') {
-        return $true
-    }
-
-    if ($fileName -like ".env*" -and $fileName -ne ".env.example") {
-        return $true
-    }
-
-    if (Test-IsSensitiveSourcePath $normalizedPath) {
-        return $true
-    }
-
-    return $false
+    return Test-IsSensitiveSourcePath $normalizedPath
 }
 
 function Test-IsSensitiveSourcePath {
@@ -1050,6 +1011,7 @@ function Copy-SourceArchiveContent {
 
     $canonicalTrackedPaths = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::Ordinal)
+    $expectedSourcePaths = [System.Collections.Generic.List[string]]::new()
     foreach ($trackedPathValue in $trackedPaths) {
         $relativePath = $trackedPathValue.ToString().Replace('\', '/')
         if ([string]::IsNullOrWhiteSpace($relativePath) `
@@ -1086,6 +1048,30 @@ function Copy-SourceArchiveContent {
         $destinationParent = Split-Path $destinationPath -Parent
         New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
         Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
+        $expectedSourcePaths.Add($relativePath) | Out-Null
+    }
+
+    $expectedPaths = [string[]]$expectedSourcePaths.ToArray()
+    [System.Array]::Sort($expectedPaths, [System.StringComparer]::Ordinal)
+    $actualPaths = [string[]]@(
+        Get-ChildItem -LiteralPath $DestinationDirectory -Recurse -File -Force |
+            ForEach-Object {
+                (Get-RelativePathUnderDirectory `
+                        -Root $DestinationDirectory `
+                        -Path $_.FullName).Replace(
+                    [System.IO.Path]::DirectorySeparatorChar,
+                    '/')
+            }
+    )
+    [System.Array]::Sort($actualPaths, [System.StringComparer]::Ordinal)
+    if ($actualPaths.Count -ne $expectedPaths.Count) {
+        throw "Source staging path set does not exactly match the non-sensitive Git index: copied $($actualPaths.Count), expected $($expectedPaths.Count)."
+    }
+
+    for ($index = 0; $index -lt $expectedPaths.Count; $index++) {
+        if ($actualPaths[$index] -cne $expectedPaths[$index]) {
+            throw "Source staging path set does not exactly match the non-sensitive Git index at '$($expectedPaths[$index])'."
+        }
     }
 }
 

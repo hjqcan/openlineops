@@ -512,6 +512,12 @@ function Write-ProductionClosureEvidenceFixture {
         path = $screenshotReference.relativePath
         sha256 = $screenshotReference.sha256
         sizeBytes = $screenshotReference.sizeBytes
+        uiInspection = [ordered]@{
+            status = "passed"
+            visibleTextSha256 = "9" * 64
+            absolutePathCount = 0
+            runtimeErrorCount = 0
+        }
     }
     $savedArtifactReference = New-FixtureFileReference `
         $RunRoot `
@@ -797,6 +803,15 @@ function Write-ProductionClosureEvidenceFixture {
                     [ordered]@{ processId = 201; parentProcessId = 1; imageName = "OpenLineOps.VendorTestHelper.exe" },
                     [ordered]@{ processId = 202; parentProcessId = 201; imageName = "dotnet.exe" })
                 noAutomaticReplay = $true
+                projectSessionRehydrated = $true
+                backendSessionRotated = $true
+                runtimeHubReconnected = $true
+                runtimeHubEventDelivery = [ordered]@{
+                    eventName = "AlarmAcknowledged"
+                    receivedCount = [long]1
+                    runtimeIncidentId = "incident.fixture"
+                }
+                operationsProjectionRebuilt = $true
                 recoveryRequired = New-FixturePublicRun `
                     -ExecutionStatus "Running" `
                     -Judgement "Unknown" `

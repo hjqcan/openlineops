@@ -363,7 +363,11 @@ The source archive is built from the path set returned by
 therefore never admits an untracked file. Current working-tree bytes are copied
 only for those tracked paths so a developer candidate can represent an
 uncommitted tracked edit, with `source.dirty` recorded in provenance. Sensitive
-tracked paths remain excluded. Formal publication additionally passes
+tracked paths remain excluded. All other tracked paths are preserved exactly,
+including legitimate nested source namespaces named `Data` or `Artifacts`; the
+staging gate compares the copied path set with the non-sensitive Git index
+before compression, and the ZIP writer independently verifies the emitted entry
+set and canonical order. Formal publication additionally passes
 `-RequireCleanGitWorkTree -ExpectedGitCommit <full-object-id>`, which makes the
 archive, build, and `release-provenance.json` fail closed unless they remain
 bound to one clean commit. Tracked paths that traverse a symlink, junction, or

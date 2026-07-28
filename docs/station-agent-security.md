@@ -108,6 +108,14 @@ kill-on-close Job Object ends the process tree; startup recovery then deletes
 profiles only for this Agent's persisted `RecoveryRequired` Jobs. There is no
 machine-wide prefix scan.
 
+Profile deletion is retried a bounded 24 times with capped exponential backoff
+to absorb the Windows profile-release race after the Job Object has closed. If
+the profile still cannot be removed, the Agent atomically persists the Job as
+`RecoveryRequired` together with its durable result Outbox message. The public
+diagnostic contains only the bounded cleanup stage, profile identity, exception
+type, HRESULT, and native error code; it never includes a private workspace
+path. The hardware command is not replayed automatically.
+
 ```json
 {
   "OpenLineOps": {

@@ -7,6 +7,20 @@ namespace OpenLineOps.Runner.Tests;
 public sealed class RunnerEntrypointTests
 {
     [Fact]
+    public void ProjectExecutionDataDirectoryRejectsNonexistentUppercaseProjectExtension()
+    {
+        var currentDirectory = Path.Combine(Path.GetTempPath(), "openlineops-runner-extension");
+        var uppercaseTarget = Path.Combine(currentDirectory, "production-line.OLOPROJ");
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            ProjectExecutionDataDirectory.ProjectDirectoryFromTarget(
+                uppercaseTarget,
+                currentDirectory));
+
+        Assert.Contains("canonical lowercase .oloproj", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void HeadlessConfigurationKeepsWorkspaceAndEvidenceInsideProjectExecutionData()
     {
         var projectDirectory = Path.Combine(

@@ -4,6 +4,7 @@ export interface DesktopConfig {
   apiActorId: string;
   logPath: string;
   isPackaged: boolean;
+  publicEvidenceMode: boolean;
 }
 
 export interface BackendStatus {
@@ -14,6 +15,11 @@ export interface BackendStatus {
   startedAtUtc: string | null;
   lastExitCode: number | null;
   recentLogs: string[];
+}
+
+export interface BackendStatusChanged {
+  sequence: number;
+  status: BackendStatus;
 }
 
 export interface ApiRequestOptions {
@@ -94,6 +100,8 @@ export interface OpenLineOpsDesktopApi {
   getBackendStatus(): Promise<BackendStatus>;
   startBackend(): Promise<BackendStatus>;
   stopBackend(): Promise<BackendStatus>;
+  setActiveProjectFile(projectFilePath: string | null): Promise<void>;
+  onBackendStatusChanged(listener: (change: BackendStatusChanged) => void): () => void;
   onCloseRequested(listener: (requestId: number) => void): () => void;
   respondToCloseRequest(requestId: number, allowClose: boolean): void;
   selectDirectory(options?: SelectDirectoryOptions): Promise<SelectDirectoryResult>;

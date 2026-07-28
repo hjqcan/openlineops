@@ -37,6 +37,20 @@ function Assert-Condition {
     }
 }
 
+function Test-PositiveInteger {
+    param([Parameter(Mandatory = $true)] $Value)
+
+    $isInteger = $Value -is [System.SByte] `
+        -or $Value -is [System.Byte] `
+        -or $Value -is [System.Int16] `
+        -or $Value -is [System.UInt16] `
+        -or $Value -is [System.Int32] `
+        -or $Value -is [System.UInt32] `
+        -or $Value -is [System.Int64] `
+        -or $Value -is [System.UInt64]
+    return $isInteger -and [decimal]$Value -gt 0
+}
+
 function Assert-ExactProperties {
     param(
         [Parameter(Mandatory = $true)][AllowNull()] $Value,
@@ -1068,7 +1082,18 @@ function Assert-PublicFileReferenceShape {
 
 function Assert-PublicScreenshotShape {
     param($Value, [string] $Description)
-    Assert-ExactProperties $Value @("name", "path", "sha256", "sizeBytes") $Description
+    Assert-ExactProperties $Value @("name", "path", "sha256", "sizeBytes", "uiInspection") $Description
+    Assert-ExactProperties $Value.uiInspection @(
+        "status", "visibleTextSha256", "absolutePathCount", "runtimeErrorCount") `
+        "$Description visible UI inspection"
+    Assert-Condition ($Value.uiInspection.status -ceq "passed") `
+        "$Description visible UI inspection did not pass."
+    Assert-Condition ($Value.uiInspection.visibleTextSha256 -cmatch '^[0-9a-f]{64}$') `
+        "$Description visible UI text SHA-256 is invalid."
+    Assert-Condition ($Value.uiInspection.absolutePathCount -eq 0) `
+        "$Description visible UI contains an absolute path."
+    Assert-Condition ($Value.uiInspection.runtimeErrorCount -eq 0) `
+        "$Description visible UI contains a runtime synchronization error."
 }
 
 function Assert-PublicArtifactShape {
@@ -1280,7 +1305,7 @@ function Assert-ScenarioShape {
         "vendorFailedRework" { @("status", "unit", "run", "trace", "assertion", "screenshots") }
         "operatorCancel" { @("status", "unit", "run", "vendorProcessesBeforeCancel", "processTreeTerminated", "trace", "screenshots") }
         "vendorCrash" { @("status", "unit", "run", "trace", "incidents", "screenshots") }
-        "recovery" { @("status", "unit", "interruptedOperationRunId", "backendPidTerminated", "vendorProcessesBeforeCrash", "recoveryRequired", "terminal", "noAutomaticReplay", "recoveryDecisions", "trace", "screenshots") }
+        "recovery" { @("status", "unit", "interruptedOperationRunId", "backendPidTerminated", "vendorProcessesBeforeCrash", "recoveryRequired", "terminal", "noAutomaticReplay", "projectSessionRehydrated", "backendSessionRotated", "runtimeHubReconnected", "runtimeHubEventDelivery", "operationsProjectionRebuilt", "recoveryDecisions", "trace", "screenshots") }
         default { throw "Production closure summary contains unknown scenario '$Name'." }
     }
     Assert-ExactProperties $Scenario $expected "Production closure scenario '$Name'"
@@ -1324,6 +1349,27 @@ function Assert-ScenarioShape {
             "Vendor Passed Desktop-saved artifact"
     }
     if ($Name -ceq "recovery") {
+        Assert-Condition ($Scenario.projectSessionRehydrated -eq $true) `
+            "Recovery scenario did not prove active Project rehydration after Coordinator restart."
+        Assert-Condition ($Scenario.backendSessionRotated -eq $true) `
+            "Recovery scenario did not prove authenticated backend session rotation."
+        Assert-Condition ($Scenario.runtimeHubReconnected -eq $true) `
+            "Recovery scenario did not prove Runtime Hub reconnection."
+        Assert-ExactProperties $Scenario.runtimeHubEventDelivery @(
+            "eventName", "receivedCount", "runtimeIncidentId") `
+            "Recovery Runtime Hub event delivery"
+        Assert-Condition ($Scenario.runtimeHubEventDelivery.eventName -ceq "AlarmAcknowledged") `
+            "Recovery Runtime Hub event delivery must be AlarmAcknowledged."
+        Assert-Condition (
+            Test-PositiveInteger $Scenario.runtimeHubEventDelivery.receivedCount) `
+            "Recovery Runtime Hub event delivery count must be positive."
+        Assert-Condition (
+            $Scenario.runtimeHubEventDelivery.runtimeIncidentId -is [string] -and
+            -not [string]::IsNullOrWhiteSpace(
+                $Scenario.runtimeHubEventDelivery.runtimeIncidentId)) `
+            "Recovery Runtime Hub event delivery must identify the acknowledged Runtime Incident."
+        Assert-Condition ($Scenario.operationsProjectionRebuilt -eq $true) `
+            "Recovery scenario did not prove production Operations Projection rebuild."
         Assert-PublicRunShape $Scenario.recoveryRequired "RecoveryRequired Run"
         Assert-PublicRunShape $Scenario.terminal "Reconciled terminal Run"
         foreach ($decision in @($Scenario.recoveryDecisions)) {
@@ -1743,6 +1789,13 @@ function Assert-ProductionSummary {
         "Vendor crash did not produce Failed + Unknown with an Incident."
 
     $recovery = $Summary.scenarios.recovery
+    $vendorCrashIncidentIds = @($crash.incidents | ForEach-Object {
+            $_.runtimeIncidentId
+        })
+    Assert-Condition (
+        $vendorCrashIncidentIds -ccontains
+            $recovery.runtimeHubEventDelivery.runtimeIncidentId) `
+        "Recovery Runtime Hub event delivery must identify a Vendor Crash Incident."
     Assert-Condition ($recovery.backendPidTerminated -gt 0 `
             -and $recovery.noAutomaticReplay -eq $true `
             -and $recovery.recoveryRequired.controlState -ceq "RecoveryRequired" `

@@ -253,6 +253,14 @@ reparse-point escape, ambiguous casing, and writes outside the Application
 root. Source writes are staged and atomically replaced. Content-addressed node
 files are written before `flow.json`, which acts as the commit pointer.
 
+Opening or creating a Project also requires the `.oloproj`, Project root, and
+every existing parent to be ordinary filesystem paths. Studio and the backend
+reject Projects reached through symbolic links, junctions, mount-point reparse
+paths, or other redirected parents so the IDE and runtime bind one unambiguous
+physical workspace. This preflight happens before directory creation or any
+Application write. The `.oloproj` and `.oloapp` extensions are exact lowercase
+canonical names; case aliases are not accepted.
+
 There is one strict current schema per resource. Unknown fields, missing fields,
 unknown enum values, noncanonical identities, and removed formats fail loading.
 There is no compatibility reader, alias, migration path, or automatic backfill.

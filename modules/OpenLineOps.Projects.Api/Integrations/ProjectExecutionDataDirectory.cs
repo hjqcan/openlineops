@@ -19,11 +19,21 @@ public static class ProjectExecutionDataDirectory
             Path.IsPathRooted(projectTarget)
                 ? projectTarget
                 : Path.Combine(currentDirectory, projectTarget));
+        if (targetPath.EndsWith(
+                AutomationProjectFileConvention.ProjectFileExtension,
+                StringComparison.OrdinalIgnoreCase)
+            && !targetPath.EndsWith(
+                AutomationProjectFileConvention.ProjectFileExtension,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Project target must use the canonical lowercase "
+                + $"{AutomationProjectFileConvention.ProjectFileExtension} extension.");
+        }
+
         return targetPath.EndsWith(
             AutomationProjectFileConvention.ProjectFileExtension,
-            OperatingSystem.IsWindows()
-                ? StringComparison.OrdinalIgnoreCase
-                : StringComparison.Ordinal)
+            StringComparison.Ordinal)
             ? Path.GetDirectoryName(targetPath)
                 ?? throw new InvalidDataException("Project file path has no parent directory.")
             : targetPath;

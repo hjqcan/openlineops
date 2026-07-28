@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.IO.Compression;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Results;
@@ -19,8 +18,7 @@ public sealed class FileSystemApplicationExtensionPackageService : IApplicationE
     public const long MaximumFileBytes = 128L * 1024 * 1024;
     public const int MaximumFileCount = 1024;
 
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ApplicationGates =
-        new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+    private static readonly ProjectWorkspaceWriteLockPool ApplicationGates = new();
 
     private readonly IPluginPackageCatalog _catalog;
     private readonly IProjectApplicationPluginPackageReferenceStore _referenceStore;
@@ -92,7 +90,8 @@ public sealed class FileSystemApplicationExtensionPackageService : IApplicationE
                 exception.Message));
         }
 
-        await using var gate = await AcquireAsync(scope.ApplicationProjectFilePath, cancellationToken)
+        using var gate = await ApplicationGates
+            .AcquireAsync(scope.ApplicationProjectFilePath, cancellationToken)
             .ConfigureAwait(false);
         var pluginsRoot = scope.PluginsRootPath;
         var stagingPath = Path.Combine(pluginsRoot, $".olo-import-{Guid.NewGuid():N}");
@@ -197,7 +196,8 @@ public sealed class FileSystemApplicationExtensionPackageService : IApplicationE
                 "Plugin id must be canonical non-empty text."));
         }
 
-        await using var gate = await AcquireAsync(scope.ApplicationProjectFilePath, cancellationToken)
+        using var gate = await ApplicationGates
+            .AcquireAsync(scope.ApplicationProjectFilePath, cancellationToken)
             .ConfigureAwait(false);
         string? quarantinePath = null;
         try
@@ -500,16 +500,6 @@ public sealed class FileSystemApplicationExtensionPackageService : IApplicationE
         Directory.Delete(path, recursive: true);
     }
 
-    private static async ValueTask<ApplicationGate> AcquireAsync(
-        string applicationProjectFilePath,
-        CancellationToken cancellationToken)
-    {
-        var key = Path.GetFullPath(applicationProjectFilePath);
-        var gate = ApplicationGates.GetOrAdd(key, static _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        return new ApplicationGate(gate);
-    }
-
     private static bool IsPackageException(Exception exception) => exception is
         ArgumentException or
         InvalidDataException or
@@ -520,14 +510,4 @@ public sealed class FileSystemApplicationExtensionPackageService : IApplicationE
     private static ApplicationError InvalidPackage(Exception exception) =>
         ApplicationError.Validation("Plugins.ExtensionPackageInvalid", exception.Message);
 
-    private sealed class ApplicationGate(SemaphoreSlim gate) : IAsyncDisposable
-    {
-        private SemaphoreSlim? _gate = gate;
-
-        public ValueTask DisposeAsync()
-        {
-            Interlocked.Exchange(ref _gate, null)?.Release();
-            return ValueTask.CompletedTask;
-        }
-    }
 }

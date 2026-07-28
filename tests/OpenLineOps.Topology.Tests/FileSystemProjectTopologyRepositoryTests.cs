@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Topology.Domain.Capabilities;
 using OpenLineOps.Topology.Domain.Identifiers;
@@ -145,6 +146,46 @@ public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
         Assert.Equal("element.station", restoredLayout.Elements.Single().Id.Value);
     }
 
+    [Theory]
+    [InlineData("topology")]
+    [InlineData("layouts")]
+    public async Task SaveRejectsResourceDirectoryReparsePointWithoutWritingOutsideApplication(
+        string resourceDirectoryName)
+    {
+        var scope = CreateScope();
+        Directory.CreateDirectory(scope.ApplicationRootPath);
+        var outsideDirectory = Path.Combine(_root, $"outside-{resourceDirectoryName}");
+        Directory.CreateDirectory(outsideDirectory);
+        var sentinelPath = Path.Combine(outsideDirectory, "sentinel.txt");
+        await File.WriteAllTextAsync(sentinelPath, "unchanged");
+        var resourceDirectory = Path.Combine(scope.ApplicationRootPath, resourceDirectoryName);
+        CreateDirectoryReparsePoint(resourceDirectory, outsideDirectory);
+
+        try
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            {
+                if (resourceDirectoryName == "topology")
+                {
+                    await new FileSystemProjectAutomationTopologyRepository()
+                        .SaveAsync(scope, CreateTopology());
+                }
+                else
+                {
+                    await new FileSystemProjectSiteLayoutRepository()
+                        .SaveAsync(scope, CreateLayout());
+                }
+            });
+
+            Assert.Equal("unchanged", await File.ReadAllTextAsync(sentinelPath));
+            Assert.Equal([sentinelPath], Directory.GetFiles(outsideDirectory));
+        }
+        finally
+        {
+            Directory.Delete(resourceDirectory);
+        }
+    }
+
     private ProjectApplicationWorkspaceScope CreateScope()
     {
         Directory.CreateDirectory(_root);
@@ -218,6 +259,40 @@ public sealed class FileSystemProjectTopologyRepositoryTests : IDisposable
             new LayoutTargetReference(LayoutTargetKind.Slot, "slot.1"),
             group.Id, 10, 10, 50, 40, 0, 3)).Succeeded);
         return layout;
+    }
+
+    private static void CreateDirectoryReparsePoint(string path, string targetPath)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Directory.CreateSymbolicLink(path, targetPath);
+            return;
+        }
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            ArgumentList =
+            {
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                path,
+                targetPath
+            }
+        }) ?? throw new InvalidOperationException("Failed to start the Windows junction command.");
+
+        process.WaitForExit();
+        var standardOutput = process.StandardOutput.ReadToEnd();
+        var standardError = process.StandardError.ReadToEnd();
+        Assert.True(
+            process.ExitCode == 0,
+            $"Failed to create test junction. stdout: {standardOutput} stderr: {standardError}");
     }
 
     public void Dispose()

@@ -57,7 +57,7 @@ import {
 import { DevicesWorkbench } from './devices-workbench';
 import { EngineeringWorkbench } from './engineering-workbench';
 import { PluginsWorkbench } from './plugins-workbench';
-import { ProjectsWorkbench } from './projects-workbench';
+import { pathLeafName, ProjectsWorkbench } from './projects-workbench';
 import { TraceWorkbench } from './trace-workbench';
 import { useProductionOperations } from './use-production-operations';
 import {
@@ -154,6 +154,7 @@ function App(): React.ReactElement {
   const [activeNav, setActiveNav] = useState<NavId>('projects');
   const [workspaceMode, setWorkspaceMode] = useState<'edit' | 'run'>('edit');
   const [config, setConfig] = useState<DesktopConfig | null>(null);
+  const [publicEvidenceMode, setPublicEvidenceMode] = useState(false);
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null);
   const [platform, setPlatform] = useState<PlatformResponse | null>(null);
   const [healthStatus, setHealthStatus] = useState('Unknown');
@@ -176,7 +177,26 @@ function App(): React.ReactElement {
   const [editorTabState, setEditorTabState] = useState<EditorTabState>({ tabs: [], activeId: null });
   const [pendingUnsavedGuard, setPendingUnsavedGuard] = useState<PendingUnsavedGuard | null>(null);
   const [unsavedGuardBusy, setUnsavedGuardBusy] = useState(false);
+  const unsavedGuardPendingRef = useRef(false);
+  const unsavedGuardDialogRef = useRef<HTMLDialogElement>(null);
   useDocumentRegistrySnapshot(documentRegistry);
+
+  useEffect(() => {
+    const dialog = unsavedGuardDialogRef.current;
+    if (!pendingUnsavedGuard || !dialog) {
+      return;
+    }
+
+    if (!dialog.open) {
+      dialog.showModal();
+    }
+
+    return () => {
+      if (dialog.open) {
+        dialog.close();
+      }
+    };
+  }, [pendingUnsavedGuard]);
 
   const activeApplication = useMemo(
     () => activeWorkspace?.project.applications.find(
@@ -232,6 +252,7 @@ function App(): React.ReactElement {
       desktop.getBackendStatus()
     ]);
     setConfig(desktopConfig);
+    setPublicEvidenceMode(desktopConfig.publicEvidenceMode);
     setBackendStatus(status);
 
     const [platformResponse, healthResponse] = await Promise.allSettled([
@@ -262,6 +283,24 @@ function App(): React.ReactElement {
   }, [activeMonitoringScope, lastProjectRunSessionId]);
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
+  const backendStatusSequenceRef = useRef(0);
+
+  useEffect(() => desktop.onBackendStatusChanged(change => {
+    if (!Number.isSafeInteger(change.sequence)
+        || change.sequence <= backendStatusSequenceRef.current) {
+      return;
+    }
+    backendStatusSequenceRef.current = change.sequence;
+    const { status } = change;
+    setBackendStatus(status);
+    if (status.health !== 'Healthy') {
+      setConfig(null);
+      setHealthStatus(status.health);
+      return;
+    }
+    refreshRef.current().catch(error =>
+      setMessage(`Backend session refresh failed: ${String(error)}`));
+  }), []);
 
   useEffect(() => {
     refresh().catch(error => setMessage(`Refresh failed: ${String(error)}`));
@@ -543,6 +582,12 @@ function App(): React.ReactElement {
     documentIds: ReadonlySet<string> | null = null,
     cancel?: () => void
   ) => {
+    if (unsavedGuardPendingRef.current) {
+      setMessage('Another unsaved-editor decision is already pending.');
+      cancel?.();
+      return;
+    }
+
     const inFlightDocuments = documentRegistry.entries().filter(([id, document]) =>
       (documentIds === null || documentIds.has(id))
       && (document.busy || document.saving));
@@ -556,46 +601,95 @@ function App(): React.ReactElement {
       return;
     }
     setUnsavedGuardBusy(false);
+    unsavedGuardPendingRef.current = true;
     setPendingUnsavedGuard({ title, detail, documentIds, proceed, cancel });
   }, [documentRegistry]);
 
-  const applyWorkspaceSelection = useCallback((workspace: AutomationProjectWorkspaceResponse) => {
-    const applicationId = workspace.project.applications[0]?.applicationId ?? null;
-    setActiveWorkspace(workspace);
-    setActiveApplicationId(applicationId);
-    setWorkspaceMode('edit');
-    setActiveNav('projects');
-    setEditorTabState(applicationId
-      ? openEditorTab(
-        { tabs: [], activeId: null },
-        createEditorTab(workspace, applicationId, 'projects'))
-      : { tabs: [], activeId: null });
-    setLastProjectRun(null);
-    setActiveProductionRunId(null);
-    setStations([]);
-    setTargetStatuses([]);
-    setTimeline([]);
+  const cancelPendingUnsavedGuard = useCallback(() => {
+    if (!pendingUnsavedGuard || unsavedGuardBusy) {
+      return;
+    }
+
+    setMessage('Action canceled. Unsaved editor changes remain.');
+    unsavedGuardPendingRef.current = false;
+    pendingUnsavedGuard.cancel?.();
+    setPendingUnsavedGuard(null);
+  }, [pendingUnsavedGuard, unsavedGuardBusy]);
+
+  const applyWorkspaceSelection = useCallback(async (
+    workspace: AutomationProjectWorkspaceResponse
+  ): Promise<boolean> => {
+    try {
+      await desktop.setActiveProjectFile(workspace.manifestPath);
+      const applicationId = workspace.project.applications[0]?.applicationId ?? null;
+      setActiveWorkspace(workspace);
+      setActiveApplicationId(applicationId);
+      setWorkspaceMode('edit');
+      setActiveNav('projects');
+      setEditorTabState(applicationId
+        ? openEditorTab(
+          { tabs: [], activeId: null },
+          createEditorTab(workspace, applicationId, 'projects'))
+        : { tabs: [], activeId: null });
+      setLastProjectRun(null);
+      setActiveProductionRunId(null);
+      setStations([]);
+      setTargetStatuses([]);
+      setTimeline([]);
+      return true;
+    } catch (error) {
+      setMessage(`Project activation failed: ${String(error)}`);
+      return false;
+    }
   }, []);
 
-  const selectWorkspace = useCallback((workspace: AutomationProjectWorkspaceResponse) => {
-    runWithUnsavedGuard(
-      'Open another project?',
-      'The current project contains unsaved editor changes.',
-      () => applyWorkspaceSelection(workspace));
-  }, [applyWorkspaceSelection, runWithUnsavedGuard]);
+  const selectWorkspace = useCallback((
+    workspace: AutomationProjectWorkspaceResponse
+  ): Promise<boolean> => {
+    if (activeWorkspace?.project.projectId === workspace.project.projectId
+        && activeWorkspace.manifestPath === workspace.manifestPath) {
+      setActiveWorkspace(workspace);
+      return Promise.resolve(true);
+    }
+
+    return new Promise<boolean>(resolve => {
+      runWithUnsavedGuard(
+        'Open another project?',
+        'The current project contains unsaved editor changes.',
+        () => {
+          void applyWorkspaceSelection(workspace).then(resolve);
+        },
+        null,
+        () => resolve(false));
+    });
+  }, [activeWorkspace?.manifestPath, activeWorkspace?.project.projectId, applyWorkspaceSelection, runWithUnsavedGuard]);
+
+  const requestWorkspaceChange = useCallback((): Promise<boolean> =>
+    new Promise<boolean>(resolve => {
+      runWithUnsavedGuard(
+        'Open another project?',
+        'The current project contains unsaved editor changes.',
+        () => resolve(true),
+        null,
+        () => resolve(false));
+    }), [runWithUnsavedGuard]);
 
   const applyWorkspaceClose = useCallback(() => {
-    setActiveWorkspace(null);
-    setActiveApplicationId(null);
-    setEditorTabState({ tabs: [], activeId: null });
-    setWorkspaceMode('edit');
-    setActiveNav('projects');
-    setLastProjectRun(null);
-    setActiveProductionRunId(null);
-    setStations([]);
-    setTargetStatuses([]);
-    setTimeline([]);
-    setMessage('Project closed. Select a project to continue.');
+    void desktop.setActiveProjectFile(null)
+      .then(() => {
+        setActiveWorkspace(null);
+        setActiveApplicationId(null);
+        setEditorTabState({ tabs: [], activeId: null });
+        setWorkspaceMode('edit');
+        setActiveNav('projects');
+        setLastProjectRun(null);
+        setActiveProductionRunId(null);
+        setStations([]);
+        setTargetStatuses([]);
+        setTimeline([]);
+        setMessage('Project closed. Select a project to continue.');
+      })
+      .catch(error => setMessage(`Project close failed: ${String(error)}`));
   }, []);
 
   const closeWorkspace = useCallback(() => {
@@ -1047,7 +1141,10 @@ function App(): React.ReactElement {
           activeApplicationId={activeApplication?.applicationId ?? null}
           onActiveApplicationChanged={selectApplication}
           isBackendHealthy={backendStatus?.health === 'Healthy'}
+          redactLocalPaths={publicEvidenceMode}
           statusMessage={message}
+          onWorkspaceChangeRequested={requestWorkspaceChange}
+          onWorkspaceOpened={applyWorkspaceSelection}
           onWorkspaceChanged={selectWorkspace}
           onMessage={setMessage}
         />
@@ -1097,7 +1194,7 @@ function App(): React.ReactElement {
     }
 
     return <SecondaryView activeNav={panelNav} traceRows={traceRows} stations={stations} />;
-  }, [activeApplication?.applicationId, activeApplicationSnapshot?.snapshotId, activeWorkspace, backendStatus?.health, message, operationsProjection, selectApplication, selectWorkspace, stations, traceRows, workspaceMode]);
+  }, [activeApplication?.applicationId, activeApplicationSnapshot?.snapshotId, activeWorkspace, applyWorkspaceSelection, backendStatus?.health, config?.apiActorId, message, operationsProjection, publicEvidenceMode, requestWorkspaceChange, selectApplication, selectWorkspace, stations, traceRows, workspaceMode]);
 
   const activeEditorTab = editorTabState.tabs.find(tab => tab.id === editorTabState.activeId) ?? null;
   const activeEditorDocument = activeEditorTab ? documentRegistry.get(activeEditorTab.id) : null;
@@ -1223,6 +1320,7 @@ function App(): React.ReactElement {
           workspace={activeWorkspace}
           activeApplicationId={activeApplication?.applicationId ?? null}
           activeNav={activeNav}
+          redactLocalPaths={publicEvidenceMode}
           onNavigate={openEditor}
           onSelectApplication={selectApplication}
           onClose={closeWorkspace}
@@ -1437,7 +1535,15 @@ function App(): React.ReactElement {
       </dialog>
       ) : null}
       {pendingUnsavedGuard ? (
-        <dialog open className="unsaved-guard-dialog" data-testid="unsaved-changes-dialog">
+        <dialog
+          ref={unsavedGuardDialogRef}
+          className="unsaved-guard-dialog"
+          data-testid="unsaved-changes-dialog"
+          onCancel={event => {
+            event.preventDefault();
+            cancelPendingUnsavedGuard();
+          }}
+        >
           <header>
             <div>
               <span>UNSAVED EDITORS</span>
@@ -1459,10 +1565,7 @@ function App(): React.ReactElement {
             <button
               type="button"
               className="button ghost"
-              onClick={() => {
-                pendingUnsavedGuard.cancel?.();
-                setPendingUnsavedGuard(null);
-              }}
+              onClick={cancelPendingUnsavedGuard}
               disabled={unsavedGuardBusy}
               data-testid="unsaved-cancel"
             >
@@ -1482,6 +1585,7 @@ function App(): React.ReactElement {
                       return;
                     }
                     const proceed = pendingUnsavedGuard.proceed;
+                    unsavedGuardPendingRef.current = false;
                     setPendingUnsavedGuard(null);
                     setUnsavedGuardBusy(false);
                     proceed();
@@ -1506,6 +1610,7 @@ function App(): React.ReactElement {
                       return;
                     }
                     const proceed = pendingUnsavedGuard.proceed;
+                    unsavedGuardPendingRef.current = false;
                     setPendingUnsavedGuard(null);
                     setUnsavedGuardBusy(false);
                     proceed();
@@ -1548,6 +1653,7 @@ function ProjectExplorer({
   workspace,
   activeApplicationId,
   activeNav,
+  redactLocalPaths,
   onNavigate,
   onSelectApplication,
   onClose
@@ -1555,6 +1661,7 @@ function ProjectExplorer({
   workspace: AutomationProjectWorkspaceResponse;
   activeApplicationId: string | null;
   activeNav: NavId;
+  redactLocalPaths: boolean;
   onNavigate(nav: NavId): void;
   onSelectApplication(applicationId: string): void;
   onClose(): void;
@@ -1649,7 +1756,13 @@ function ProjectExplorer({
                 <Blocks size={14} />
                 <span>
                   <strong>{candidate.displayName}</strong>
-                  <small>{candidate.projectFilePath ?? candidate.applicationId}</small>
+                  <small>
+                    {candidate.projectFilePath
+                      ? (redactLocalPaths
+                        ? pathLeafName(candidate.projectFilePath)
+                        : candidate.projectFilePath)
+                      : candidate.applicationId}
+                  </small>
                 </span>
               </button>
             ))}
@@ -1676,7 +1789,11 @@ function ProjectExplorer({
         <FileSearch size={14} />
         <span>
           <strong>{workspace.manifestPath.split(/[\\/]/).pop() ?? 'project.oloproj'}</strong>
-          <small>{workspace.project.projectPath}</small>
+          <small>
+            {redactLocalPaths
+              ? `${pathLeafName(workspace.project.projectPath)} · local Project`
+              : workspace.project.projectPath}
+          </small>
         </span>
       </div>
     </aside>

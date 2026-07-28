@@ -353,6 +353,13 @@ export function TopologyDesigner({
   }, [effectiveMode, runtimeProjection?.productionUnits.length, stationStatuses, topology?.systems]);
 
   const refresh = useCallback(async (announce = false) => {
+    if (effectiveMode === 'edit' && dirtyDraftsRef.current.size > 0) {
+      if (announce) {
+        onMessage('Save or discard topology drafts before refreshing persisted Application source.');
+      }
+      return;
+    }
+
     if (!activeApplication || !apiScope) {
       setTopology(null);
       setLayout(null);

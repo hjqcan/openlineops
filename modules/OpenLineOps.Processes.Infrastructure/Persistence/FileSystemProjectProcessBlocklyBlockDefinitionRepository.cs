@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.Json;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
@@ -10,8 +9,7 @@ namespace OpenLineOps.Processes.Infrastructure.Persistence;
 public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepository :
     IProjectProcessBlocklyBlockDefinitionRepository
 {
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> BlockLocks =
-        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ProjectWorkspaceWriteLockPool BlockLocks = new();
 
     public async ValueTask<IReadOnlyCollection<ProcessBlocklyBlockDefinitionRecord>> ListLatestAsync(
         ProjectApplicationWorkspaceScope scope,
@@ -21,7 +19,9 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepository :
         cancellationToken.ThrowIfCancellationRequested();
 
         var customBlocksDirectory = ProjectProcessResourcePath.GetCustomBlocksDirectory(scope);
-        if (!Directory.Exists(customBlocksDirectory))
+        if (!ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+                customBlocksDirectory,
+                "Project custom Blockly blocks directory"))
         {
             return [];
         }
@@ -32,6 +32,9 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepository :
                      .Order(StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+                blockDirectory,
+                "Project custom Blockly block directory");
             var versions = await ListVersionsFromDirectoryAsync(scope, blockDirectory, cancellationToken)
                 .ConfigureAwait(false);
             if (versions.Count > 0)
@@ -97,50 +100,44 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepository :
         cancellationToken.ThrowIfCancellationRequested();
         var normalizedBlockType = blockType.Trim();
         var blockDirectory = ProjectProcessResourcePath.GetCustomBlockDirectory(scope, normalizedBlockType);
-        var blockLock = BlockLocks.GetOrAdd(blockDirectory, static _ => new SemaphoreSlim(1, 1));
-        await blockLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var blockLock = await BlockLocks
+            .AcquireAsync(blockDirectory, cancellationToken)
+            .ConfigureAwait(false);
 
-        try
-        {
-            var versions = await ListVersionsFromDirectoryAsync(
-                    scope,
-                    blockDirectory,
-                    cancellationToken,
-                    normalizedBlockType)
-                .ConfigureAwait(false);
-            var latest = versions.FirstOrDefault();
-            var version = latest?.Version + 1 ?? 1;
-            var createdAtUtc = latest?.CreatedAtUtc ?? recordedAtUtc;
-            var document = new ProjectProcessBlocklyBlockVersionDocument(
-                ProjectProcessBlocklyBlockVersionDocument.CurrentSchema,
-                ProjectProcessBlocklyBlockVersionDocument.CurrentSchemaVersion,
-                scope.ApplicationId,
-                normalizedBlockType,
-                version,
-                category,
-                displayName,
-                blocklyJson,
-                executionMode,
-                runtimeActionContractSchemaVersion,
-                runtimeActionContractJson,
-                runtimeActionContractSha256,
-                createdAtUtc,
-                recordedAtUtc);
-            var versionPath = ProjectProcessResourcePath.GetCustomBlockVersionPath(
+        var versions = await ListVersionsFromDirectoryAsync(
                 scope,
-                normalizedBlockType,
-                version);
+                blockDirectory,
+                cancellationToken,
+                normalizedBlockType)
+            .ConfigureAwait(false);
+        var latest = versions.FirstOrDefault();
+        var version = latest?.Version + 1 ?? 1;
+        var createdAtUtc = latest?.CreatedAtUtc ?? recordedAtUtc;
+        var document = new ProjectProcessBlocklyBlockVersionDocument(
+            ProjectProcessBlocklyBlockVersionDocument.CurrentSchema,
+            ProjectProcessBlocklyBlockVersionDocument.CurrentSchemaVersion,
+            scope.ApplicationId,
+            normalizedBlockType,
+            version,
+            category,
+            displayName,
+            blocklyJson,
+            executionMode,
+            runtimeActionContractSchemaVersion,
+            runtimeActionContractJson,
+            runtimeActionContractSha256,
+            createdAtUtc,
+            recordedAtUtc);
+        var versionPath = ProjectProcessResourcePath.GetCustomBlockVersionPath(
+            scope,
+            normalizedBlockType,
+            version);
 
-            await ProjectProcessResourceFileStore
-                .SaveNewJsonAsync(versionPath, document, cancellationToken)
-                .ConfigureAwait(false);
+        await ProjectProcessResourceFileStore
+            .SaveNewJsonAsync(versionPath, document, cancellationToken)
+            .ConfigureAwait(false);
 
-            return ToRecord(document);
-        }
-        finally
-        {
-            blockLock.Release();
-        }
+        return ToRecord(document);
     }
 
     private static async ValueTask<IReadOnlyCollection<ProcessBlocklyBlockDefinitionRecord>> ListVersionsFromDirectoryAsync(
@@ -150,7 +147,12 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepository :
         string? expectedBlockType = null)
     {
         var versionsDirectory = Path.Combine(blockDirectory, "versions");
-        if (!Directory.Exists(versionsDirectory))
+        if (!ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+                blockDirectory,
+                "Project custom Blockly block directory")
+            || !ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+                versionsDirectory,
+                "Project custom Blockly block versions directory"))
         {
             return [];
         }

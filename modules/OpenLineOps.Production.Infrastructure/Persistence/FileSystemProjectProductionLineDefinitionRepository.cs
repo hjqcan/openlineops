@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
@@ -11,8 +10,7 @@ namespace OpenLineOps.Production.Infrastructure.Persistence;
 public sealed class FileSystemProjectProductionLineDefinitionRepository
     : IProjectProductionLineDefinitionRepository
 {
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> WriteLocks =
-        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ProjectWorkspaceWriteLockPool WriteLocks = new();
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -32,7 +30,9 @@ public sealed class FileSystemProjectProductionLineDefinitionRepository
         cancellationToken.ThrowIfCancellationRequested();
 
         var path = ProductionLineResourcePath.GetLinePath(scope, definition.Id.Value);
-        EnsureResourcePathSafe(scope, path);
+        ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+            path,
+            "Production line resource");
         var bytes = JsonSerializer.SerializeToUtf8Bytes(
             ProductionLineResourceMapper.FromAggregate(scope, definition),
             JsonOptions);
@@ -52,7 +52,6 @@ public sealed class FileSystemProjectProductionLineDefinitionRepository
     {
         ArgumentNullException.ThrowIfNull(scope);
         var path = ProductionLineResourcePath.GetLinePath(scope, definitionId.Value);
-        EnsureResourcePathSafe(scope, path);
         var document = await LoadDocumentAsync(path, cancellationToken).ConfigureAwait(false);
         if (document is null)
         {
@@ -74,21 +73,25 @@ public sealed class FileSystemProjectProductionLineDefinitionRepository
     {
         ArgumentNullException.ThrowIfNull(scope);
         var linesDirectory = ProductionLineResourcePath.GetLinesDirectory(scope);
-        if (!Directory.Exists(linesDirectory))
+        if (!ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+                linesDirectory,
+                "Production lines directory"))
         {
             return [];
         }
 
-        EnsureResourcePathSafe(scope, linesDirectory);
-
         var definitions = new List<ProductionLineDefinition>();
-        foreach (var path in Directory.EnumerateFiles(linesDirectory, "line.json", SearchOption.AllDirectories)
+        foreach (var lineDirectory in Directory.EnumerateDirectories(linesDirectory)
                      .Order(StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            EnsureResourcePathSafe(scope, path);
-            var relativePath = Path.GetRelativePath(linesDirectory, path);
-            if (relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Length != 2)
+            ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+                lineDirectory,
+                "Production line definition directory");
+            var path = Path.Combine(lineDirectory, "line.json");
+            if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    path,
+                    "Production line resource"))
             {
                 continue;
             }
@@ -135,7 +138,9 @@ public sealed class FileSystemProjectProductionLineDefinitionRepository
         string path,
         CancellationToken cancellationToken)
     {
-        if (!File.Exists(path))
+        if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                path,
+                "Production line resource"))
         {
             return null;
         }
@@ -173,13 +178,29 @@ public sealed class FileSystemProjectProductionLineDefinitionRepository
     {
         var directory = Path.GetDirectoryName(path)
             ?? throw new InvalidOperationException($"Production line resource '{path}' has no parent directory.");
-        Directory.CreateDirectory(linesDirectory);
-        var writeLock = WriteLocks.GetOrAdd(linesDirectory, static _ => new SemaphoreSlim(1, 1));
-        await writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+            linesDirectory,
+            "Production lines directory");
+        using var writeLock = await WriteLocks
+            .AcquireAsync(linesDirectory, cancellationToken)
+            .ConfigureAwait(false);
         var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        Exception? operationFailure = null;
+        Exception? cleanupFailure = null;
         try
         {
-            var conflictingDirectory = Directory.EnumerateDirectories(linesDirectory)
+            ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+                linesDirectory,
+                "Production lines directory");
+            var lineDirectories = Directory.EnumerateDirectories(linesDirectory).ToArray();
+            foreach (var candidateDirectory in lineDirectories)
+            {
+                ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+                    candidateDirectory,
+                    "Production line definition directory");
+            }
+
+            var conflictingDirectory = lineDirectories
                 .Select(Path.GetFileName)
                 .FirstOrDefault(candidate =>
                     string.Equals(candidate, lineDefinitionId, StringComparison.OrdinalIgnoreCase)
@@ -190,66 +211,73 @@ public sealed class FileSystemProjectProductionLineDefinitionRepository
                     $"Production line id {lineDefinitionId} conflicts with existing id {conflictingDirectory} ignoring case.");
             }
 
-            Directory.CreateDirectory(directory);
-            if (File.Exists(path)
-                && (await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false))
-                .AsSpan().SequenceEqual(bytes))
+            ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+                directory,
+                "Production line definition directory");
+            var targetExists = ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                path,
+                "Production line resource");
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                temporaryPath,
+                "Temporary production line resource");
+            var writeRequired = !targetExists
+                || !(await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false))
+                .AsSpan().SequenceEqual(bytes);
+            if (writeRequired)
             {
-                return;
-            }
+                await using (var stream = new FileStream(
+                    temporaryPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: 16 * 1024,
+                    useAsync: true))
+                {
+                    await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+                    await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
 
-            await File.WriteAllBytesAsync(temporaryPath, bytes, cancellationToken).ConfigureAwait(false);
-            File.Move(temporaryPath, path, overwrite: true);
+                ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    temporaryPath,
+                    "Temporary production line resource");
+                ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+                    directory,
+                    "Production line definition directory");
+                ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    path,
+                    "Production line resource");
+                File.Move(temporaryPath, path, overwrite: true);
+                if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                        path,
+                        "Production line resource"))
+                {
+                    throw new InvalidDataException(
+                        $"Production line resource '{path}' was not committed as an ordinary file.");
+                }
+            }
         }
-        finally
+        catch (Exception exception)
         {
-            if (File.Exists(temporaryPath))
+            operationFailure = exception;
+        }
+
+        try
+        {
+            if (ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    temporaryPath,
+                    "Temporary production line resource"))
             {
                 File.Delete(temporaryPath);
             }
-
-            writeLock.Release();
         }
-    }
-
-    private static void EnsureResourcePathSafe(
-        ProjectApplicationWorkspaceScope scope,
-        string path)
-    {
-        var root = Path.GetFullPath(scope.ApplicationRootPath)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        RejectReparsePoint(root);
-        var relativePath = Path.GetRelativePath(root, Path.GetFullPath(path));
-        if (Path.IsPathRooted(relativePath)
-            || relativePath.Equals("..", StringComparison.Ordinal)
-            || relativePath.StartsWith(
-                ".." + Path.DirectorySeparatorChar,
-                StringComparison.Ordinal)
-            || relativePath.StartsWith(
-                ".." + Path.AltDirectorySeparatorChar,
-                StringComparison.Ordinal))
+        catch (Exception exception)
         {
-            throw new InvalidDataException(
-                $"Production line resource path '{path}' escapes the portable Application.");
+            cleanupFailure = exception;
         }
 
-        var current = root;
-        foreach (var segment in relativePath.Split(
-                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
-                     StringSplitOptions.RemoveEmptyEntries))
-        {
-            current = Path.Combine(current, segment);
-            RejectReparsePoint(current);
-        }
-    }
-
-    private static void RejectReparsePoint(string path)
-    {
-        if ((Directory.Exists(path) || File.Exists(path))
-            && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-        {
-            throw new InvalidDataException(
-                $"Production line resource path '{path}' cannot be a symbolic link or reparse point.");
-        }
+        ProjectWorkspaceFileOperation.ThrowFailures(
+            "Production line resource commit and temporary-file cleanup both failed.",
+            operationFailure,
+            cleanupFailure);
     }
 }

@@ -451,8 +451,10 @@ async function main() {
     'automation project to reopen after layout edit');
   await clickByTestId('nav-topology');
   await waitForExpression(
-    '(() => document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("S1")'
-    + ' && document.querySelector("[data-testid=\\"topology-canvas\\"]")?.textContent?.includes("System 1"))()',
+    '(() => { const surface = document.querySelector("[data-testid=\\"topology-canvas\\"]")'
+    + ' ?? document.querySelector("[data-testid=\\"topology-3d-viewport\\"]");'
+    + ' return surface?.textContent?.includes("S1")'
+    + ' && surface?.textContent?.includes("System 1"); })()',
     30000,
     'nested Application layout to persist through manifest reopen');
   const layoutResponse = await apiRequest(
@@ -510,7 +512,25 @@ async function main() {
     smokeProjectPath,
     openedProject.projectId,
     openedApplication.applicationId);
+  await exerciseCanceledProjectSwitchAndBackendRestart({
+    projectPath: smokeProjectPath,
+    projectId: openedProject.projectId,
+    applicationId: openedApplication.applicationId,
+    topologyBasePath,
+    targetProjectPath: portableTarget.projectPath,
+    targetProjectId: portableTarget.projectId
+  });
 
+  await clickByTestId('nav-projects');
+  const projectStartCenterVisible = await evaluate(
+    'Boolean(document.querySelector("[data-testid=\\"back-to-project-workspace\\"]"))');
+  if (projectStartCenterVisible) {
+    await clickByTestId('back-to-project-workspace');
+  }
+  await waitForExpression(
+    'Boolean(document.querySelector("[data-testid=\\"new-application-id\\"]"))',
+    15000,
+    'Project overview before creating a secondary Application');
   const secondaryApplicationId = `${openedApplication.applicationId}-secondary`;
   await setInputByTestId('new-application-id', secondaryApplicationId);
   await setInputByTestId('new-application-name', 'Secondary Application');
@@ -2151,7 +2171,20 @@ async function exerciseTopologyDraftLifecycle({
     + ' && document.querySelector("[data-testid=\\"editor-tab-topology\\"]")?.getAttribute("aria-selected") === "true")()',
     15000,
     'runtime operations navigation to trigger the global unsaved guard');
-  await clickByTestId('unsaved-cancel');
+  await cdp.send('Input.dispatchKeyEvent', {
+    type: 'keyDown',
+    key: 'Escape',
+    code: 'Escape',
+    windowsVirtualKeyCode: 27,
+    nativeVirtualKeyCode: 27
+  });
+  await cdp.send('Input.dispatchKeyEvent', {
+    type: 'keyUp',
+    key: 'Escape',
+    code: 'Escape',
+    windowsVirtualKeyCode: 27,
+    nativeVirtualKeyCode: 27
+  });
   await waitForExpression(
     '(() => !document.querySelector("[data-testid=\\"unsaved-changes-dialog\\"]")'
     + ' && document.querySelector("[data-testid=\\"editor-tab-topology\\"]")?.getAttribute("aria-selected") === "true"'
@@ -2674,6 +2707,57 @@ async function clickByTestId(testId) {
     }
     return true;
   })()`);
+}
+
+async function clickVisibleByTestId(testId) {
+  const point = await evaluate(`(() => {
+    const element = document.querySelector('[data-testid="${escapeSelectorValue(testId)}"]');
+    if (!(element instanceof HTMLElement)) {
+      throw new Error('Missing visible element: ${testId}');
+    }
+    if (element instanceof HTMLButtonElement && element.disabled) {
+      throw new Error('Button is disabled: ${testId}');
+    }
+    const rect = element.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      throw new Error('Element has no visible hit target: ${testId}');
+    }
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    if (!(hit === element || (hit instanceof Node && element.contains(hit)))) {
+      throw new Error(
+        'Element is not the top-layer pointer target: ${testId}; hit '
+        + (hit instanceof Element ? hit.outerHTML.slice(0, 200) : String(hit)));
+    }
+    return { x, y };
+  })()`);
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mouseMoved',
+    x: point.x,
+    y: point.y,
+    button: 'none',
+    buttons: 0,
+    pointerType: 'mouse'
+  });
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mousePressed',
+    x: point.x,
+    y: point.y,
+    button: 'left',
+    buttons: 1,
+    clickCount: 1,
+    pointerType: 'mouse'
+  });
+  await cdp.send('Input.dispatchMouseEvent', {
+    type: 'mouseReleased',
+    x: point.x,
+    y: point.y,
+    button: 'left',
+    buttons: 0,
+    clickCount: 1,
+    pointerType: 'mouse'
+  });
 }
 
 async function clickTopologyHierarchyTarget(displayName) {
@@ -3323,6 +3407,234 @@ async function openProjectByPathFromWorkbench(projectPath, projectId, applicatio
     `portable Application project ${projectId} to open`);
 }
 
+async function exerciseCanceledProjectSwitchAndBackendRestart({
+  projectPath,
+  projectId,
+  applicationId,
+  topologyBasePath,
+  targetProjectPath,
+  targetProjectId
+}) {
+  const cancellationSuffix = Date.now().toString(36);
+  const canceledCreateProjectPath = `${projectPath}-canceled-create-${cancellationSuffix}`;
+  const canceledCreateProjectId = `${projectId}-canceled-create-${cancellationSuffix}`;
+  const canceledOpenProjectPath = `${projectPath}-canceled-open-${cancellationSuffix}`;
+  const canceledOpenProjectId = `${projectId}-canceled-open-${cancellationSuffix}`;
+  smokeProjectDirectories.push(canceledCreateProjectPath, canceledOpenProjectPath);
+  await cloneProjectForCanceledOpen(
+    targetProjectPath,
+    canceledOpenProjectPath,
+    canceledOpenProjectId);
+  const projectRegistryBeforeCanceledTransitions = await getProjectRegistrySnapshot();
+  if (projectRegistryBeforeCanceledTransitions.some(project =>
+    project.projectId === canceledOpenProjectId
+    || project.projectPath === canceledOpenProjectPath)) {
+    throw new Error('Canceled-open Project fixture was registered before the guarded Open command.');
+  }
+
+  const draftDisplayName = 'Canceled Project Switch Must Survive';
+  const draftGeometryX = 217;
+  await clickByTestId('nav-topology');
+  await waitForExpression(
+    `(() => document.querySelector('[data-testid="active-application-selector"]')?.value === ${JSON.stringify(applicationId)}`
+      + ' && Boolean(document.querySelector("[data-testid=\\"topology-property-display-name\\"]")))()',
+    30000,
+    'source Project topology before a guarded Project switch');
+  await setInputByTestId('topology-property-display-name', draftDisplayName);
+  await setInputByTestId('layout-geometry-x', String(draftGeometryX));
+  await waitForExpression(
+    'document.querySelector(".topology-save-state")?.textContent?.trim() === "Unsaved (2)"',
+    15000,
+    'source Project topology draft before a guarded Project switch');
+
+  await clickByTestId('nav-projects');
+  await clickByTestId('switch-project-workspace');
+  await waitForExpression(
+    'Boolean(document.querySelector("[data-testid=\\"start-create-project\\"]"))',
+    15000,
+    'start center for a guarded Project switch');
+  await clickByTestId('start-create-project');
+  await waitForExpression(
+    'Boolean(document.querySelector("[data-testid=\\"project-path-input\\"]"))',
+    15000,
+    'create Project dialog for a guarded Project switch');
+  await setInputByFieldLabel(
+    'project-workspace-panel',
+    'Project ID',
+    canceledCreateProjectId);
+  await setInputByTestId('project-path-input', canceledCreateProjectPath);
+  await clickByTestId('create-project-workspace');
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"unsaved-changes-dialog\\"]")'
+      + '?.textContent?.includes("Open another project?")'
+      + ' && document.querySelector("[data-testid=\\"unsaved-changes-dialog\\"]")'
+      + '?.textContent?.includes("2D Layout")'
+      + ' && document.querySelector("[data-testid=\\"unsaved-changes-dialog\\"]")'
+      + '?.matches(":modal"))()',
+    30000,
+    'Project creation to wait on an interactive global unsaved editor guard');
+  if (await fs.stat(canceledCreateProjectPath).catch(() => null)) {
+    throw new Error('Canceled guarded Project creation wrote its target before user approval.');
+  }
+  await assertProjectRegistryUnchanged(
+    projectRegistryBeforeCanceledTransitions,
+    'guarded Project creation before Cancel');
+  await clickByTestId('unsaved-cancel');
+  await waitForExpression(
+    '(() => !document.querySelector("[data-testid=\\"unsaved-changes-dialog\\"]")'
+      + ' && document.body.innerText.includes("Action canceled. Unsaved editor changes remain."))()',
+    15000,
+    'canceling Project creation without a backend or filesystem side effect');
+  if (await fs.stat(canceledCreateProjectPath).catch(() => null)) {
+    throw new Error('Canceled guarded Project creation left a Project directory on disk.');
+  }
+  await assertProjectRegistryUnchanged(
+    projectRegistryBeforeCanceledTransitions,
+    'guarded Project creation after Cancel');
+  await clickByTestId('cancel-project-start-dialog');
+
+  await clickByTestId('start-open-project-by-path');
+  await waitForExpression(
+    'Boolean(document.querySelector("[data-testid=\\"open-project-path-input\\"]"))',
+    15000,
+    'open Project dialog for a guarded Project switch');
+  await setInputByTestId('open-project-path-input', canceledOpenProjectPath);
+  await clickByTestId('open-project-workspace');
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"unsaved-changes-dialog\\"]")'
+      + '?.textContent?.includes("Open another project?")'
+      + ' && document.querySelector("[data-testid=\\"unsaved-changes-dialog\\"]")'
+      + '?.textContent?.includes("2D Layout")'
+      + ' && document.querySelector("[data-testid=\\"unsaved-changes-dialog\\"]")'
+      + '?.matches(":modal"))()',
+    30000,
+    'Project open to wait on an interactive global unsaved editor guard');
+  await assertProjectRegistryUnchanged(
+    projectRegistryBeforeCanceledTransitions,
+    'guarded Project open before Cancel');
+  await clickVisibleByTestId('unsaved-cancel');
+  await waitForExpression(
+    '(() => !document.querySelector("[data-testid=\\"unsaved-changes-dialog\\"]")'
+      + ' && document.body.innerText.includes("Action canceled. Unsaved editor changes remain."))()',
+    15000,
+    'canceling Project open without registering its target');
+  await assertProjectRegistryUnchanged(
+    projectRegistryBeforeCanceledTransitions,
+    'guarded Project open after Cancel');
+  await expectApiStatus(
+    `/api/automation-projects/${encodeURIComponent(canceledOpenProjectId)}`,
+    {},
+    404,
+    'canceled Open target not registered in backend');
+  await clickByTestId('cancel-project-start-dialog');
+  await clickByTestId('nav-topology');
+  await waitForExpression(
+    `(() => document.querySelector('[data-testid="topology-property-display-name"]')?.value === ${JSON.stringify(draftDisplayName)}`
+      + ` && Number(document.querySelector('[data-testid="layout-geometry-x"]')?.value) === ${draftGeometryX}`
+      + ` && document.querySelector('.ide-project-root small')?.textContent?.trim() === ${JSON.stringify(projectId)})()`,
+    15000,
+    'source Project and its unsaved draft to remain active after cancel');
+
+  const originalBackendConfig = await evaluate('window.openlineopsDesktop.getConfig()');
+  const stopped = await evaluate('window.openlineopsDesktop.stopBackend()');
+  if (stopped.isRunning || stopped.pid !== null || stopped.apiBaseUrl !== null) {
+    throw new Error(`Backend did not stop after canceled Project switch: ${JSON.stringify(stopped)}`);
+  }
+  await waitForExpression(
+    '(() => document.querySelector("[data-testid=\\"start-backend\\"]")?.disabled === false'
+      + ' && document.querySelector(".ide-health-label")?.textContent?.includes("Unreachable"))()',
+    20000,
+    'renderer to observe backend stop after canceled Project switch');
+  const started = await evaluate('window.openlineopsDesktop.startBackend()');
+  if (!started.isRunning || !Number.isSafeInteger(started.pid) || started.pid <= 0) {
+    throw new Error(`Backend did not restart after canceled Project switch: ${JSON.stringify(started)}`);
+  }
+  await waitForHealthyBackend();
+  await waitForExpression(
+    'document.querySelector(".rail-footer .status-pill")?.textContent?.trim() === "Connected"',
+    30000,
+    'Runtime Hub to reconnect after the guarded Project-session restart');
+  const restartedBackendConfig = await evaluate('window.openlineopsDesktop.getConfig()');
+  if (restartedBackendConfig.apiAccessToken === originalBackendConfig.apiAccessToken) {
+    throw new Error('Backend restart did not rotate the guarded Project session credential.');
+  }
+
+  await expectApiStatus(
+    topologyBasePath,
+    {},
+    200,
+    'source Project topology rehydrated after canceled switch and backend restart');
+  await expectApiStatus(
+    `/api/automation-projects/${encodeURIComponent(targetProjectId)}`,
+    {},
+    404,
+    'canceled target Project not rebound during backend restart');
+  await expectApiStatus(
+    `/api/automation-projects/${encodeURIComponent(canceledOpenProjectId)}`,
+    {},
+    404,
+    'canceled Open target not rebound during backend restart');
+  await waitForExpression(
+    `(() => document.querySelector('[data-testid="topology-property-display-name"]')?.value === ${JSON.stringify(draftDisplayName)}`
+      + ` && Number(document.querySelector('[data-testid="layout-geometry-x"]')?.value) === ${draftGeometryX}`
+      + ' && document.querySelector(".topology-save-state")?.textContent?.trim() === "Unsaved (2)")()',
+    15000,
+    'unsaved semantic and geometry Project drafts to survive backend restart');
+  await clickByTestId('discard-topology-drafts');
+  await waitForExpression(
+    'document.querySelector(".topology-save-state")?.textContent?.trim() === "Saved"',
+    30000,
+    'guarded Project-switch draft to discard after session recovery');
+
+  const project = await getAutomationProjectByPath(projectPath);
+  if (project.projectId !== projectId) {
+    throw new Error(
+      `Backend restart rebound the wrong Project after cancel: ${JSON.stringify(project)}`);
+  }
+}
+
+async function cloneProjectForCanceledOpen(sourceProjectPath, targetProjectPath, projectId) {
+  await fs.cp(sourceProjectPath, targetProjectPath, { recursive: true });
+  const rootEntries = await fs.readdir(targetProjectPath, { withFileTypes: true });
+  const projectFile = rootEntries.find(entry =>
+    entry.isFile() && entry.name.endsWith('.oloproj'));
+  if (!projectFile) {
+    throw new Error(`Canceled-open source has no .oloproj: ${sourceProjectPath}`);
+  }
+
+  const projectFilePath = path.join(targetProjectPath, projectFile.name);
+  const document = JSON.parse(await fs.readFile(projectFilePath, 'utf8'));
+  document.projectId = projectId;
+  document.displayName = 'Canceled Open Project';
+  document.updatedAtUtc = new Date().toISOString();
+  await fs.writeFile(projectFilePath, `${JSON.stringify(document, null, 2)}\n`, 'utf8');
+}
+
+async function getProjectRegistrySnapshot() {
+  const response = await apiRequest('/api/automation-projects');
+  if (response.status !== 200 || !Array.isArray(response.body)) {
+    throw new Error(`Project registry query failed: ${response.status} ${response.text}`);
+  }
+
+  return response.body
+    .map(project => ({
+      projectId: project.projectId,
+      projectPath: project.projectPath
+    }))
+    .sort((left, right) =>
+      `${left.projectId}\0${left.projectPath}`.localeCompare(
+        `${right.projectId}\0${right.projectPath}`));
+}
+
+async function assertProjectRegistryUnchanged(expected, description) {
+  const actual = await getProjectRegistrySnapshot();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(
+      `${description} changed backend Project registration: `
+      + `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  }
+}
+
 async function fingerprintDirectory(directory) {
   const hash = createHash('sha256');
 
@@ -3487,7 +3799,7 @@ async function apiRequest(path, options = {}) {
 async function assertProjectFileLayout(projectPath, expectedApplicationCount) {
   const rootEntries = await fs.readdir(projectPath, { withFileTypes: true });
   const projectFiles = rootEntries.filter(entry =>
-    entry.isFile() && entry.name.toLowerCase().endsWith('.oloproj'));
+    entry.isFile() && entry.name.endsWith('.oloproj'));
   if (projectFiles.length !== 1) {
     throw new Error(
       `Expected one .oloproj in ${projectPath}, found ${projectFiles.map(entry => entry.name).join(', ')}`);
@@ -3500,7 +3812,7 @@ async function assertProjectFileLayout(projectPath, expectedApplicationCount) {
   for (const directory of applicationDirectories) {
     const entries = await fs.readdir(path.join(applicationsPath, directory.name), { withFileTypes: true });
     applicationFileCount += entries.filter(entry =>
-      entry.isFile() && entry.name.toLowerCase().endsWith('.oloapp')).length;
+      entry.isFile() && entry.name.endsWith('.oloapp')).length;
   }
 
   if (applicationFileCount !== expectedApplicationCount) {

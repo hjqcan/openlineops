@@ -551,6 +551,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                         lastOfflineOutboxKinds = await ReadAllPendingOutboxKindsAsync(
                             sqlitePath);
                         offlinePendingOutboxCount = lastOfflineOutboxKinds.Count;
+                        if (persistedOffline?.Job.Status is StationJobStatus.RecoveryRequired)
+                        {
+                            throw new InvalidDataException(
+                                "The staged Agent vendor job requires recovery after runtime isolation cleanup: "
+                                + persistedOffline.Job.FailureReason);
+                        }
+
                         if (persistedOffline?.Job.Status is StationJobStatus.Failed
                                 or StationJobStatus.TimedOut
                                 or StationJobStatus.Canceled

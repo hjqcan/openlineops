@@ -38,6 +38,7 @@ public sealed class ProjectApplicationWorkspaceScopeTests : IDisposable
     [InlineData("applications\\Main\\Main.oloapp")]
     [InlineData("C:/applications/Main/Main.oloapp")]
     [InlineData("applications/Main/Main.json")]
+    [InlineData("applications/Main/Main.OLOAPP")]
     [InlineData("applications/Nested/Deeper/Main.oloapp")]
     [InlineData("Main.oloapp")]
     [InlineData("applications//Main.oloapp")]
@@ -143,6 +144,28 @@ public sealed class ProjectApplicationWorkspaceScopeTests : IDisposable
         finally
         {
             Directory.Delete(applicationsPath);
+        }
+    }
+
+    [Fact]
+    public void ScopeRejectsReparsePointAboveProjectDirectory()
+    {
+        var realAncestor = Path.Combine(_testRoot, "real-ancestor");
+        var linkedAncestor = Path.Combine(_testRoot, "linked-ancestor");
+        Directory.CreateDirectory(realAncestor);
+        CreateDirectoryReparsePoint(linkedAncestor, realAncestor);
+
+        try
+        {
+            Assert.Throws<InvalidDataException>(() => new ProjectApplicationWorkspaceScope(
+                "project.main",
+                "application.main",
+                Path.Combine(linkedAncestor, "project"),
+                "applications/Main/Main.oloapp"));
+        }
+        finally
+        {
+            Directory.Delete(linkedAncestor);
         }
     }
 

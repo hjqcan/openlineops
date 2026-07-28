@@ -1,14 +1,13 @@
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 
 namespace OpenLineOps.Processes.Infrastructure.Persistence;
 
 internal static class ProjectProcessResourceFileStore
 {
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> WriteLocks =
-        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ProjectWorkspaceWriteLockPool WriteLocks = new();
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -40,7 +39,9 @@ internal static class ProjectProcessResourceFileStore
         string path,
         CancellationToken cancellationToken)
     {
-        if (!File.Exists(path))
+        if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                path,
+                "Project process resource"))
         {
             return default;
         }
@@ -97,7 +98,9 @@ internal static class ProjectProcessResourceFileStore
                 "Expected exactly 64 lowercase hexadecimal characters.");
         }
 
-        if (!File.Exists(path))
+        if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                path,
+                "Project process artifact"))
         {
             throw new InvalidDataException($"Project process artifact '{path}' was not found.");
         }
@@ -132,15 +135,29 @@ internal static class ProjectProcessResourceFileStore
     {
         var directory = Path.GetDirectoryName(path)
             ?? throw new InvalidOperationException($"Resource path '{path}' has no parent directory.");
-        Directory.CreateDirectory(directory);
+        ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+            directory,
+            "Project process resource directory");
 
-        var writeLock = WriteLocks.GetOrAdd(path, static _ => new SemaphoreSlim(1, 1));
-        await writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var writeLock = await WriteLocks.AcquireAsync(path, cancellationToken).ConfigureAwait(false);
         var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        Exception? operationFailure = null;
+        Exception? cleanupFailure = null;
 
         try
         {
-            if (!overwrite && File.Exists(path))
+            ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+                directory,
+                "Project process resource directory");
+            var targetExists = ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                path,
+                "Project process resource");
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                temporaryPath,
+                "Temporary project process resource");
+
+            var writeRequired = true;
+            if (!overwrite && targetExists)
             {
                 var existingBytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
                 if (!existingBytes.AsSpan().SequenceEqual(bytes))
@@ -149,39 +166,74 @@ internal static class ProjectProcessResourceFileStore
                         $"Content-addressed artifact '{path}' already exists with different content.");
                 }
 
-                return;
+                writeRequired = false;
             }
 
-            await using (var stream = new FileStream(
-                temporaryPath,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                bufferSize: 16 * 1024,
-                useAsync: true))
+            if (writeRequired)
             {
-                await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
-                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
-            }
+                await using (var stream = new FileStream(
+                    temporaryPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: 16 * 1024,
+                    useAsync: true))
+                {
+                    await stream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+                    await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
 
-            if (overwrite && File.Exists(path))
-            {
-                // File.Replace preserves a continuously addressable commit pointer for concurrent readers.
-                File.Replace(temporaryPath, path, destinationBackupFileName: null);
-            }
-            else
-            {
-                File.Move(temporaryPath, path, overwrite: false);
+                ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    temporaryPath,
+                    "Temporary project process resource");
+                ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+                    directory,
+                    "Project process resource directory");
+                targetExists = ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    path,
+                    "Project process resource");
+
+                if (overwrite && targetExists)
+                {
+                    // File.Replace preserves a continuously addressable commit pointer for concurrent readers.
+                    File.Replace(temporaryPath, path, destinationBackupFileName: null);
+                }
+                else
+                {
+                    File.Move(temporaryPath, path, overwrite: false);
+                }
+
+                if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                        path,
+                        "Project process resource"))
+                {
+                    throw new InvalidDataException(
+                        $"Project process resource '{path}' was not committed as an ordinary file.");
+                }
             }
         }
-        finally
+        catch (Exception exception)
         {
-            if (File.Exists(temporaryPath))
+            operationFailure = exception;
+        }
+
+        try
+        {
+            if (ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    temporaryPath,
+                    "Temporary project process resource"))
             {
                 File.Delete(temporaryPath);
             }
-
-            writeLock.Release();
         }
+        catch (Exception exception)
+        {
+            cleanupFailure = exception;
+        }
+
+        ProjectWorkspaceFileOperation.ThrowFailures(
+            "Project process resource commit and temporary-file cleanup both failed.",
+            operationFailure,
+            cleanupFailure);
     }
 }

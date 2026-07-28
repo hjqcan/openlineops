@@ -139,6 +139,7 @@ foreach ($expectedStageBoundary in @(
         "Signed release staging requires exactly one certificate-store selector",
         "Sparse or incomplete checkouts cannot be published",
         "traverses a reparse point and cannot be archived",
+        "Source staging path set does not exactly match the non-sensitive Git index",
         "-SourceProvenance `$sourceGitProvenance")) {
     if ($stageText -cnotmatch [regex]::Escape($expectedStageBoundary)) {
         throw "Release staging is missing required source boundary '$expectedStageBoundary'."
@@ -605,17 +606,29 @@ $trackedCopyDestination = Join-Path $resolvedWorkRoot "tracked-copy-output"
 New-Item -ItemType Directory -Path $trackedCopyRepo -Force | Out-Null
 Invoke-Git -WorkingDirectory $trackedCopyRepo -Arguments @("init", "--quiet")
 $trackedPath = Join-Path $trackedCopyRepo "src/tracked.txt"
+$trackedDataPath = Join-Path $trackedCopyRepo "lib/Example/Data/IRepository.cs"
+$trackedArtifactsPath = Join-Path $trackedCopyRepo "modules/Trace/Artifacts/ITraceArtifactStorage.cs"
 $untrackedPath = Join-Path $trackedCopyRepo "src/untracked-secret.txt"
 $sensitiveTrackedPath = Join-Path $trackedCopyRepo "certs/release-signing.pfx"
 New-Item -ItemType Directory -Path (Split-Path $trackedPath -Parent) -Force | Out-Null
+New-Item -ItemType Directory -Path (Split-Path $trackedDataPath -Parent) -Force | Out-Null
+New-Item -ItemType Directory -Path (Split-Path $trackedArtifactsPath -Parent) -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path $sensitiveTrackedPath -Parent) -Force | Out-Null
 [System.IO.File]::WriteAllText($trackedPath, "indexed-content", [System.Text.UTF8Encoding]::new($false))
+[System.IO.File]::WriteAllText($trackedDataPath, "tracked-data-source", [System.Text.UTF8Encoding]::new($false))
+[System.IO.File]::WriteAllText($trackedArtifactsPath, "tracked-artifact-source", [System.Text.UTF8Encoding]::new($false))
 [System.IO.File]::WriteAllText($sensitiveTrackedPath, "not-a-real-certificate", [System.Text.UTF8Encoding]::new($false))
-Invoke-Git -WorkingDirectory $trackedCopyRepo -Arguments @("add", "src/tracked.txt", "certs/release-signing.pfx")
+Invoke-Git -WorkingDirectory $trackedCopyRepo -Arguments @(
+    "add",
+    "src/tracked.txt",
+    "lib/Example/Data/IRepository.cs",
+    "modules/Trace/Artifacts/ITraceArtifactStorage.cs",
+    "certs/release-signing.pfx")
 [System.IO.File]::WriteAllText($trackedPath, "tracked-working-tree-content", [System.Text.UTF8Encoding]::new($false))
 [System.IO.File]::WriteAllText($untrackedPath, "must-never-ship", [System.Text.UTF8Encoding]::new($false))
 
 $copyFunctions = @(
+    (Get-FunctionDefinition -Ast $stageAst -Name "Get-RelativePathUnderDirectory").Extent.Text,
     (Get-FunctionDefinition -Ast $stageAst -Name "Test-IsSensitiveSourcePath").Extent.Text,
     (Get-FunctionDefinition -Ast $stageAst -Name "Test-IsExcludedSourcePath").Extent.Text,
     (Get-FunctionDefinition -Ast $stageAst -Name "Copy-SourceArchiveContent").Extent.Text
@@ -630,6 +643,14 @@ $copiedTrackedPath = Join-Path $trackedCopyDestination "src/tracked.txt"
 if (-not (Test-Path -LiteralPath $copiedTrackedPath -PathType Leaf) `
     -or (Get-Content -LiteralPath $copiedTrackedPath -Raw) -cne "tracked-working-tree-content") {
     throw "Tracked source copy did not preserve the current tracked working-tree file."
+}
+if (-not (Test-Path -LiteralPath (Join-Path $trackedCopyDestination "lib/Example/Data/IRepository.cs") -PathType Leaf) `
+    -or (Get-Content -LiteralPath (Join-Path $trackedCopyDestination "lib/Example/Data/IRepository.cs") -Raw) -cne "tracked-data-source") {
+    throw "Tracked source copy excluded a legitimate nested Data source directory."
+}
+if (-not (Test-Path -LiteralPath (Join-Path $trackedCopyDestination "modules/Trace/Artifacts/ITraceArtifactStorage.cs") -PathType Leaf) `
+    -or (Get-Content -LiteralPath (Join-Path $trackedCopyDestination "modules/Trace/Artifacts/ITraceArtifactStorage.cs") -Raw) -cne "tracked-artifact-source") {
+    throw "Tracked source copy excluded a legitimate nested Artifacts source directory."
 }
 if (Test-Path -LiteralPath (Join-Path $trackedCopyDestination "src/untracked-secret.txt")) {
     throw "Untracked content entered the source staging tree."
@@ -803,7 +824,7 @@ finally {
 }
 
 Write-Host "Release staging security verification passed."
-Write-Host " - Source staging copied only Git-index tracked paths and excluded an untracked sentinel."
+Write-Host " - Source staging exactly preserved non-sensitive Git-index paths, including nested Data and Artifacts source namespaces, and excluded an untracked sentinel."
 Write-Host " - Final publication rejected dirty Git state and bound staging to a full commit."
 Write-Host " - Formal file/password signing parameters are absent and command logs redact secret-shaped arguments."
 Write-Host " - Staged Agent RabbitMQ verification has a finite timeout and behavior-verified taskkill process-tree cleanup."

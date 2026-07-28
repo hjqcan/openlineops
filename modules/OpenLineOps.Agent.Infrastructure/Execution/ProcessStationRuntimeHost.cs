@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
@@ -57,16 +58,39 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
     private readonly string _hostPythonRuntimeDllPath;
     private readonly StationRuntimePythonScriptSandboxOptions _pythonScriptSandbox;
     private readonly IStationResourceFenceValidator _resourceFenceValidator;
+    private readonly Func<string, bool> _deleteAppContainerProfile;
+    private readonly Func<TimeSpan, CancellationToken, ValueTask> _retryDelay;
 
     public ProcessStationRuntimeHost(
         ProcessStationRuntimeHostOptions options,
         IStationResourceFenceValidator resourceFenceValidator,
         IsolatedProcessLauncher? processLauncher = null,
         IClock? clock = null)
+        : this(
+            options,
+            resourceFenceValidator,
+            processLauncher,
+            clock,
+            WindowsAppContainerIdentity.DeleteProfile,
+            static (delay, cancellationToken) =>
+                new ValueTask(Task.Delay(delay, cancellationToken)))
+    {
+    }
+
+    internal ProcessStationRuntimeHost(
+        ProcessStationRuntimeHostOptions options,
+        IStationResourceFenceValidator resourceFenceValidator,
+        IsolatedProcessLauncher? processLauncher,
+        IClock? clock,
+        Func<string, bool> deleteAppContainerProfile,
+        Func<TimeSpan, CancellationToken, ValueTask> retryDelay)
     {
         ArgumentNullException.ThrowIfNull(options);
         _resourceFenceValidator = resourceFenceValidator
             ?? throw new ArgumentNullException(nameof(resourceFenceValidator));
+        _deleteAppContainerProfile = deleteAppContainerProfile
+            ?? throw new ArgumentNullException(nameof(deleteAppContainerProfile));
+        _retryDelay = retryDelay ?? throw new ArgumentNullException(nameof(retryDelay));
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ExecutablePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.PluginHostExecutablePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.WorkingDirectoryRoot);
@@ -461,20 +485,23 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         ArgumentNullException.ThrowIfNull(job);
         cancellationToken.ThrowIfCancellationRequested();
         var failures = new List<Exception>();
-        try
+        foreach (var workDirectory in ResolveJobWorkingDirectories(job.JobId))
         {
-            foreach (var workDirectory in ResolveJobWorkingDirectories(job.JobId))
+            try
             {
                 await DeleteWorkingDirectoryAsync(workDirectory, cancellationToken)
                     .ConfigureAwait(false);
             }
-        }
-        catch (Exception exception) when (exception is IOException
-                                          or UnauthorizedAccessException
-                                          or InvalidDataException
-                                          or InvalidOperationException)
-        {
-            failures.Add(exception);
+            catch (Exception exception) when (exception is IOException
+                                              or UnauthorizedAccessException
+                                              or InvalidDataException
+                                              or InvalidOperationException)
+            {
+                failures.Add(CreateIsolationCleanupFailure(
+                    "working-directory",
+                    Path.GetFileName(workDirectory),
+                    exception));
+            }
         }
 
         var profileName = ResolveAppContainerProfileName(job);
@@ -482,23 +509,91 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         {
             try
             {
-                _ = WindowsAppContainerIdentity.DeleteProfile(profileName);
+                await DeleteAppContainerProfileWithRetryAsync(profileName, cancellationToken)
+                    .ConfigureAwait(false);
             }
-            catch (Exception exception) when (exception is Win32Exception
+            catch (Exception exception) when (exception is IOException
+                                              or Win32Exception
                                               or ArgumentException
                                               or InvalidOperationException)
             {
-                failures.Add(exception);
+                failures.Add(CreateIsolationCleanupFailure(
+                    "app-container-profile",
+                    profileName,
+                    exception));
             }
         }
 
         if (failures.Count > 0)
         {
             throw new StationRuntimeIsolationCleanupException(
-                $"Could not clean Station runtime isolation for Job {job.JobId}.",
+                $"Could not clean Station runtime isolation for Job {job.JobId}. "
+                + string.Join(" | ", failures.Select(static failure => failure.Message)),
                 failures.Count == 1 ? failures[0] : new AggregateException(failures));
         }
 
+    }
+
+    private static IOException CreateIsolationCleanupFailure(
+        string stage,
+        string target,
+        Exception exception)
+    {
+        var nativeErrorCode = EnumerateExceptionChain(exception)
+            .OfType<Win32Exception>()
+            .Select(static failure => failure.NativeErrorCode)
+            .Cast<int?>()
+            .FirstOrDefault();
+        return new IOException(
+            $"Station runtime isolation cleanup stage={stage}; target={target}; "
+            + $"exception={exception.GetType().Name}; hresult=0x{exception.HResult:X8}; "
+            + $"nativeErrorCode={nativeErrorCode?.ToString(CultureInfo.InvariantCulture) ?? "none"}.",
+            exception);
+    }
+
+    private static IEnumerable<Exception> EnumerateExceptionChain(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            yield return current;
+        }
+    }
+
+    private async ValueTask DeleteAppContainerProfileWithRetryAsync(
+        string profileName,
+        CancellationToken cancellationToken)
+    {
+        const int maximumAttempts = 24;
+        var retryDelay = TimeSpan.FromMilliseconds(50);
+        Win32Exception? lastError = null;
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                _ = _deleteAppContainerProfile(profileName);
+                return;
+            }
+            catch (Win32Exception exception)
+            {
+                lastError = exception;
+                if (attempt == maximumAttempts)
+                {
+                    break;
+                }
+
+                await _retryDelay(retryDelay, cancellationToken).ConfigureAwait(false);
+                retryDelay = TimeSpan.FromMilliseconds(Math.Min(
+                    retryDelay.TotalMilliseconds * 2,
+                    250));
+            }
+        }
+
+        throw new IOException(
+            $"Could not delete Station runtime AppContainer profile '{profileName}' "
+            + $"after {maximumAttempts} bounded attempts. "
+            + $"Last Win32 error: {lastError?.NativeErrorCode}.",
+            lastError);
     }
 
     private string[] ResolveJobWorkingDirectories(StationJobId jobId)

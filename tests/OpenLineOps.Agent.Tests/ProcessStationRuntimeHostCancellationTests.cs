@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using OpenLineOps.Agent.Application.StationJobs;
@@ -5,6 +6,7 @@ using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Agent.Infrastructure.Execution;
 using OpenLineOps.Agent.Infrastructure.Persistence;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.StationRuntime.TestHelper;
@@ -427,9 +429,160 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
         Assert.False(Directory.Exists(workDirectory));
     }
 
+    [Fact]
+    public async Task CleanupRetriesTransientAppContainerProfileDeletion()
+    {
+        var attempts = 0;
+        var delays = new List<TimeSpan>();
+        var host = CreateHost(
+            TimeSpan.FromSeconds(30),
+            "OpenLineOps.AgentCleanupRetryTests",
+            _ =>
+            {
+                attempts++;
+                if (attempts < 3)
+                {
+                    throw new Win32Exception(32, "Synthetic profile storage handle.");
+                }
+
+                return true;
+            },
+            (delay, _) =>
+            {
+                delays.Add(delay);
+                return ValueTask.CompletedTask;
+            });
+
+        await host.CleanupAsync(
+            CreateRunningJob(Path.Combine(_root, "unused-profile-retry.pid")).ToSnapshot());
+
+        Assert.Equal(3, attempts);
+        Assert.Equal(
+            [TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(100)],
+            delays);
+    }
+
+    [Fact]
+    public async Task CleanupReportsPersistentAppContainerProfileDeletionFailure()
+    {
+        var attempts = 0;
+        var host = CreateHost(
+            TimeSpan.FromSeconds(30),
+            "OpenLineOps.AgentCleanupFailureTests",
+            _ =>
+            {
+                attempts++;
+                throw new Win32Exception(5, "Synthetic persistent profile failure.");
+            },
+            static (_, _) => ValueTask.CompletedTask);
+
+        var exception = await Assert.ThrowsAsync<StationRuntimeIsolationCleanupException>(
+            async () => await host.CleanupAsync(
+                CreateRunningJob(Path.Combine(_root, "unused-profile-failure.pid")).ToSnapshot()));
+
+        Assert.Equal(24, attempts);
+        var failure = Assert.IsType<IOException>(exception.InnerException);
+        Assert.Contains("stage=app-container-profile", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("nativeErrorCode=5", failure.Message, StringComparison.Ordinal);
+        var deletionFailure = Assert.IsType<IOException>(failure.InnerException);
+        Assert.Contains(
+            "after 24 bounded attempts",
+            deletionFailure.Message,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            5,
+            Assert.IsType<Win32Exception>(deletionFailure.InnerException).NativeErrorCode);
+    }
+
+    [Fact]
+    public async Task CleanupRemovesRealProfileWithoutAffectingUnrelatedState()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string profileNamespace = "OpenLineOps.AgentProfileReleaseRace";
+        var job = CreateRunningJob(Path.Combine(_root, "unused-profile-release-race.pid"));
+        var profileName = StationRuntimeIsolationProfile.CreateName(
+            profileNamespace,
+            job.AgentId,
+            job.StationId,
+            job.Id);
+        var unrelatedProfileName = StationRuntimeIsolationProfile.CreateName(
+            profileNamespace,
+            "agent-unrelated",
+            job.StationId,
+            job.Id);
+        var appContainerSid = WindowsAppContainerIdentity.EnsureProfile(profileName);
+        _ = WindowsAppContainerIdentity.EnsureProfile(unrelatedProfileName);
+        var workspace = Path.Combine(_root, "profile-release-race-workspace");
+        var unrelatedWorkspace = Path.Combine(_root, "profile-release-race-unrelated");
+        Directory.CreateDirectory(workspace);
+        Directory.CreateDirectory(unrelatedWorkspace);
+        await File.WriteAllTextAsync(
+            Path.Combine(unrelatedWorkspace, "must-remain.txt"),
+            "unrelated");
+        WindowsContentAccessAuthorizer.GrantWorkspaceModify(workspace, appContainerSid);
+        var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SystemRoot"] = Environment.GetEnvironmentVariable("SystemRoot")!,
+            ["WINDIR"] = Environment.GetEnvironmentVariable("WINDIR")!,
+            ["PATH"] = Environment.GetEnvironmentVariable("PATH")!,
+            ["LOCALAPPDATA"] = Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            ["TEMP"] = workspace,
+            ["TMP"] = workspace
+        };
+        using var launched = new WindowsProcessLauncher().Launch(
+            new IsolatedProcessStartRequest(
+                Path.Combine(Environment.SystemDirectory, "ping.exe"),
+                ["-t", "127.0.0.1"],
+                workspace,
+                environment,
+                new WindowsProcessLimits(
+                    ActiveProcessLimit: 2,
+                    ProcessMemoryLimitBytes: 128L * 1024 * 1024,
+                    JobMemoryLimitBytes: 256L * 1024 * 1024,
+                    CpuTimeLimit: TimeSpan.FromMinutes(2)),
+                new WindowsAppContainerPolicy(profileName, NetworkAccessAllowed: false)));
+        launched.StandardInput.Dispose();
+        try
+        {
+            Assert.True(launched.ActiveProcessCount > 0);
+            var host = CreateHost(
+                TimeSpan.FromSeconds(30),
+                profileNamespace,
+                WindowsAppContainerIdentity.DeleteProfile,
+                async (delay, cancellationToken) =>
+                {
+                    launched.TerminateProcessTree();
+                    await launched.WaitForExitAsync(cancellationToken);
+                    await Task.Delay(delay, cancellationToken);
+                });
+
+            await host.CleanupAsync(job.ToSnapshot());
+
+            Assert.False(WindowsAppContainerIdentity.ProfileExists(profileName));
+            Assert.True(WindowsAppContainerIdentity.ProfileExists(unrelatedProfileName));
+            Assert.True(File.Exists(
+                Path.Combine(unrelatedWorkspace, "must-remain.txt")));
+        }
+        finally
+        {
+            launched.TerminateProcessTree();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await launched.WaitForExitAsync(timeout.Token);
+            _ = WindowsAppContainerIdentity.DeleteProfile(profileName);
+            _ = WindowsAppContainerIdentity.DeleteProfile(unrelatedProfileName);
+        }
+    }
+
     private ProcessStationRuntimeHost CreateHost(
         TimeSpan timeout,
-        string? appContainerProfileNamespace = null)
+        string? appContainerProfileNamespace = null,
+        Func<string, bool>? deleteAppContainerProfile = null,
+        Func<TimeSpan, CancellationToken, ValueTask>? retryDelay = null)
     {
         Directory.CreateDirectory(_root);
         var helperAssembly = typeof(StationRuntimeTestHelperMarker).Assembly.Location;
@@ -448,7 +601,12 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
                     appContainerProfileNamespace,
                 PythonScript: PythonScriptOptions()),
             new AcceptingFenceValidator(),
-            clock: new FixedClock(Now));
+            processLauncher: null,
+            clock: new FixedClock(Now),
+            deleteAppContainerProfile:
+                deleteAppContainerProfile ?? WindowsAppContainerIdentity.DeleteProfile,
+            retryDelay: retryDelay ?? (static (delay, cancellationToken) =>
+                new ValueTask(Task.Delay(delay, cancellationToken))));
     }
 
     private ProcessStationRuntimeHostOptions ConstructorOptions(

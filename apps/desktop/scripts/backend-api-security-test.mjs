@@ -252,6 +252,7 @@ test('main process applies navigation, window-open, redirect, and every IPC send
     'desktop:select-directory',
     'desktop:select-external-program-directory',
     'desktop:select-project-file',
+    'desktop:set-active-project-file',
     'trace:save-artifact'
   ];
   const registrations = [

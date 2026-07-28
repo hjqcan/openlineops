@@ -197,6 +197,13 @@ or occupancy binds a Production Unit or Carrier.
 
 - All paths stored in editable documents are normalized Application-relative
   paths.
+- The selected Project root, its `.oloproj` file, and every existing parent up
+  to the filesystem root must be ordinary paths. A Project under a symbolic
+  link, junction, mount-point reparse path, or other redirected parent is
+  rejected before any missing directory is created; place editable Projects in
+  an ordinary local directory.
+- `.oloproj` and `.oloapp` extensions use their exact canonical lowercase
+  spelling. Case aliases are rejected by Studio, the backend, and Runner.
 - Absolute paths, `..` traversal, reparse-point escape, ambiguous casing, and
   writes outside the selected Application are rejected.
 - Resource ids and document paths are case-sensitive domain values even on a

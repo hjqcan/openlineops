@@ -192,6 +192,17 @@ public sealed class AutomationProjectTests
         Assert.Equal("Projects.ApplicationNameAlreadyExists", result.Code);
     }
 
+    [Fact]
+    public void ProjectApplicationRejectsUppercaseProjectFileExtension()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => ProjectApplication.Create(
+            new ProjectApplicationId("application.main"),
+            "Station Application",
+            "applications/application.main/application.main.OLOAPP"));
+
+        Assert.Contains(".oloapp", exception.Message, StringComparison.Ordinal);
+    }
+
     private static AutomationProject CreateProjectWithApplication(out ProjectApplicationId applicationId)
     {
         var project = AutomationProject.Create(

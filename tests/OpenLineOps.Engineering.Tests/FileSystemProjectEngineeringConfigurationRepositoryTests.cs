@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
@@ -343,6 +344,45 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
             configuration);
     }
 
+    [Fact]
+    public async Task SaveRejectsConfigurationDirectoryReparsePointWithoutWritingOutsideApplication()
+    {
+        var scope = Scope("application.reparse", _projectDirectory);
+        Directory.CreateDirectory(scope.ApplicationRootPath);
+        var outsideDirectory = Path.Combine(_projectDirectory, "outside-configuration");
+        Directory.CreateDirectory(outsideDirectory);
+        var sentinelPath = Path.Combine(outsideDirectory, "sentinel.txt");
+        await File.WriteAllTextAsync(sentinelPath, "unchanged");
+        var configurationDirectory = Path.Combine(scope.ApplicationRootPath, "configuration");
+        CreateDirectoryReparsePoint(configurationDirectory, outsideDirectory);
+        var configuration = CreateConfiguration(
+            "Reparse",
+            BaseCreatedAtUtc,
+            BaseCreatedAtUtc.AddMinutes(10),
+            "process.main@reparse",
+            "5.0",
+            "100",
+            "device.reparse.primary",
+            "reparse-primary",
+            "device.reparse.secondary",
+            "reparse-secondary");
+
+        try
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                new FileSystemProjectEngineeringConfigurationRepository().SaveAsync(
+                    scope,
+                    configuration.Workspace));
+
+            Assert.Equal("unchanged", await File.ReadAllTextAsync(sentinelPath));
+            Assert.Equal([sentinelPath], Directory.GetFiles(outsideDirectory));
+        }
+        finally
+        {
+            Directory.Delete(configurationDirectory);
+        }
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_projectDirectory))
@@ -525,6 +565,40 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
     private static void AssertAccepted(EngineeringOperationResult result)
     {
         Assert.True(result.Succeeded, result.Message);
+    }
+
+    private static void CreateDirectoryReparsePoint(string path, string targetPath)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Directory.CreateSymbolicLink(path, targetPath);
+            return;
+        }
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            ArgumentList =
+            {
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                path,
+                targetPath
+            }
+        }) ?? throw new InvalidOperationException("Failed to start the Windows junction command.");
+
+        process.WaitForExit();
+        var standardOutput = process.StandardOutput.ReadToEnd();
+        var standardError = process.StandardError.ReadToEnd();
+        Assert.True(
+            process.ExitCode == 0,
+            $"Failed to create test junction. stdout: {standardOutput} stderr: {standardError}");
     }
 
     private static ProjectApplicationWorkspaceScope Scope(string applicationId, string projectDirectory)

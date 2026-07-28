@@ -1,13 +1,12 @@
-using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 
 namespace OpenLineOps.Topology.Infrastructure.Persistence;
 
 internal static class ProjectTopologyResourceJsonStore
 {
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> WriteLocks =
-        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ProjectWorkspaceWriteLockPool WriteLocks = new();
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -24,14 +23,27 @@ internal static class ProjectTopologyResourceJsonStore
     {
         var directory = Path.GetDirectoryName(path)
             ?? throw new InvalidOperationException($"Resource path '{path}' has no parent directory.");
-        Directory.CreateDirectory(directory);
+        ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+            directory,
+            "Project topology resource directory");
 
-        var writeLock = WriteLocks.GetOrAdd(path, static _ => new SemaphoreSlim(1, 1));
-        await writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var writeLock = await WriteLocks.AcquireAsync(path, cancellationToken).ConfigureAwait(false);
         var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        Exception? operationFailure = null;
+        Exception? cleanupFailure = null;
 
         try
         {
+            ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+                directory,
+                "Project topology resource directory");
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                path,
+                "Project topology resource");
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                temporaryPath,
+                "Temporary project topology resource");
+
             await using (var stream = new FileStream(
                 temporaryPath,
                 FileMode.CreateNew,
@@ -46,24 +58,56 @@ internal static class ProjectTopologyResourceJsonStore
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
 
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                temporaryPath,
+                "Temporary project topology resource");
+            ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+                directory,
+                "Project topology resource directory");
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                path,
+                "Project topology resource");
             File.Move(temporaryPath, path, overwrite: true);
+            if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    path,
+                    "Project topology resource"))
+            {
+                throw new InvalidDataException(
+                    $"Project topology resource '{path}' was not committed as an ordinary file.");
+            }
         }
-        finally
+        catch (Exception exception)
         {
-            if (File.Exists(temporaryPath))
+            operationFailure = exception;
+        }
+
+        try
+        {
+            if (ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    temporaryPath,
+                    "Temporary project topology resource"))
             {
                 File.Delete(temporaryPath);
             }
-
-            writeLock.Release();
         }
+        catch (Exception exception)
+        {
+            cleanupFailure = exception;
+        }
+
+        ProjectWorkspaceFileOperation.ThrowFailures(
+            "Project topology resource commit and temporary-file cleanup both failed.",
+            operationFailure,
+            cleanupFailure);
     }
 
     public static async ValueTask<T?> LoadAsync<T>(
         string path,
         CancellationToken cancellationToken)
     {
-        if (!File.Exists(path))
+        if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                path,
+                "Project topology resource"))
         {
             return default;
         }

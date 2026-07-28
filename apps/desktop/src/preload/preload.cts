@@ -4,6 +4,7 @@ import type {
   ApiResponse,
   ApplicationExtensionImportResult,
   BackendStatus,
+  BackendStatusChanged,
   DesktopConfig,
   EditorDocumentWriteOptions,
   ExternalProgramDirectorySelectionResult,
@@ -20,6 +21,14 @@ const desktopApi: OpenLineOpsDesktopApi = {
   getBackendStatus: () => ipcRenderer.invoke('backend:get-status') as Promise<BackendStatus>,
   startBackend: () => ipcRenderer.invoke('backend:start') as Promise<BackendStatus>,
   stopBackend: () => ipcRenderer.invoke('backend:stop') as Promise<BackendStatus>,
+  setActiveProjectFile: (projectFilePath: string | null) =>
+    ipcRenderer.invoke('desktop:set-active-project-file', projectFilePath) as Promise<void>,
+  onBackendStatusChanged: (listener: (change: BackendStatusChanged) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, change: BackendStatusChanged): void =>
+      listener(change);
+    ipcRenderer.on('backend:status-changed', handler);
+    return () => ipcRenderer.removeListener('backend:status-changed', handler);
+  },
   onCloseRequested: (listener: (requestId: number) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, requestId: number): void => listener(requestId);
     ipcRenderer.on('desktop:close-requested', handler);
