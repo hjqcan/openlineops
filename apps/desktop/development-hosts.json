@@ -1,0 +1,9 @@
+{
+  "configuration": "Debug",
+  "targetFramework": "net10.0",
+  "projects": [
+    "OpenLineOps.Api",
+    "OpenLineOps.ScriptWorker",
+    "OpenLineOps.PluginHost"
+  ]
+}

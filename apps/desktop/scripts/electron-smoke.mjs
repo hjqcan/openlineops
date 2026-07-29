@@ -10,6 +10,9 @@ import { fileURLToPath } from 'node:url';
 import electronPath from 'electron';
 import { buildSampleExtensionArchive } from './build-sample-extension-archive.mjs';
 import {
+  prepareDevelopmentHosts as prepareRequiredDevelopmentHosts
+} from './development-hosts.mjs';
+import {
   createWindowsPowerShellHost,
   windowsSystemExecutablePath
 } from './windows-powershell-host.mjs';
@@ -75,23 +78,6 @@ const packagedPluginHostExecutable = path.join(
   'OpenLineOps.PluginHost.exe');
 const viteCliPath = path.join(desktopRoot, 'node_modules', 'vite', 'bin', 'vite.js');
 const smokeScreenshotDirectory = process.env.OPENLINEOPS_SMOKE_SCREENSHOT_DIR?.trim() ?? '';
-const developmentHostConfiguration = 'Debug';
-const developmentHosts = [
-  'OpenLineOps.Api',
-  'OpenLineOps.ScriptWorker',
-  'OpenLineOps.PluginHost'
-].map(projectName => ({
-  projectName,
-  projectPath: path.join(repoRoot, 'src', projectName, `${projectName}.csproj`),
-  assemblyPath: path.join(
-    repoRoot,
-    'src',
-    projectName,
-    'bin',
-    developmentHostConfiguration,
-    'net10.0',
-    `${projectName}.dll`)
-}));
 
 const childLogs = [];
 const cdpEvents = [];
@@ -4531,14 +4517,15 @@ function assertNodeRuntime() {
 }
 
 async function prepareDevelopmentHosts() {
-  for (const host of developmentHosts) {
-    await runLoggedProcess(
+  const developmentHosts = await prepareRequiredDevelopmentHosts({
+    repoRoot,
+    build: (host, configuration) => runLoggedProcess(
       dotnetExecutable,
       [
         'build',
         host.projectPath,
         '--configuration',
-        developmentHostConfiguration,
+        configuration,
         '--disable-build-servers',
         '--nologo',
         '--verbosity',
@@ -4546,17 +4533,11 @@ async function prepareDevelopmentHosts() {
         '--property:TreatWarningsAsErrors=true'
       ],
       { cwd: repoRoot, env: process.env },
-      `build-${host.projectName}`);
-
-    const assembly = await fs.stat(host.assemblyPath).catch(() => null);
-    if (!assembly?.isFile()) {
-      throw new Error(
-        `Development host build did not produce ${host.projectName}: ${host.assemblyPath}`);
-    }
-  }
+      `build-${host.projectName}`)
+  });
 
   console.log(
-    `Development hosts ready (${developmentHostConfiguration}): `
+    'Development hosts ready (Debug): '
       + developmentHosts.map(host => host.projectName).join(', '));
 }
 

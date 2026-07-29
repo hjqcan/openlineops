@@ -52,6 +52,10 @@ import {
 import { classifyBackendProcessError } from './backend-process-error-policy.js';
 import { verifyBackendProcessHandshakeServer } from './backend-process-handshake.js';
 import {
+  requireDevelopmentHostAssembly,
+  resolveDevelopmentHostDefinitions
+} from './development-host-contract.js';
+import {
   BackendSessionLifecycle,
   type AuthenticatedBackendSession
 } from './backend-session-lifecycle.js';
@@ -265,30 +269,18 @@ function createBackendLaunchConfig(
     const repoRoot = process.env.OPENLINEOPS_REPO_ROOT
       ? path.resolve(process.env.OPENLINEOPS_REPO_ROOT)
       : path.resolve(appPath, '..', '..');
-    const apiAssemblyPath = path.join(
-      repoRoot,
-      'src',
-      'OpenLineOps.Api',
-      'bin',
-      'Debug',
-      'net10.0',
-      'OpenLineOps.Api.dll');
-    const scriptWorkerAssemblyPath = path.join(
-      repoRoot,
-      'src',
-      'OpenLineOps.ScriptWorker',
-      'bin',
-      'Debug',
-      'net10.0',
-      'OpenLineOps.ScriptWorker.dll');
-    const pluginHostAssemblyPath = path.join(
-      repoRoot,
-      'src',
-      'OpenLineOps.PluginHost',
-      'bin',
-      'Debug',
-      'net10.0',
-      'OpenLineOps.PluginHost.dll');
+    const developmentHosts = resolveDevelopmentHostDefinitions(
+      appPath,
+      repoRoot);
+    const apiAssemblyPath = requireDevelopmentHostAssembly(
+      developmentHosts,
+      'OpenLineOps.Api');
+    const scriptWorkerAssemblyPath = requireDevelopmentHostAssembly(
+      developmentHosts,
+      'OpenLineOps.ScriptWorker');
+    const pluginHostAssemblyPath = requireDevelopmentHostAssembly(
+      developmentHosts,
+      'OpenLineOps.PluginHost');
     if (!existsSync(apiAssemblyPath)
         || !existsSync(scriptWorkerAssemblyPath)
         || !existsSync(pluginHostAssemblyPath)) {

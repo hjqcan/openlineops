@@ -1,58 +1,101 @@
 import assert from 'node:assert/strict';
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import {
-  createWindowsPowerShellHost
-} from './windows-powershell-host.mjs';
+  prepareDevelopmentHosts
+} from './development-hosts.mjs';
+import {
+  createLauncherDiagnosticError,
+  formatLauncherDiagnostics,
+  waitForApiChildProcess,
+  waitForLauncherProcessIdentity,
+  waitForProcessToDisappear
+} from './dev-launcher-process-discovery.mjs';
+import {
+  resolveDotnetExecutablePath,
+  spawnOwnedProcessTree
+} from './owned-process-tree.mjs';
 
-const execFileAsync = promisify(execFile);
 const scriptPath = fileURLToPath(import.meta.url);
 const desktopRoot = path.resolve(path.dirname(scriptPath), '..');
+const repoRoot = path.resolve(desktopRoot, '..', '..');
 const launcherPath = path.join(desktopRoot, 'scripts', 'dev-launcher.mjs');
+const processTreeHostPath = path.join(
+  repoRoot,
+  'tools',
+  'OpenLineOps.ProcessTreeHost',
+  'bin',
+  'Release',
+  'net10.0',
+  'OpenLineOps.ProcessTreeHost.exe');
 const physicalTempRoot = await fs.realpath(os.tmpdir());
 
-await runScenario('controlled stop', async launcher => {
-  launcher.stdin.end('stop\n');
-  const exit = await waitForChildExit(launcher, 20_000);
-  assert.equal(exit.code, 0, launcher.output.join(''));
-  assert.equal(exit.signal, null, launcher.output.join(''));
-});
-await runScenario('owner termination', async launcher => {
-  const requested = launcher.kill('SIGKILL');
-  assert(requested, 'Dev launcher root did not accept strong termination.');
-  const exit = await waitForChildExit(launcher, 20_000);
-  assert(
-    exit.signal !== null || exit.code !== 0,
-    `Strongly terminated dev launcher reported a clean exit.\n${
-      launcher.output.join('')}`);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {
+  await main();
+}
 
-console.log(
-  'Dev launcher shutdown smoke passed for controlled stop and owner death; '
-  + 'Vite, Electron, and API trees were fully terminated.');
+async function main() {
+  await buildDevelopmentHosts();
+  await runScenario('controlled stop', async launcher => {
+    launcher.stdin.end('stop\n');
+    const exit = await waitForChildExit(launcher, 20_000);
+    const diagnostics = formatLauncherDiagnostics(
+      launcher,
+      launcher.openlineopsScenario);
+    assert.equal(exit.code, 0, diagnostics);
+    assert.equal(exit.signal, null, diagnostics);
+  });
+  await runScenario('owner termination', async launcher => {
+    const requested = launcher.kill('SIGKILL');
+    assert(requested, 'Dev launcher root did not accept strong termination.');
+    const exit = await waitForChildExit(launcher, 20_000);
+    assert(
+      exit.signal !== null || exit.code !== 0,
+      `Strongly terminated dev launcher reported a clean exit.\n${
+        formatLauncherDiagnostics(
+          launcher,
+          launcher.openlineopsScenario)}`);
+  });
+
+  console.log(
+    'Dev launcher shutdown smoke passed for controlled stop and owner death; '
+    + 'Vite, Electron, and API trees were fully terminated.');
+}
 
 async function runScenario(description, stopLauncher) {
   const userDataDirectory = await fs.mkdtemp(
     path.join(
       physicalTempRoot,
       `openlineops-dev-launcher-${description.replaceAll(' ', '-')}-`));
-  const launcher = startLauncher(userDataDirectory);
+  const launcher = startLauncher(userDataDirectory, description);
   try {
     const state = await waitForLauncherState(launcher, 20_000);
     assert(Number.isSafeInteger(state.electronPid) && state.electronPid > 0);
     assert(Number.isSafeInteger(state.vitePid) && state.vitePid > 0);
     const [electronProcessIdentity, viteProcessIdentity] = await Promise.all([
-      waitForProcessIdentity(state.electronPid, 10_000),
-      waitForProcessIdentity(state.vitePid, 10_000)
+      waitForLauncherProcessIdentity({
+        launcher,
+        processId: state.electronPid,
+        scenario: description,
+        timeoutMilliseconds: 10_000
+      }),
+      waitForLauncherProcessIdentity({
+        launcher,
+        processId: state.vitePid,
+        scenario: description,
+        timeoutMilliseconds: 10_000
+      })
     ]);
-    const apiProcessIdentity = await waitForApiChildProcess(
-      state.electronPid,
-      30_000);
+    const apiProcessIdentity = await waitForApiChildProcess({
+      launcher,
+      electronIdentity: electronProcessIdentity,
+      scenario: description,
+      timeoutMilliseconds: 30_000
+    });
 
     await stopLauncher(launcher);
     await waitForProcessToDisappear(apiProcessIdentity, 15_000);
@@ -79,7 +122,7 @@ async function runScenario(description, stopLauncher) {
   }
 }
 
-function startLauncher(userDataDirectory) {
+function startLauncher(userDataDirectory, scenario) {
   const output = [];
   const launcher = spawn(process.execPath, [launcherPath], {
     cwd: desktopRoot,
@@ -92,6 +135,7 @@ function startLauncher(userDataDirectory) {
     windowsHide: true
   });
   launcher.output = output;
+  launcher.openlineopsScenario = scenario;
   launcher.openlineopsLaunchError = null;
   launcher.stdout.on('data', chunk => output.push(chunk.toString()));
   launcher.stderr.on('data', chunk => output.push(chunk.toString()));
@@ -102,70 +146,136 @@ function startLauncher(userDataDirectory) {
   return launcher;
 }
 
-async function waitForLauncherState(child, timeoutMilliseconds) {
+async function buildDevelopmentHosts() {
+  const dotnetExecutable = await resolveDotnetExecutablePath(process.env);
+  const hosts = await prepareDevelopmentHosts({
+    repoRoot,
+    build: (host, configuration) => runDevelopmentHostBuild(
+      dotnetExecutable,
+      host,
+      configuration)
+  });
+  console.log(
+    `Development hosts ready (Debug): ${
+      hosts.map(host => host.projectName).join(', ')}`);
+}
+
+async function runDevelopmentHostBuild(
+  dotnetExecutable,
+  host,
+  configuration
+) {
+  const timeoutMilliseconds = 300_000;
+  const deadline = Date.now() + timeoutMilliseconds;
+  const child = await spawnOwnedProcessTree({
+    processTreeHostPath,
+    command: dotnetExecutable,
+    args: [
+      'build',
+      host.projectPath,
+      '--configuration',
+      configuration,
+      '--disable-build-servers',
+      '--nologo',
+      '--verbosity',
+      'minimal',
+      '--property:TreatWarningsAsErrors=true'
+    ],
+    workingDirectory: repoRoot,
+    environment: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    onStdoutData: chunk => process.stdout.write(chunk),
+    onStderrData: chunk => process.stderr.write(chunk),
+    startupTimeoutMilliseconds: remainingMilliseconds(
+      deadline,
+      `${host.projectName} build startup`)
+  });
+
+  let completionTimeout;
+  try {
+    const result = await Promise.race([
+      child.openlineopsClosePromise,
+      new Promise((_, reject) => {
+        completionTimeout = setTimeout(
+          () => reject(new Error(
+            `${host.projectName} development build exceeded its hard deadline.`)),
+          remainingMilliseconds(
+            deadline,
+            `${host.projectName} build completion`));
+      })
+    ]);
+    if (result.exitCode !== 0 || result.signalCode !== null) {
+      throw new Error(
+        `${host.projectName} development build closed with code ${
+          result.exitCode ?? 'unknown'} and signal ${
+          result.signalCode ?? 'none'}.`);
+    }
+  } catch (error) {
+    const cleanupFailures = [];
+    if (child.exitCode === null && child.signalCode === null) {
+      try {
+        const accepted = child.kill('SIGKILL');
+        if (!accepted
+            && child.exitCode === null
+            && child.signalCode === null) {
+          cleanupFailures.push(new Error(
+            `${host.projectName} Process Tree Host rejected termination.`));
+        }
+      } catch (terminationError) {
+        cleanupFailures.push(terminationError);
+      }
+      try {
+        await waitForPromise(
+          child.openlineopsClosePromise,
+          15_000,
+          `${host.projectName} Process Tree Host cleanup`);
+      } catch (closeError) {
+        cleanupFailures.push(closeError);
+      }
+    }
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupFailures],
+        `${host.projectName} development build failed and its process tree `
+          + 'cleanup could not be confirmed.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(completionTimeout);
+  }
+}
+
+export async function waitForLauncherState(child, timeoutMilliseconds) {
   const deadline = Date.now() + timeoutMilliseconds;
   while (Date.now() < deadline) {
+    if (child.openlineopsLaunchError instanceof Error) {
+      throw createLauncherDiagnosticError(
+        'Dev launcher failed before publishing child identities.',
+        child,
+        child.openlineopsScenario,
+        null,
+        child.openlineopsLaunchError);
+    }
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw createLauncherDiagnosticError(
+        'Dev launcher exited before publishing child identities.',
+        child,
+        child.openlineopsScenario);
+    }
     const match = child.output.join('')
       .match(/OPENLINEOPS_DEV_LAUNCHER_STATE (\{[^\r\n]+\})/u);
     if (match) {
       return JSON.parse(match[1]);
     }
-    if (child.exitCode !== null || child.signalCode !== null) {
-      throw new Error(
-        `Dev launcher exited before publishing child identities.\n${
-          child.output.join('')}`);
-    }
-    if (child.openlineopsLaunchError instanceof Error) {
-      throw new Error(
-        `Dev launcher failed before publishing child identities.\n${
-          child.output.join('')}`,
-        { cause: child.openlineopsLaunchError });
-    }
     await delay(Math.max(1, Math.min(100, deadline - Date.now())));
   }
-  throw new Error(
-    `Timed out waiting for dev launcher child identities.\n${
-      child.output.join('')}`);
+  throw createLauncherDiagnosticError(
+    'Timed out waiting for dev launcher child identities.',
+    child,
+    child.openlineopsScenario);
 }
 
-async function waitForApiChildProcess(electronPid, timeoutMilliseconds) {
-  const deadline = Date.now() + timeoutMilliseconds;
-  while (Date.now() < deadline) {
-    const script = [
-      `$candidate = Get-CimInstance Win32_Process -Filter "ParentProcessId = ${electronPid}"`,
-      "| Where-Object { $_.Name -eq 'dotnet.exe' -and $_.CommandLine -like '*OpenLineOps.Api.dll*' }",
-       '| Select-Object -First 1;',
-       'if ($candidate) {',
-       '  $ticks = $candidate.CreationDate.ToUniversalTime().Ticks;',
-       '  Write-Output "$($candidate.ProcessId)|$ticks"',
-       '}'
-    ].join(' ');
-    const powerShellHost = createWindowsPowerShellHost();
-    const { stdout } = await execFileAsync(
-      powerShellHost.executablePath,
-      ['-NoProfile', '-NonInteractive', '-Command', script],
-      {
-        encoding: 'utf8',
-        env: powerShellHost.environment,
-        windowsHide: true,
-        timeout: Math.max(
-          1,
-          Math.min(5_000, deadline - Date.now())),
-        killSignal: 'SIGKILL',
-        maxBuffer: 64 * 1024
-      });
-    const value = stdout.trim();
-    const identity = parseProcessIdentity(value);
-    if (identity !== null) {
-      return identity;
-    }
-    await delay(Math.max(1, Math.min(100, deadline - Date.now())));
-  }
-  throw new Error(
-    `Timed out waiting for the API child of Electron PID ${electronPid}.`);
-}
-
-function waitForChildExit(child, timeoutMilliseconds) {
+export function waitForChildExit(child, timeoutMilliseconds) {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve({
       code: child.exitCode,
@@ -191,9 +301,10 @@ function waitForChildExit(child, timeoutMilliseconds) {
       complete(() => resolve({ code, signal }));
     const onError = error => complete(() => reject(error));
     const timeout = setTimeout(
-      () => complete(() => reject(new Error(
-        `Timed out waiting for dev launcher shutdown.\n${
-          child.output.join('')}`))),
+      () => complete(() => reject(createLauncherDiagnosticError(
+        'Timed out waiting for dev launcher shutdown.',
+        child,
+        child.openlineopsScenario))),
       timeoutMilliseconds);
     child.once('exit', onExit);
     child.once('error', onError);
@@ -208,68 +319,30 @@ function waitForChildExit(child, timeoutMilliseconds) {
   });
 }
 
-async function waitForProcessIdentity(processId, timeoutMilliseconds) {
-  const deadline = Date.now() + timeoutMilliseconds;
-  while (Date.now() < deadline) {
-    const identity = await queryProcessIdentity(processId, deadline);
-    if (identity !== null) {
-      return identity;
-    }
-    await delay(Math.max(1, Math.min(100, deadline - Date.now())));
+function remainingMilliseconds(deadline, description) {
+  const remaining = deadline - Date.now();
+  if (!Number.isSafeInteger(deadline) || remaining <= 0) {
+    throw new Error(`${description} exceeded its hard deadline.`);
   }
-  throw new Error(
-    `Timed out binding process PID ${processId} to its creation identity.`);
+  return remaining;
 }
 
-async function waitForProcessToDisappear(processIdentity, timeoutMilliseconds) {
-  const deadline = Date.now() + timeoutMilliseconds;
-  while (Date.now() < deadline) {
-    const current = await queryProcessIdentity(processIdentity.processId, deadline);
-    if (current === null
-        || current.creationTicks !== processIdentity.creationTicks) {
-      return;
-    }
-    await delay(Math.max(1, Math.min(100, deadline - Date.now())));
+async function waitForPromise(promise, timeoutMilliseconds, description) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(
+            `${description} did not complete within ${
+              timeoutMilliseconds} ms.`)),
+          timeoutMilliseconds);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeout);
   }
-  throw new Error(
-    `Process PID ${processIdentity.processId} with creation identity ${
-      processIdentity.creationTicks} survived controlled dev launcher shutdown.`);
-}
-
-async function queryProcessIdentity(processId, deadline) {
-  const script =
-    `$process = Get-CimInstance Win32_Process -Filter "ProcessId = ${processId}"; `
-    + 'if ($process) { '
-    + '$ticks = $process.CreationDate.ToUniversalTime().Ticks; '
-    + 'Write-Output "$($process.ProcessId)|$ticks" }';
-  const powerShellHost = createWindowsPowerShellHost();
-  const { stdout } = await execFileAsync(
-    powerShellHost.executablePath,
-    ['-NoProfile', '-NonInteractive', '-Command', script],
-    {
-      encoding: 'utf8',
-      env: powerShellHost.environment,
-      windowsHide: true,
-      timeout: Math.max(1, Math.min(5_000, deadline - Date.now())),
-      killSignal: 'SIGKILL',
-      maxBuffer: 64 * 1024
-    });
-  return parseProcessIdentity(stdout.trim());
-}
-
-function parseProcessIdentity(value) {
-  const match = value.match(/^([1-9][0-9]*)\|([1-9][0-9]*)$/u);
-  if (!match) {
-    return null;
-  }
-  const processId = Number(match[1]);
-  if (!Number.isSafeInteger(processId) || processId <= 0) {
-    throw new Error(`Invalid process identity PID: ${match[1]}.`);
-  }
-  return {
-    processId,
-    creationTicks: match[2]
-  };
 }
 
 function delay(milliseconds) {
