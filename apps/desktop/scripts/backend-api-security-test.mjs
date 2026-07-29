@@ -35,7 +35,11 @@ import {
   redactDiagnosticText,
   sanitizeDiagnosticValue
 } from './smoke-diagnostics.mjs';
-import { CdpClient } from './smoke-cdp-client.mjs';
+import {
+  CdpClient,
+  CdpCommandTimeoutError,
+  waitForCdpValue
+} from './smoke-cdp-client.mjs';
 import { waitForHttp } from './smoke-http-wait.mjs';
 
 const mainSource = await readFile(
@@ -392,6 +396,18 @@ test('smoke failure diagnostics cannot serialize the live desktop API credential
   assert.match(
     electronSmokeSource,
     /withTimeout\(\s*collectDiagnostics\(\),\s*5000,\s*'smoke failure diagnostics'\)/u);
+  assert.match(
+    electronSmokeSource,
+    /closingCdp\.send\('Browser\.close', \{\}, 15_000\)/u,
+    'cancelable application close must not retain the default one-minute command timer');
+  assert.match(
+    electronSmokeSource,
+    /evaluate\('window\.openlineopsDesktop\?\.stopBackend\?\.\(\)', 4500\)[\s\S]*?5000,\s*'backend stop during cleanup'/u,
+    'cleanup must expire the underlying backend command before its wrapper deadline');
+  assert.match(
+    electronSmokeSource,
+    /cdp\.send\('Browser\.close', \{\}, 2500\)[\s\S]*?3000,\s*'Electron browser close during cleanup'/u,
+    'cleanup must expire the underlying browser command before its wrapper deadline');
 });
 
 test('smoke diagnostic sanitization removes credentials and minimizes CDP payloads', () => {
@@ -462,7 +478,7 @@ test('smoke diagnostic sanitization removes credentials and minimizes CDP payloa
   assert.doesNotMatch(JSON.stringify(sanitizedValue), new RegExp(secret, 'u'));
 });
 
-test('smoke CDP connection and command waits are hard-bounded', async () => {
+test('smoke CDP connection and command waits are hard-bounded without poisoning the session', async () => {
   const unopenedSocket = new FakeWebSocket();
   await assert.rejects(
     CdpClient.connect('ws://127.0.0.1/unopened', {
@@ -483,15 +499,26 @@ test('smoke CDP connection and command waits are hard-bounded', async () => {
   });
   const firstCommand = client.send('Runtime.evaluate');
   const secondCommand = client.send('Page.enable', {}, 200);
-  const secondRejection = assert.rejects(
-    secondCommand,
-    /Runtime\.evaluate did not complete within 20 ms/u);
-  await assert.rejects(
-    firstCommand,
-    /Runtime\.evaluate did not complete within 20 ms/u);
-  await secondRejection;
+  await assert.rejects(firstCommand, error => {
+    assert.ok(error instanceof CdpCommandTimeoutError);
+    assert.equal(error.method, 'Runtime.evaluate');
+    assert.equal(error.timeoutMilliseconds, 20);
+    return true;
+  });
+  openSocket.completeLastCommand({ enabled: true });
+  assert.deepEqual(await secondCommand, { enabled: true });
+  assert.equal(openSocket.closeCalls, 0);
+  assert.equal(client.isOpen(), true);
+
+  openSocket.completeCommand(0, { result: { value: 'late' } });
+  const followUpCommand = client.send('Runtime.evaluate', {}, 100);
+  openSocket.completeLastCommand({ result: { value: 'recovered' } });
+  assert.deepEqual(
+    await followUpCommand,
+    { result: { value: 'recovered' } });
+  assert.equal(client.isOpen(), true);
+  client.close();
   assert.equal(openSocket.closeCalls, 1);
-  assert.equal(client.isOpen(), false);
 
   const delayedSocket = new FakeWebSocket();
   const delayedClient = await CdpClient.connect('ws://127.0.0.1/delayed', {
@@ -519,6 +546,67 @@ test('smoke CDP connection and command waits are hard-bounded', async () => {
   });
   assert.equal(delayedSocket.closeCalls, 0);
   delayedClient.close();
+  assert.equal(delayedClient.isOpen(), false);
+  await assert.rejects(
+    delayedClient.send('Runtime.evaluate'),
+    /CDP socket is not open/u);
+});
+
+test('smoke CDP polling retries only command timeouts within its overall deadline', async () => {
+  let attempts = 0;
+  const recovered = await waitForCdpValue({
+    probe: async commandTimeoutMilliseconds => {
+      attempts += 1;
+      assert.ok(commandTimeoutMilliseconds > 0);
+      if (attempts <= 2) {
+        throw new CdpCommandTimeoutError(
+          'Runtime.evaluate',
+          commandTimeoutMilliseconds);
+      }
+      return { ready: true };
+    },
+    timeoutMilliseconds: 100,
+    commandTimeoutMilliseconds: 20,
+    retryDelayMilliseconds: 1,
+    description: 'the renderer readiness probe'
+  });
+  assert.deepEqual(recovered, { ready: true });
+  assert.equal(attempts, 3);
+
+  const timeoutStartedAt = Date.now();
+  await assert.rejects(
+    waitForCdpValue({
+      probe: async commandTimeoutMilliseconds => {
+        throw new CdpCommandTimeoutError(
+          'Runtime.evaluate',
+          commandTimeoutMilliseconds);
+      },
+      timeoutMilliseconds: 30,
+      commandTimeoutMilliseconds: 5,
+      retryDelayMilliseconds: 1,
+      description: 'the persistently stalled renderer'
+    }),
+    error => {
+      assert.match(
+        error.message,
+        /Timed out waiting for the persistently stalled renderer/u);
+      assert.match(error.message, /commandTimeout/u);
+      return true;
+    });
+  assert.ok(
+    Date.now() - timeoutStartedAt < 500,
+    'the CDP polling deadline was not hard-bounded');
+
+  await assert.rejects(
+    waitForCdpValue({
+      probe: async () => {
+        throw new Error('renderer assertion failed');
+      },
+      timeoutMilliseconds: 100,
+      retryDelayMilliseconds: 1,
+      description: 'the labeled renderer assertion'
+    }),
+    /Failed while waiting for the labeled renderer assertion: renderer assertion failed/u);
 });
 
 test('stalled real CDP upgrade is force-terminated with no live TCP handle', async () => {
@@ -618,7 +706,11 @@ class FakeWebSocket extends EventTarget {
   }
 
   completeLastCommand(result) {
-    const payload = JSON.parse(this.sentPayloads.at(-1));
+    this.completeCommand(this.sentPayloads.length - 1, result);
+  }
+
+  completeCommand(index, result) {
+    const payload = JSON.parse(this.sentPayloads[index]);
     const event = new Event('message');
     Object.defineProperty(event, 'data', {
       value: JSON.stringify({ id: payload.id, result })

@@ -5,6 +5,73 @@ const webSocketOpenState = 1;
 const defaultConnectionTimeoutMilliseconds = 5000;
 const defaultCommandTimeoutMilliseconds = 60000;
 
+export class CdpCommandTimeoutError extends Error {
+  constructor(method, timeoutMilliseconds) {
+    super(`CDP command ${method} did not complete within ${timeoutMilliseconds} ms.`);
+    this.name = 'CdpCommandTimeoutError';
+    this.method = method;
+    this.timeoutMilliseconds = timeoutMilliseconds;
+  }
+}
+
+export async function waitForCdpValue({
+  probe,
+  timeoutMilliseconds,
+  description,
+  commandTimeoutMilliseconds = 5000,
+  retryDelayMilliseconds = 500
+}) {
+  if (typeof probe !== 'function') {
+    throw new Error('CDP wait probe must be a function.');
+  }
+  assertPositiveTimeout(timeoutMilliseconds, 'CDP wait timeout');
+  assertPositiveTimeout(commandTimeoutMilliseconds, 'CDP wait command timeout');
+  assertPositiveTimeout(retryDelayMilliseconds, 'CDP wait retry delay');
+  if (typeof description !== 'string' || description.trim().length === 0) {
+    throw new Error('CDP wait description is required.');
+  }
+
+  const deadline = Date.now() + timeoutMilliseconds;
+  let lastValue;
+  while (Date.now() < deadline) {
+    const remainingMilliseconds = Math.max(1, deadline - Date.now());
+    try {
+      lastValue = await probe(
+        Math.min(commandTimeoutMilliseconds, remainingMilliseconds));
+    } catch (error) {
+      if (!(error instanceof CdpCommandTimeoutError)) {
+        throw new Error(
+          `Failed while waiting for ${description}: ${
+            error instanceof Error ? error.message : String(error)}`,
+          { cause: error });
+      }
+      lastValue = {
+        commandTimeout: error.message
+      };
+      const delayMilliseconds = Math.min(
+        retryDelayMilliseconds,
+        Math.max(0, deadline - Date.now()));
+      if (delayMilliseconds > 0) {
+        await delay(delayMilliseconds);
+      }
+      continue;
+    }
+
+    if (lastValue) {
+      return lastValue;
+    }
+    const delayMilliseconds = Math.min(
+      retryDelayMilliseconds,
+      Math.max(0, deadline - Date.now()));
+    if (delayMilliseconds > 0) {
+      await delay(delayMilliseconds);
+    }
+  }
+
+  throw new Error(
+    `Timed out waiting for ${description}. Last value: ${JSON.stringify(lastValue)}`);
+}
+
 export class CdpClient {
   constructor(socket, onEvent, commandTimeoutMilliseconds) {
     this.socket = socket;
@@ -123,12 +190,15 @@ export class CdpClient {
     const payload = JSON.stringify({ id, method, params });
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        if (!this.pending.has(id)) {
+        const pending = this.pending.get(id);
+        if (!pending) {
           return;
         }
-        const error = new Error(
-          `CDP command ${method} did not complete within ${timeoutMilliseconds} ms.`);
-        this.failAndClose(error);
+        // CDP requests are multiplexed. A command deadline does not prove that
+        // the transport is corrupt, so expire only this request. Any late
+        // response is ignored because its pending entry no longer exists.
+        this.pending.delete(id);
+        pending.reject(new CdpCommandTimeoutError(method, timeoutMilliseconds));
       }, timeoutMilliseconds);
       this.pending.set(id, { resolve, reject, timeout });
       try {
@@ -277,4 +347,8 @@ function assertPositiveTimeout(timeoutMilliseconds, description) {
   if (!Number.isSafeInteger(timeoutMilliseconds) || timeoutMilliseconds <= 0) {
     throw new Error(`${description} must be a positive safe integer.`);
   }
+}
+
+function delay(timeoutMilliseconds) {
+  return new Promise(resolve => setTimeout(resolve, timeoutMilliseconds));
 }

@@ -22,7 +22,11 @@ import {
   redactDiagnosticText,
   sanitizeDiagnosticValue
 } from './smoke-diagnostics.mjs';
-import { CdpClient } from './smoke-cdp-client.mjs';
+import {
+  CdpClient,
+  CdpCommandTimeoutError,
+  waitForCdpValue
+} from './smoke-cdp-client.mjs';
 import { waitForHttp } from './smoke-http-wait.mjs';
 import {
   resolveDotnetExecutablePath,
@@ -1950,7 +1954,7 @@ async function closeElectronForPackagedRestart() {
   }
   await evaluate('window.__openlineopsSmokeEvents = {}');
   let browserCloseDisposition = 'pending';
-  void closingCdp.send('Browser.close').then(
+  void closingCdp.send('Browser.close', {}, 15_000).then(
     () => {
       browserCloseDisposition = 'resolved';
     },
@@ -4071,21 +4075,13 @@ async function readApplicationExtensionStorage(projectPath, applicationId, porta
 }
 
 async function waitForExpression(expression, timeoutMs, description) {
-  const deadline = Date.now() + timeoutMs;
-  let lastValue;
-
-  while (Date.now() < deadline) {
-    lastValue = await evaluate(
+  return waitForCdpValue({
+    probe: commandTimeoutMilliseconds => evaluate(
       expression,
-      Math.max(1, Math.min(5000, deadline - Date.now())));
-    if (lastValue) {
-      return lastValue;
-    }
-
-    await delay(500);
-  }
-
-  throw new Error(`Timed out waiting for ${description}. Last value: ${JSON.stringify(lastValue)}`);
+      commandTimeoutMilliseconds),
+    timeoutMilliseconds: timeoutMs,
+    description
+  });
 }
 
 async function waitForExpressionWithCdpRecovery(
@@ -4165,8 +4161,18 @@ async function waitForExpressionWithCdpRecovery(
         expression,
         Math.max(1, Math.min(5000, deadline - Date.now())));
     } catch (error) {
+      if (error instanceof CdpCommandTimeoutError) {
+        lastValue = {
+          commandTimeout: error.message
+        };
+        await delay(Math.max(1, Math.min(250, deadline - Date.now())));
+        continue;
+      }
       if (cdp?.isOpen()) {
-        throw error;
+        throw new Error(
+          `Failed while waiting for ${description}: ${
+            error instanceof Error ? error.message : String(error)}`,
+          { cause: error });
       }
       lastValue = {
         disconnected: error instanceof Error ? error.message : String(error)
@@ -4701,7 +4707,7 @@ async function cleanup() {
   if (cdp) {
     try {
       await withTimeout(
-        evaluate('window.openlineopsDesktop?.stopBackend?.()'),
+        evaluate('window.openlineopsDesktop?.stopBackend?.()', 4500),
         5000,
         'backend stop during cleanup');
     } catch {
@@ -4710,7 +4716,7 @@ async function cleanup() {
 
     try {
       await withTimeout(
-        cdp.send('Browser.close'),
+        cdp.send('Browser.close', {}, 2500),
         3000,
         'Electron browser close during cleanup');
     } catch {
