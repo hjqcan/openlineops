@@ -242,10 +242,10 @@ public sealed class StationAgentHostStartupAbortTests
                         reportedFailure = exception;
                         return ValueTask.CompletedTask;
                     },
-                    shutdownTimeout: TimeSpan.FromMilliseconds(50),
+                    shutdownTimeout: TimeSpan.FromMilliseconds(500),
                     terminateProcessOnUnrecoverableTimeout:
                         exitCode => requestedImmediateExitCode = exitCode)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TimeSpan.FromSeconds(3));
 
             Assert.Equal(StationAgentProcess.HostFailureExitCode, exitCode);
             Assert.Equal(
@@ -265,6 +265,36 @@ public sealed class StationAgentHostStartupAbortTests
         {
             stubbornService.Release();
         }
+    }
+
+    [Fact]
+    public async Task PotentiallyBlockingHostCallbacksUseDedicatedThreads()
+    {
+        using var callbackRelease = new ManualResetEventSlim();
+        var callbackThreadKind = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var callback = StationAgentProcess.StartPotentiallyBlockingOperation(
+            () =>
+            {
+                callbackThreadKind.TrySetResult(
+                    Thread.CurrentThread.IsThreadPoolThread);
+                callbackRelease.Wait(CancellationToken.None);
+                return Task.CompletedTask;
+            });
+
+        try
+        {
+            Assert.False(
+                await callbackThreadKind.Task.WaitAsync(
+                    TimeSpan.FromSeconds(2)));
+            Assert.False(callback.IsCompleted);
+        }
+        finally
+        {
+            callbackRelease.Set();
+        }
+
+        await callback.WaitAsync(TimeSpan.FromSeconds(2));
     }
 
     [Fact]

@@ -62,8 +62,8 @@ internal static class StationAgentProcess
 
         // The reporter may block before it returns a ValueTask (Console and
         // EventLog callbacks are synchronous at that boundary), so invoke the
-        // complete sink on a worker before applying the hard deadline.
-        var reporting = Task.Run(
+        // complete sink on a dedicated worker before applying the hard deadline.
+        var reporting = StartPotentiallyBlockingOperation(
             async () => await reportFailureAsync(exception).ConfigureAwait(false));
         try
         {
@@ -87,6 +87,23 @@ internal static class StationAgentProcess
             TaskContinuationOptions.ExecuteSynchronously
             | TaskContinuationOptions.OnlyOnFaulted,
             TaskScheduler.Default);
+    }
+
+    internal static Task StartPotentiallyBlockingOperation(
+        Func<Task> operation)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+
+        // A Host callback can block before returning its Task. A dedicated
+        // thread keeps that boundary independent of ThreadPool congestion
+        // while the caller enforces the authoritative hard deadline.
+        return Task.Factory.StartNew(
+                operation,
+                CancellationToken.None,
+                TaskCreationOptions.DenyChildAttach
+                | TaskCreationOptions.LongRunning,
+                TaskScheduler.Default)
+            .Unwrap();
     }
 
     private static bool ContainsTimeoutFailure(Exception exception) =>
@@ -287,9 +304,8 @@ internal static class StationAgentHostLifecycle
         Task? stopTask = null;
         try
         {
-            stopTask = Task.Run(
-                () => host.StopAsync(deadline.Token),
-                CancellationToken.None);
+            stopTask = StationAgentProcess.StartPotentiallyBlockingOperation(
+                () => host.StopAsync(deadline.Token));
             await stopTask
                 .WaitAsync(deadline.Token)
                 .ConfigureAwait(false);
