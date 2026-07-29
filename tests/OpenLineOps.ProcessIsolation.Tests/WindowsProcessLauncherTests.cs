@@ -495,6 +495,29 @@ public sealed class WindowsProcessLauncherTests
     }
 
     [Fact]
+    public void AppContainerSidDerivationIsDeterministicAndDoesNotCreateAProfile()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var profileName = "OpenLineOps.Tests.Derive." + Guid.NewGuid().ToString("N");
+        Assert.False(
+            WindowsAppContainerIdentity.ProbeProfileArtifacts(profileName)
+                .AnyArtifactsExist);
+
+        var first = WindowsAppContainerIdentity.DeriveProfileSid(profileName);
+        var second = WindowsAppContainerIdentity.DeriveProfileSid(profileName);
+
+        Assert.Equal(first, second);
+        Assert.StartsWith("S-1-15-2-", first, StringComparison.Ordinal);
+        Assert.False(
+            WindowsAppContainerIdentity.ProbeProfileArtifacts(profileName)
+                .AnyArtifactsExist);
+    }
+
+    [Fact]
     public void DeletingEphemeralAppContainerRemovesItsWritableProfile()
     {
         if (!OperatingSystem.IsWindows())

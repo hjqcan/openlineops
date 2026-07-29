@@ -2856,7 +2856,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             WindowsStationServiceIdentityReader.RequireCanonicalServiceSid(
                 managerServiceSid,
                 nameof(managerServiceSid)));
-        var appContainerSid = DeriveAppContainerSid(profileName);
+        var appContainerSid = WindowsAppContainerIdentity.DeriveProfileSid(profileName);
         var packageRoot = ResolveLocalServiceAppContainerPackageRoot(profileName);
         var mappingPath =
             LocalServiceAppContainerRegistryPrefix + "\\Mappings\\" + appContainerSid;
@@ -3110,29 +3110,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             "Local",
             "Packages",
             profileName.ToLowerInvariant()));
-    }
-
-    [SupportedOSPlatform("windows")]
-    private static string DeriveAppContainerSid(string profileName)
-    {
-        var result = DeriveStagedAppContainerSidFromName(
-            profileName,
-            out var sidPointer);
-        if (result < 0 || sidPointer == IntPtr.Zero)
-        {
-            throw new Win32Exception(
-                result & 0xFFFF,
-                $"Could not derive staged AppContainer profile '{profileName}'.");
-        }
-
-        try
-        {
-            return new SecurityIdentifier(sidPointer).Value;
-        }
-        finally
-        {
-            _ = FreeStagedAppContainerSid(sidPointer);
-        }
     }
 
     [SupportedOSPlatform("windows")]
@@ -3741,14 +3718,6 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         uint creationDisposition,
         uint flagsAndAttributes,
         IntPtr templateFile);
-
-    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
-    private static extern int DeriveStagedAppContainerSidFromName(
-        string appContainerName,
-        out IntPtr appContainerSid);
-
-    [DllImport("advapi32.dll")]
-    private static extern IntPtr FreeStagedAppContainerSid(IntPtr sid);
 
     private static void CaptureCleanupFailure(
         List<Exception> failures,

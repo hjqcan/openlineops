@@ -127,23 +127,7 @@ public static class WindowsAppContainerIdentity
     internal static WindowsAppContainerProfileArtifactState ProbeProfileArtifactsCore(
         string profileName)
     {
-        var result = DeriveAppContainerSidFromAppContainerName(profileName, out var sidPointer);
-        if (result < 0 || sidPointer == IntPtr.Zero)
-        {
-            throw new Win32Exception(
-                result & 0xFFFF,
-                $"Could not derive AppContainer profile '{profileName}'.");
-        }
-
-        string sid;
-        try
-        {
-            sid = new SecurityIdentifier(sidPointer).Value;
-        }
-        finally
-        {
-            _ = FreeSid(sidPointer);
-        }
+        var sid = DeriveProfileSid(profileName);
 
         var localAppData = Environment.GetFolderPath(
             Environment.SpecialFolder.LocalApplicationData);
@@ -167,6 +151,40 @@ public static class WindowsAppContainerIdentity
             RegistryArtifactExists(mappingPath + "\\Children"),
             RegistryArtifactExists(storagePath),
             RegistryArtifactExists(storagePath + "\\Children"));
+    }
+
+    [SupportedOSPlatform("windows")]
+    internal static string DeriveProfileSid(string profileName)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("AppContainer identities require Windows.");
+        }
+
+        WindowsAppContainerSecurityCapabilities.ValidateProfileName(profileName);
+        var result = DeriveAppContainerSidFromAppContainerName(profileName, out var sidPointer);
+        if (sidPointer == IntPtr.Zero)
+        {
+            throw new Win32Exception(
+                result & 0xFFFF,
+                $"Could not derive AppContainer profile '{profileName}'.");
+        }
+
+        try
+        {
+            if (result < 0)
+            {
+                throw new Win32Exception(
+                    result & 0xFFFF,
+                    $"Could not derive AppContainer profile '{profileName}'.");
+            }
+
+            return new SecurityIdentifier(sidPointer).Value;
+        }
+        finally
+        {
+            _ = FreeSid(sidPointer);
+        }
     }
 
     [SupportedOSPlatform("windows")]
