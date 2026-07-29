@@ -1211,26 +1211,16 @@ public sealed class WindowsProcessLauncherTests
     }
 
     [Fact]
-    public async Task ClosingJobKillsImmediateExitChildrenWithoutLeakingHandles()
+    public async Task ClosingJobKillsImmediateExitChildrenAndClosesEveryOwnedHandle()
     {
         if (!OperatingSystem.IsWindows())
         {
             return;
         }
 
-        const int warmupRepetitions = 20;
-        const int measuredRepetitions = 50;
-        var hostProcess = Process.GetCurrentProcess();
-        var startingHandles = 0;
-        for (var iteration = 0;
-             iteration < warmupRepetitions + measuredRepetitions;
-             iteration++)
+        const int repetitions = 50;
+        for (var iteration = 0; iteration < repetitions; iteration++)
         {
-            if (iteration == warmupRepetitions)
-            {
-                startingHandles = ReadStabilizedHandleCount(hostProcess);
-            }
-
             var pidFile = NewPath($"child-{iteration.ToString(CultureInfo.InvariantCulture)}.pid");
             int childProcessId;
             var launched = Launch(
@@ -1244,20 +1234,17 @@ public sealed class WindowsProcessLauncherTests
                 Assert.Equal(0, launched.ExitCode);
                 childProcessId = await ReadProcessIdAsync(pidFile, timeout.Token);
                 Assert.True(IsProcessRunning(childProcessId));
-                Assert.False(launched.IsJobHandleClosed);
+                AssertExpectedHandleStateBeforeDisposal(launched.OwnedHandleState);
             }
             finally
             {
                 launched.Dispose();
-                Assert.True(launched.IsJobHandleClosed);
+                AssertEveryOwnedHandleClosed(launched.OwnedHandleState);
             }
 
             await AssertProcessExitedAsync(childProcessId);
             File.Delete(pidFile);
         }
-
-        var handleGrowth = ReadStabilizedHandleCount(hostProcess) - startingHandles;
-        Assert.True(handleGrowth <= 2, $"Process handle count grew by {handleGrowth}.");
     }
 
     [Fact]
@@ -1283,7 +1270,8 @@ public sealed class WindowsProcessLauncherTests
             standardInput,
             standardOutput,
             standardError,
-            job);
+            job,
+            process.SafeHandle);
 
         var failure = Assert.Throws<AggregateException>(isolated.Dispose);
 
@@ -1316,7 +1304,8 @@ public sealed class WindowsProcessLauncherTests
             standardInput,
             new MemoryStream(),
             new MemoryStream(),
-            job);
+            job,
+            process.SafeHandle);
         var firstDispose = Task.Run(isolated.Dispose);
         Assert.True(disposeEntered.Wait(ProcessTimeout));
         var secondStarted = new TaskCompletionSource<bool>(
@@ -1552,19 +1541,34 @@ public sealed class WindowsProcessLauncherTests
         }
     }
 
-    private static int ReadStabilizedHandleCount(Process process)
+    private static void AssertEveryOwnedHandleClosed(
+        WindowsIsolatedProcessHandleState state)
     {
-        var minimumHandleCount = int.MaxValue;
-        for (var attempt = 0; attempt < 4; attempt++)
-        {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            Thread.Sleep(50);
-            process.Refresh();
-            minimumHandleCount = Math.Min(minimumHandleCount, process.HandleCount);
-        }
+        Assert.True(state.JobHandleClosed);
+        Assert.True(state.CreateProcessHandleClosed);
+        Assert.True(state.ManagedProcessHandleClosed);
+        Assert.True(state.StandardInputPipeHandleClosed);
+        Assert.True(state.StandardOutputPipeHandleClosed);
+        Assert.True(state.StandardErrorPipeHandleClosed);
+        Assert.True(state.PrimaryThreadHandleClosed);
+        Assert.True(state.ChildStandardInputPipeHandleClosed);
+        Assert.True(state.ChildStandardOutputPipeHandleClosed);
+        Assert.True(state.ChildStandardErrorPipeHandleClosed);
+    }
 
-        return minimumHandleCount;
+    private static void AssertExpectedHandleStateBeforeDisposal(
+        WindowsIsolatedProcessHandleState state)
+    {
+        Assert.False(state.JobHandleClosed);
+        Assert.False(state.CreateProcessHandleClosed);
+        Assert.False(state.ManagedProcessHandleClosed);
+        Assert.True(state.StandardInputPipeHandleClosed);
+        Assert.False(state.StandardOutputPipeHandleClosed);
+        Assert.False(state.StandardErrorPipeHandleClosed);
+        Assert.True(state.PrimaryThreadHandleClosed);
+        Assert.True(state.ChildStandardInputPipeHandleClosed);
+        Assert.True(state.ChildStandardOutputPipeHandleClosed);
+        Assert.True(state.ChildStandardErrorPipeHandleClosed);
     }
 
     private static bool IsProcessRunning(int processId)
