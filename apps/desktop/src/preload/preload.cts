@@ -6,6 +6,7 @@ import type {
   BackendStatus,
   BackendStatusChanged,
   DesktopConfig,
+  DesktopCloseCoordinatorBinding,
   EditorDocumentWriteOptions,
   ExternalProgramDirectorySelectionResult,
   OpenLineOpsDesktopApi,
@@ -38,6 +39,15 @@ const desktopApi: OpenLineOpsDesktopApi = {
     const handler = (_event: Electron.IpcRendererEvent, requestId: number): void => listener(requestId);
     ipcRenderer.on('desktop:close-request-expired', handler);
     return () => ipcRenderer.removeListener('desktop:close-request-expired', handler);
+  },
+  getCloseCoordinatorBinding: () =>
+    ipcRenderer.invoke(
+      'desktop:get-close-coordinator-binding') as Promise<DesktopCloseCoordinatorBinding>,
+  setCloseCoordinatorReady: (
+    binding: DesktopCloseCoordinatorBinding,
+    ready: boolean
+  ) => {
+    ipcRenderer.send('desktop:close-coordinator-ready', binding, ready);
   },
   acknowledgeCloseRequest: (requestId: number) => {
     ipcRenderer.send('desktop:close-request-acknowledged', requestId);

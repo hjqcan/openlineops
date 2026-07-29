@@ -228,6 +228,7 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | @jridgewell/sourcemap-codec | 1.5.5 | MIT | npm:package-lock |
 | @jridgewell/trace-mapping | 0.3.31 | MIT | npm:package-lock |
 | @microsoft/signalr | 10.0.0 | MIT | npm:package-lock |
+| @microsoft/signalr/node_modules/ws | 7.5.13 | MIT | npm:package-lock |
 | @rolldown/pluginutils | 1.0.0-beta.27 | MIT | npm:package-lock |
 | @rollup/rollup-android-arm-eabi | 4.62.2 | MIT | npm:package-lock |
 | @rollup/rollup-android-arm64 | 4.62.2 | MIT | npm:package-lock |
@@ -343,7 +344,6 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | jsdom/node_modules/tr46 | 6.0.0 | MIT | npm:package-lock |
 | jsdom/node_modules/webidl-conversions | 8.0.1 | BSD-2-Clause | npm:package-lock |
 | jsdom/node_modules/whatwg-url | 15.1.0 | MIT | npm:package-lock |
-| jsdom/node_modules/ws | 8.21.0 | MIT | npm:package-lock |
 | jsesc | 3.1.0 | MIT | npm:package-lock |
 | json5 | 2.2.3 | MIT | npm:package-lock |
 | lodash | 4.18.1 | MIT | npm:package-lock |
@@ -407,7 +407,7 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | whatwg-mimetype | 4.0.0 | MIT | npm:package-lock |
 | whatwg-url | 5.0.0 | MIT | npm:package-lock |
 | wrap-ansi | 7.0.0 | MIT | npm:package-lock |
-| ws | 7.5.11 | MIT | npm:package-lock |
+| ws | 8.21.1 | MIT | npm:package-lock |
 | xml-name-validator | 5.0.0 | Apache-2.0 | npm:package-lock |
 | xmlchars | 2.2.0 | MIT | npm:package-lock |
 | y18n | 5.0.8 | ISC | npm:package-lock |

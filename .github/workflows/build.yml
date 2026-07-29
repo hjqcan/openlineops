@@ -59,6 +59,10 @@ jobs:
         shell: powershell
         run: ./eng/verify-no-legacy-production-contracts.ps1
 
+      - name: Verify Coordinator executable trial security
+        shell: powershell
+        run: ./eng/verify-coordinator-external-program-trial-security.ps1
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
         with:
@@ -237,8 +241,14 @@ jobs:
         working-directory: apps/desktop
         run: npm run build
 
+      - name: Smoke test development launcher shutdown
+        working-directory: apps/desktop
+        timeout-minutes: 5
+        run: npm run smoke:dev-launcher-shutdown
+
       - name: Smoke test desktop
         working-directory: apps/desktop
+        timeout-minutes: 20
         run: npm run smoke:e2e
 
       - name: Restore self-contained Windows production hosts

@@ -7,6 +7,7 @@ import { ElectronCdpHarness } from './electron-cdp-harness.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const desktopRoot = path.resolve(path.dirname(scriptPath), '..');
+const repoRoot = path.resolve(desktopRoot, '..', '..');
 const packagedExecutable = path.join(
   desktopRoot,
   'release',
@@ -14,6 +15,14 @@ const packagedExecutable = path.join(
   'win-unpacked',
   'OpenLineOps.exe');
 const logs = [];
+const processTreeHostExecutable = path.join(
+  repoRoot,
+  'tools',
+  'OpenLineOps.ProcessTreeHost',
+  'bin',
+  'Release',
+  'net10.0',
+  'OpenLineOps.ProcessTreeHost.exe');
 
 if (process.platform !== 'win32') {
   throw new Error('The packaged default user-data smoke requires Windows.');
@@ -37,6 +46,7 @@ const scopedNameIdentityBefore = await captureTreeIdentity(scopedNameDirectory);
 
 const harness = new ElectronCdpHarness({
   executablePath: packagedExecutable,
+  processTreeHostPath: processTreeHostExecutable,
   workingDirectory: path.dirname(packagedExecutable),
   userDataDirectory: null,
   environment: {

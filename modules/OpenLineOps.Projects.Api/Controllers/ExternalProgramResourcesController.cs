@@ -254,6 +254,7 @@ public sealed class ExternalProgramResourcesController : ControllerBase
 
     [HttpPost("{resourceId}/trial")]
     [ProducesResponseType<ExternalProgramTrialApiResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<ExternalProgramTrialApiResponse>> TrialAsync(
         string projectId,
         string applicationId,
@@ -280,6 +281,7 @@ public sealed class ExternalProgramResourcesController : ControllerBase
     [HttpPost("trial")]
     [ProducesResponseType<ExternalProgramTrialApiResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<ExternalProgramTrialApiResponse>> TrialDefinitionAsync(
         string projectId,
         string applicationId,

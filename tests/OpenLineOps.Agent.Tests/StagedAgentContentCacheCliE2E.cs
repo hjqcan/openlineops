@@ -104,7 +104,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             expectedExitCode: 70,
             expectedStandardOutput: string.Empty,
             expectedStandardError:
-                $"OpenLineOps Station Agent terminated: Station service '{context.StationServiceName}' must be fully stopped before immutable cache administration."
+                $"OpenLineOps Station Agent terminated: System.InvalidOperationException: Station service '{context.StationServiceName}' must be fully stopped before immutable cache administration."
                 + Environment.NewLine,
             "reject cache provisioning while the exact Station service is running");
 

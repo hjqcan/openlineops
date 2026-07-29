@@ -9,10 +9,33 @@ public sealed class StationMaterialArrivalWorker(
     StationMaterialArrivalOutboxDispatcher outboxDispatcher,
     IClock clock) : BackgroundService
 {
-    protected override Task ExecuteAsync(CancellationToken stoppingToken) =>
-        Task.WhenAll(
-            ipcServer.RunAsync(stoppingToken),
-            DispatchOutboxAsync(stoppingToken));
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var lifetime =
+            CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        Task[] loops =
+        [
+            ipcServer.RunAsync(lifetime.Token),
+            DispatchOutboxAsync(lifetime.Token)
+        ];
+        await AwaitLoopsAsync(
+                loops,
+                lifetime,
+                stoppingToken)
+            .ConfigureAwait(false);
+    }
+
+    internal static Task AwaitLoopsAsync(
+        Task[] loops,
+        CancellationTokenSource lifetime,
+        CancellationToken stoppingToken,
+        TimeSpan? unexpectedSiblingDrainTimeout = null) =>
+        StationAgentWorkerLifecycle.AwaitLoopsAsync(
+            loops,
+            lifetime,
+            "Station material-arrival worker",
+            stoppingToken,
+            unexpectedSiblingDrainTimeout);
 
     private async Task DispatchOutboxAsync(CancellationToken stoppingToken)
     {

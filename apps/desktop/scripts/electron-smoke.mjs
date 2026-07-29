@@ -13,10 +13,39 @@ import {
   createWindowsPowerShellHost,
   windowsSystemExecutablePath
 } from './windows-powershell-host.mjs';
+import {
+  createSafeCdpEvent,
+  formatDiagnosticError,
+  redactDiagnosticText,
+  sanitizeDiagnosticValue
+} from './smoke-diagnostics.mjs';
+import { CdpClient } from './smoke-cdp-client.mjs';
+import { waitForHttp } from './smoke-http-wait.mjs';
+import {
+  resolveDotnetExecutablePath,
+  spawnOwnedProcessTree
+} from './owned-process-tree.mjs';
+import {
+  getCurrentWindowsProcessStartedAtUnixMilliseconds,
+  isWindowsProcessIdentityRunning,
+  requestWindowsMainWindowCloseForIdentity,
+  terminateWindowsProcessIdentity
+} from './windows-process-identity.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const desktopRoot = path.resolve(path.dirname(scriptPath), '..');
 const repoRoot = path.resolve(desktopRoot, '..', '..');
+const smokeProcessStartedAtUnixMilliseconds =
+  await getCurrentWindowsProcessStartedAtUnixMilliseconds();
+const processTreeHostExecutable = path.join(
+  repoRoot,
+  'tools',
+  'OpenLineOps.ProcessTreeHost',
+  'bin',
+  'Release',
+  'net10.0',
+  'OpenLineOps.ProcessTreeHost.exe');
+const dotnetExecutable = await resolveDotnetExecutablePath(process.env);
 const packagedMode = process.argv.includes('--packaged');
 const packagedExecutable = path.join(
   desktopRoot,
@@ -72,16 +101,18 @@ const electronRendererTargetTimeoutMilliseconds = 90_000;
 let previewProcess;
 let electronProcess;
 let cdp;
+let activeCdpPort;
 let activeProjectApplicationScope;
 let apiSquatterServer;
 let apiSquatterBaseUrl;
-const apiSquatterAuthorizationHeaders = [];
+let apiSquatterCredentialAttemptCount = 0;
 const smokeProjectDirectories = [];
 let smokeUserDataDirectory;
 let sampleExtensionArchive;
 
 async function main() {
   assertNodeRuntime();
+  await prepareProcessTreeHost();
 
   const previewPort = packagedMode ? null : await getFreePort();
   const cdpPort = await getFreePort();
@@ -100,7 +131,7 @@ async function main() {
   ({ server: apiSquatterServer, baseUrl: apiSquatterBaseUrl } = await startApiSquatter());
 
   if (previewUrl) {
-    previewProcess = spawnLogged(
+    previewProcess = spawnContained(
       process.execPath,
       [viteCliPath, 'preview', '--host', '127.0.0.1', '--port', String(previewPort)],
       {
@@ -112,8 +143,9 @@ async function main() {
         }
       },
       'vite');
+    await waitForContainedRootProcessId(previewProcess, 10_000, 'vite');
 
-    await waitForHttp(previewUrl, 30000, 'Vite preview');
+    await waitForHttp(previewUrl, 30000, 'Vite preview', previewProcess);
   } else {
     const executableStat = await fs.stat(packagedExecutable).catch(() => null);
     if (!executableStat?.isFile()) {
@@ -132,7 +164,7 @@ async function main() {
   }
 
   const electronLaunchStartedAt = Date.now();
-  electronProcess = spawnLogged(
+  electronProcess = spawnContained(
     packagedMode ? packagedExecutable : electronPath,
     packagedMode
       ? packagedElectronArguments(cdpPort)
@@ -162,6 +194,7 @@ async function main() {
           }
     },
     'electron');
+  await waitForContainedRootProcessId(electronProcess, 10_000, 'electron');
 
   const target = await waitForCdpTarget(
     cdpPort,
@@ -172,7 +205,10 @@ async function main() {
   if (packagedMode) {
     console.log(`Packaged Electron renderer target ready in ${Date.now() - electronLaunchStartedAt} ms.`);
   }
-  cdp = await CdpClient.connect(target.webSocketDebuggerUrl);
+  cdp = await CdpClient.connect(
+    target.webSocketDebuggerUrl,
+    { onEvent: appendCdpEvent });
+  activeCdpPort = cdpPort;
   await cdp.send('Runtime.enable');
   await cdp.send('Log.enable');
   await cdp.send('Page.enable');
@@ -1669,9 +1705,9 @@ async function main() {
   } else {
     await assertBackendExitFailsClosed();
   }
-  if (apiSquatterAuthorizationHeaders.length !== 0) {
+  if (apiSquatterCredentialAttemptCount !== 0) {
     throw new Error(
-      `API squatter received credentials: ${JSON.stringify(apiSquatterAuthorizationHeaders)}`);
+      `API squatter received ${apiSquatterCredentialAttemptCount} credential-bearing request(s).`);
   }
   console.log(`${packagedMode ? 'Packaged ' : ''}Electron smoke passed against ${apiBaseUrl}.`);
 }
@@ -1764,7 +1800,7 @@ async function assertPackagedRestartPersistence(productionUnitIdentityValue, ren
   await closeElectronForPackagedRestart();
   const restartCdpPort = await getFreePort();
   const restartLaunchStartedAt = Date.now();
-  electronProcess = spawnLogged(
+  electronProcess = spawnContained(
     packagedExecutable,
     packagedElectronArguments(restartCdpPort),
     {
@@ -1772,6 +1808,10 @@ async function assertPackagedRestartPersistence(productionUnitIdentityValue, ren
       windowsHide: false,
       env: packagedElectronEnvironment(rendererNonce)
     },
+    'electron-restart');
+  await waitForContainedRootProcessId(
+    electronProcess,
+    10_000,
     'electron-restart');
   const target = await waitForCdpTarget(
     restartCdpPort,
@@ -1781,7 +1821,10 @@ async function assertPackagedRestartPersistence(productionUnitIdentityValue, ren
     'electron-restart');
   console.log(
     `Packaged Electron restart renderer target ready in ${Date.now() - restartLaunchStartedAt} ms.`);
-  cdp = await CdpClient.connect(target.webSocketDebuggerUrl);
+  cdp = await CdpClient.connect(
+    target.webSocketDebuggerUrl,
+    { onEvent: appendCdpEvent });
+  activeCdpPort = restartCdpPort;
   await cdp.send('Runtime.enable');
   await cdp.send('Log.enable');
   await cdp.send('Page.enable');
@@ -1833,7 +1876,7 @@ async function assertPackagedRestartPersistence(productionUnitIdentityValue, ren
       `Restarted packaged primary instance has no healthy backend identity: ${JSON.stringify(primaryBackend)}`);
   }
   const secondInstanceCdpPort = await getFreePort();
-  const secondInstance = spawnLogged(
+  const secondInstance = spawnContained(
     packagedExecutable,
     packagedElectronArguments(secondInstanceCdpPort),
     {
@@ -1842,10 +1885,17 @@ async function assertPackagedRestartPersistence(productionUnitIdentityValue, ren
     },
     'electron-second-instance');
   try {
+    await waitForContainedRootProcessId(
+      secondInstance,
+      10_000,
+      'electron-second-instance');
     const secondInstanceExited = await waitForChildExit(secondInstance, 10000);
     if (!secondInstanceExited) {
       throw new Error('A second packaged instance with the same userData did not exit promptly.');
     }
+    assertCleanContainedProcessExit(
+      secondInstance,
+      'The second packaged instance');
   } finally {
     await stopChild(secondInstance);
   }
@@ -1867,11 +1917,15 @@ async function assertPackagedRestartPersistence(productionUnitIdentityValue, ren
 }
 
 async function closeElectronForPackagedRestart() {
-  if (!cdp || !electronProcess) {
+  if (!cdp || !electronProcess || !Number.isSafeInteger(activeCdpPort)) {
     throw new Error('Packaged restart requires an active Electron CDP session and process.');
   }
-  const closingCdp = cdp;
+  let closingCdp = cdp;
   const closingProcess = electronProcess;
+  const closingElectronIdentity = containedRootProcessIdentity(
+    closingProcess,
+    'packaged Electron');
+  const closingElectronProcessId = closingElectronIdentity.processId;
   await clickByTestId('nav-programs');
   await waitForExpression(
     '(() => Boolean(document.querySelector("[data-testid=\\"external-program-workbench\\"]"))'
@@ -1884,7 +1938,116 @@ async function closeElectronForPackagedRestart() {
   await waitForExpression(
     'Boolean(document.querySelector("[data-testid=\\"editor-tab-programs\\"] .editor-dirty-badge"))',
     15000,
-    'Program Resource editor to become dirty before its guarded transition');
+    'Program Resource editor to become dirty before canceling application quit');
+  const backendBeforeCanceledQuit = await getBackendStatus();
+  const configBeforeCanceledQuit = await evaluate('window.openlineopsDesktop.getConfig()');
+  const apiProbeBeforeCanceledQuit = await evaluate(
+    'window.openlineopsDesktop.apiRequest("/api/platform")');
+  if (!backendBeforeCanceledQuit.isRunning
+      || backendBeforeCanceledQuit.health !== 'Healthy'
+      || !Number.isSafeInteger(backendBeforeCanceledQuit.pid)
+      || backendBeforeCanceledQuit.pid <= 0
+      || !backendBeforeCanceledQuit.startedAtUtc
+      || !backendBeforeCanceledQuit.apiBaseUrl
+      || !configBeforeCanceledQuit.apiAccessToken
+      || apiProbeBeforeCanceledQuit.ok !== true
+      || apiProbeBeforeCanceledQuit.status !== 200) {
+    throw new Error(
+      `Packaged application-quit cancellation has no healthy runtime identity: ${JSON.stringify({
+        backendBeforeCanceledQuit,
+        configBeforeCanceledQuit: {
+          ...configBeforeCanceledQuit,
+          apiAccessToken: configBeforeCanceledQuit.apiAccessToken ? '<present>' : ''
+        },
+        apiProbeBeforeCanceledQuit
+      })}`);
+  }
+  await evaluate('window.__openlineopsSmokeEvents = {}');
+  let browserCloseDisposition = 'pending';
+  void closingCdp.send('Browser.close').then(
+    () => {
+      browserCloseDisposition = 'resolved';
+    },
+    error => {
+      browserCloseDisposition = `rejected: ${String(error)}`;
+    });
+  await waitForExpressionWithCdpRecovery(
+    '(() => {'
+    + ' const events = window.__openlineopsSmokeEvents ?? {};'
+    + ' return events["application-close-requested"] === 1'
+    + ' && events["application-close-acknowledged"] === 1'
+    + ' && events["application-close-prompted-for-unsaved-changes"] === 1'
+    + ' && document.querySelector("[data-testid=\\"unsaved-changes-dialog\\"]")?.matches(":modal") === true'
+    + ' && document.querySelector("[data-testid=\\"unsaved-changes-dialog\\"]")?.textContent?.includes("Close OpenLineOps?");'
+    + ' })()',
+    15000,
+    'application-level Browser.close to reach the unsaved editor prompt',
+    closingProcess,
+    'electron');
+  closingCdp = cdp;
+  await clickByTestId('unsaved-cancel');
+  await waitForExpressionWithCdpRecovery(
+    '(() => {'
+    + ' const events = window.__openlineopsSmokeEvents ?? {};'
+    + ' return events["application-close-canceled"] === 1'
+    + ' && !document.querySelector("[data-testid=\\"unsaved-changes-dialog\\"]");'
+    + ' })()',
+    15000,
+    'the application-level quit to be canceled without closing Studio',
+    closingProcess,
+    'electron');
+  closingCdp = cdp;
+  if (closingProcess.exitCode !== null
+      || closingProcess.signalCode !== null
+      || !await isWindowsProcessIdentityRunning(closingElectronIdentity)) {
+    throw new Error(
+      `Canceling application quit terminated Electron PID ${closingElectronProcessId}.`);
+  }
+  const backendAfterCanceledQuit = await getBackendStatus();
+  const configAfterCanceledQuit = await evaluate('window.openlineopsDesktop.getConfig()');
+  const apiProbeAfterCanceledQuit = await evaluate(
+    'window.openlineopsDesktop.apiRequest("/api/platform")');
+  const runtimeIdentityBeforeCanceledQuit = {
+    pid: backendBeforeCanceledQuit.pid,
+    startedAtUtc: backendBeforeCanceledQuit.startedAtUtc,
+    apiBaseUrl: backendBeforeCanceledQuit.apiBaseUrl,
+    apiAccessToken: configBeforeCanceledQuit.apiAccessToken,
+    configApiBaseUrl: configBeforeCanceledQuit.apiBaseUrl,
+    apiActorId: configBeforeCanceledQuit.apiActorId
+  };
+  const runtimeIdentityAfterCanceledQuit = {
+    pid: backendAfterCanceledQuit.pid,
+    startedAtUtc: backendAfterCanceledQuit.startedAtUtc,
+    apiBaseUrl: backendAfterCanceledQuit.apiBaseUrl,
+    apiAccessToken: configAfterCanceledQuit.apiAccessToken,
+    configApiBaseUrl: configAfterCanceledQuit.apiBaseUrl,
+    apiActorId: configAfterCanceledQuit.apiActorId
+  };
+  if (backendAfterCanceledQuit.isRunning !== true
+      || backendAfterCanceledQuit.health !== 'Healthy'
+      || JSON.stringify(runtimeIdentityAfterCanceledQuit)
+        !== JSON.stringify(runtimeIdentityBeforeCanceledQuit)
+      || apiProbeAfterCanceledQuit.ok !== true
+      || apiProbeAfterCanceledQuit.status !== 200) {
+    throw new Error(
+      `Canceling packaged application quit changed its live runtime identity: ${JSON.stringify({
+        runtimeIdentityBeforeCanceledQuit: {
+          ...runtimeIdentityBeforeCanceledQuit,
+          apiAccessToken: '<redacted>'
+        },
+        runtimeIdentityAfterCanceledQuit: {
+          ...runtimeIdentityAfterCanceledQuit,
+          apiAccessToken: '<redacted>'
+        },
+        backendAfterCanceledQuit,
+        apiProbeAfterCanceledQuit,
+        browserCloseDisposition
+      })}`);
+  }
+  logSmokeMilestone(
+    `application quit canceled with Electron PID ${closingElectronProcessId}`
+    + ` and backend PID ${backendAfterCanceledQuit.pid} unchanged`);
+  await evaluate('window.__openlineopsSmokeEvents = {}');
   await clickByTestId('refresh-external-program-resources');
   await waitForExpression(
     '(() => document.querySelector("[data-testid=\\"external-program-draft-transition-dialog\\"]")?.open === true'
@@ -1922,9 +2085,10 @@ async function closeElectronForPackagedRestart() {
         JSON.stringify(closeReadiness)}`);
   }
   logSmokeMilestone(
-    `coordinated close ready with Electron PID ${closingProcess.pid}`
+    `coordinated close ready with Electron PID ${closingElectronProcessId}`
     + ` and backend PID ${backendBeforeClose.pid}`);
-  const nativeClose = await requestWindowsMainWindowClose(closingProcess.pid);
+  const nativeClose = await requestWindowsMainWindowCloseForIdentity(
+    closingElectronIdentity);
   logSmokeMilestone(
     `native close accepted for HWND ${nativeClose.windowHandle}`
     + ` (${nativeClose.windowTitle || 'untitled'})`);
@@ -1960,6 +2124,7 @@ async function closeElectronForPackagedRestart() {
   }
   closingCdp.close();
   cdp = undefined;
+  activeCdpPort = undefined;
   if (!exited) {
     throw new Error(
       'Packaged Electron did not exit cleanly before same-package restart.'
@@ -1967,15 +2132,20 @@ async function closeElectronForPackagedRestart() {
       + ` Blocked close state: ${JSON.stringify(blockedCloseState)}.`
       + (discardClickError ? ` Discard transition: ${String(discardClickError)}` : ''));
   }
+  assertCleanContainedProcessExit(
+    closingProcess,
+    'Packaged Electron coordinated close');
   electronProcess = undefined;
   logSmokeMilestone('busy editor settled and the same close request exited Electron');
+  const backendBeforeCloseIdentity = backendProcessIdentity(
+    backendBeforeClose,
+    'backend before coordinated Studio close');
   const backendExitDeadline = Date.now() + 20000;
   while (Date.now() < backendExitDeadline
-      && await isWindowsProcessRunning(backendBeforeClose.pid)) {
+      && await isWindowsProcessIdentityRunning(backendBeforeCloseIdentity)) {
     await delay(100);
   }
-  if (await isWindowsProcessRunning(backendBeforeClose.pid)) {
-    await killProcessTreeByPid(backendBeforeClose.pid).catch(() => undefined);
+  if (await isWindowsProcessIdentityRunning(backendBeforeCloseIdentity)) {
     throw new Error(
       `Backend PID ${backendBeforeClose.pid} survived the coordinated Studio close.`);
   }
@@ -1998,16 +2168,16 @@ async function assertPackagedPrimaryTerminationStopsBackend() {
   }
 
   const terminatedElectron = electronProcess;
-  const terminatedElectronPid = terminatedElectron.pid;
-  if (!Number.isSafeInteger(terminatedElectronPid) || terminatedElectronPid <= 0) {
-    throw new Error(`Packaged Electron has no process identity: ${terminatedElectronPid}`);
-  }
+  const terminatedElectronIdentity = containedRootProcessIdentity(
+    terminatedElectron,
+    'packaged Electron');
+  const terminatedElectronPid = terminatedElectronIdentity.processId;
+  const backendBeforeTerminationIdentity = backendProcessIdentity(
+    backendBeforeTermination,
+    'backend before packaged Electron termination');
   cdp.close();
   cdp = undefined;
-  const terminationRequested = terminatedElectron.kill('SIGKILL');
-  if (!terminationRequested && terminatedElectron.exitCode === null) {
-    throw new Error(`Failed to strongly terminate packaged Electron PID ${terminatedElectronPid}.`);
-  }
+  await terminateWindowsProcessIdentity(terminatedElectronIdentity);
   if (!await waitForChildExit(terminatedElectron, 10000)) {
     throw new Error(`Strongly terminated packaged Electron PID ${terminatedElectronPid} did not exit.`);
   }
@@ -2015,12 +2185,12 @@ async function assertPackagedPrimaryTerminationStopsBackend() {
 
   const deadline = Date.now() + 20000;
   while (Date.now() < deadline) {
-    if (!await isWindowsProcessRunning(backendBeforeTermination.pid)) {
+    if (!await isWindowsProcessIdentityRunning(
+      backendBeforeTerminationIdentity)) {
       return;
     }
     await delay(100);
   }
-  await killProcessTreeByPid(backendBeforeTermination.pid).catch(() => undefined);
   throw new Error(
     `Backend PID ${backendBeforeTermination.pid} survived strong termination of Electron PID ${terminatedElectronPid}.`);
 }
@@ -2595,7 +2765,8 @@ async function assertBackendExitFailsClosed() {
   if (!Number.isSafeInteger(running.pid) || running.pid <= 0) {
     throw new Error(`Healthy backend did not expose a process identity: ${JSON.stringify(running)}`);
   }
-  await killProcessTreeByPid(running.pid);
+  await terminateWindowsProcessIdentity(
+    backendProcessIdentity(running, 'backend before fail-closed exit test'));
 
   const deadline = Date.now() + 15000;
   let stopped;
@@ -2623,141 +2794,6 @@ async function assertBackendExitFailsClosed() {
   }
 }
 
-async function killProcessTreeByPid(pid) {
-  if (process.platform !== 'win32') {
-    throw new Error('Electron security smoke requires Windows process-tree termination.');
-  }
-  await new Promise((resolve, reject) => {
-    const child = spawn(windowsSystemExecutablePath('taskkill.exe'), ['/pid', String(pid), '/t', '/f'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true
-    });
-    let errorOutput = '';
-    child.stderr.on('data', chunk => {
-      errorOutput += chunk.toString();
-    });
-    child.once('error', reject);
-    child.once('exit', code => code === 0
-      ? resolve()
-      : reject(new Error(`taskkill failed with code ${code}: ${errorOutput.trim()}`)));
-  });
-}
-
-async function requestWindowsMainWindowClose(pid) {
-  if (process.platform !== 'win32') {
-    throw new Error('Packaged native-window close inspection requires Windows.');
-  }
-  if (!Number.isSafeInteger(pid) || pid <= 0) {
-    throw new Error(`Packaged Electron has no valid process identity: ${pid}`);
-  }
-  const powerShellHost = createWindowsPowerShellHost();
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      powerShellHost.executablePath,
-      [
-        '-NoLogo',
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        `$targetProcess = Get-Process -Id ${pid} -ErrorAction Stop; `
-        + '$targetProcess.Refresh(); '
-        + '$windowHandle = [Int64]$targetProcess.MainWindowHandle; '
-        + '$windowTitle = $targetProcess.MainWindowTitle; '
-        + '$accepted = $targetProcess.CloseMainWindow(); '
-        + '[Console]::Out.Write((ConvertTo-Json @{ '
-        + 'accepted = $accepted; windowHandle = $windowHandle; windowTitle = $windowTitle '
-        + '} -Compress)); '
-        + 'if (-not $accepted) { '
-        + `throw 'Process ${pid} did not accept a native close request.' }`
-      ],
-      {
-        env: powerShellHost.environment,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true
-      });
-    let settled = false;
-    let output = '';
-    let errorOutput = '';
-    const settle = (error) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeout);
-      if (error) {
-        reject(error);
-      } else {
-        try {
-          const result = JSON.parse(output);
-          if (result.accepted !== true
-              || !Number.isSafeInteger(result.windowHandle)
-              || result.windowHandle <= 0
-              || typeof result.windowTitle !== 'string') {
-            throw new Error(
-              `Native close returned an invalid window identity: ${output}`);
-          }
-          resolve(result);
-        } catch (parseError) {
-          reject(parseError);
-        }
-      }
-    };
-    const timeout = setTimeout(() => {
-      child.kill('SIGKILL');
-      settle(new Error(`Timed out requesting a native close for Electron PID ${pid}.`));
-    }, 5000);
-    child.stdout.on('data', chunk => {
-      output += chunk.toString();
-    });
-    child.stderr.on('data', chunk => {
-      errorOutput += chunk.toString();
-    });
-    child.once('error', settle);
-    child.once('exit', code => settle(code === 0
-      ? null
-      : new Error(
-          `Native close request for Electron PID ${pid} failed with code ${code}: ${
-            errorOutput.trim()}`)));
-  });
-}
-
-async function isWindowsProcessRunning(pid) {
-  if (process.platform !== 'win32') {
-    throw new Error('Packaged parent-death inspection requires Windows.');
-  }
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      windowsSystemExecutablePath('tasklist.exe'),
-      ['/fi', `PID eq ${pid}`, '/fo', 'csv', '/nh'],
-      {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true
-      });
-    let output = '';
-    let errorOutput = '';
-    child.stdout.on('data', chunk => {
-      output += chunk.toString();
-    });
-    child.stderr.on('data', chunk => {
-      errorOutput += chunk.toString();
-    });
-    child.once('error', reject);
-    child.once('exit', code => {
-      if (code !== 0) {
-        reject(new Error(`tasklist failed with code ${code}: ${errorOutput.trim()}`));
-        return;
-      }
-      const running = output.split(/\r?\n/u).some(line => {
-        const match = /^"[^"]+","(\d+)"/u.exec(line.trim());
-        return match !== null && Number(match[1]) === pid;
-      });
-      resolve(running);
-    });
-  });
-}
-
 async function waitForNoPluginHostProcesses() {
   const deadline = Date.now() + 15000;
   let lastCount = -1;
@@ -2772,42 +2808,28 @@ async function waitForNoPluginHostProcesses() {
 }
 
 async function countPluginHostProcesses() {
-  return new Promise((resolve, reject) => {
-    const powerShellHost = createWindowsPowerShellHost();
-    const child = spawn(
-      powerShellHost.executablePath,
-      [
-        '-NoLogo',
-        '-NoProfile',
-        '-NonInteractive',
-        '-Command',
-        '@(Get-CimInstance Win32_Process | Where-Object { '
-          + '($_.Name -ieq "dotnet.exe" -or $_.Name -ieq "OpenLineOps.PluginHost.exe") '
-          + '-and $_.CommandLine -like "*--openlineops-plugin-host*" }).Count'
-      ],
-      {
-        env: powerShellHost.environment,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true
-      });
-    let output = '';
-    let errorOutput = '';
-    child.stdout.on('data', chunk => { output += chunk.toString(); });
-    child.stderr.on('data', chunk => { errorOutput += chunk.toString(); });
-    child.once('error', reject);
-    child.once('exit', code => {
-      if (code !== 0) {
-        reject(new Error(`PluginHost process inspection failed: ${errorOutput.trim()}`));
-        return;
-      }
-      const count = Number.parseInt(output.trim(), 10);
-      if (!Number.isSafeInteger(count) || count < 0) {
-        reject(new Error(`PluginHost process inspection returned '${output.trim()}'.`));
-        return;
-      }
-      resolve(count);
-    });
-  });
+  const powerShellHost = createWindowsPowerShellHost();
+  const result = await runCapturedProcess(
+    powerShellHost.executablePath,
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      '@(Get-CimInstance Win32_Process | Where-Object { '
+        + '($_.Name -ieq "dotnet.exe" -or $_.Name -ieq "OpenLineOps.PluginHost.exe") '
+        + '-and $_.CommandLine -like "*--openlineops-plugin-host*" }).Count'
+    ],
+    { env: powerShellHost.environment },
+    'PluginHost process inspection',
+    5_000,
+    64 * 1024);
+  const count = Number.parseInt(result.standardOutput.trim(), 10);
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error(
+      `PluginHost process inspection returned '${result.standardOutput.trim()}'.`);
+  }
+  return count;
 }
 
 async function waitForHealthyBackend() {
@@ -4067,7 +4089,9 @@ async function waitForExpression(expression, timeoutMs, description) {
   let lastValue;
 
   while (Date.now() < deadline) {
-    lastValue = await evaluate(expression);
+    lastValue = await evaluate(
+      expression,
+      Math.max(1, Math.min(5000, deadline - Date.now())));
     if (lastValue) {
       return lastValue;
     }
@@ -4078,12 +4102,107 @@ async function waitForExpression(expression, timeoutMs, description) {
   throw new Error(`Timed out waiting for ${description}. Last value: ${JSON.stringify(lastValue)}`);
 }
 
-async function evaluate(expression) {
+async function waitForExpressionWithCdpRecovery(
+  expression,
+  timeoutMs,
+  description,
+  child,
+  label) {
+  const deadline = Date.now() + timeoutMs;
+  let lastValue;
+
+  while (Date.now() < deadline) {
+    if (!cdp?.isOpen()) {
+      if (child.openlineopsLaunchError instanceof Error) {
+        throw new Error(
+          `${label} failed to start while waiting for ${description}. `
+          + `Diagnostics: ${JSON.stringify(childProcessDiagnostics(child, label))}`,
+          { cause: child.openlineopsLaunchError });
+      }
+      if (hasChildExited(child)) {
+        throw new Error(
+          `${label} exited while waiting for ${description}. `
+          + `Diagnostics: ${JSON.stringify(childProcessDiagnostics(child, label))}`);
+      }
+      if (!Number.isSafeInteger(activeCdpPort)) {
+        throw new Error(`Cannot reconnect ${label} CDP without its active debugger port.`);
+      }
+      let candidate;
+      try {
+        const remainingTargetMilliseconds = Math.max(
+          1,
+          deadline - Date.now());
+        const target = await waitForCdpTarget(
+          activeCdpPort,
+          null,
+          remainingTargetMilliseconds,
+          child,
+          label);
+        const remainingConnectMilliseconds = Math.max(
+          1,
+          deadline - Date.now());
+        candidate = await CdpClient.connect(
+          target.webSocketDebuggerUrl,
+          {
+            onEvent: appendCdpEvent,
+            connectionTimeoutMilliseconds: remainingConnectMilliseconds,
+            commandTimeoutMilliseconds: remainingConnectMilliseconds
+          });
+        await candidate.send(
+          'Runtime.enable',
+          {},
+          Math.max(1, deadline - Date.now()));
+        await candidate.send(
+          'Log.enable',
+          {},
+          Math.max(1, deadline - Date.now()));
+        await candidate.send(
+          'Page.enable',
+          {},
+          Math.max(1, deadline - Date.now()));
+        cdp = candidate;
+      } catch (error) {
+        candidate?.close();
+        cdp = null;
+        lastValue = {
+          reconnectFailure: error instanceof Error
+            ? error.message
+            : String(error)
+        };
+        await delay(Math.max(1, Math.min(250, deadline - Date.now())));
+        continue;
+      }
+    }
+
+    try {
+      lastValue = await evaluate(
+        expression,
+        Math.max(1, Math.min(5000, deadline - Date.now())));
+    } catch (error) {
+      if (cdp?.isOpen()) {
+        throw error;
+      }
+      lastValue = {
+        disconnected: error instanceof Error ? error.message : String(error)
+      };
+      continue;
+    }
+    if (lastValue) {
+      return lastValue;
+    }
+
+    await delay(250);
+  }
+
+  throw new Error(`Timed out waiting for ${description}. Last value: ${JSON.stringify(lastValue)}`);
+}
+
+async function evaluate(expression, timeoutMilliseconds) {
   const response = await cdp.send('Runtime.evaluate', {
     expression,
     awaitPromise: true,
     returnByValue: true
-  });
+  }, timeoutMilliseconds);
 
   if (response.exceptionDetails) {
     const description = response.exceptionDetails.exception?.description
@@ -4116,24 +4235,34 @@ async function collectDiagnostics() {
   }
 
   try {
-    return evaluate(`(async () => ({
-      page: {
-        text: document.body?.innerText ?? '',
-        hubState: document.querySelector(".rail-footer .status-pill")?.textContent?.trim() ?? null,
-        runDisabled: document.querySelector('[data-testid="run-active-project"]')?.disabled ?? null,
-        refreshDisabled: document.querySelector('[data-testid="refresh-backend"]')?.disabled ?? null,
-        events: window.__openlineopsSmokeEvents ?? null,
-        last3DDrag: window.__openlineopsLast3DDrag ?? null
-      },
-      backendStatus: await window.openlineopsDesktop?.getBackendStatus?.(),
-      config: await window.openlineopsDesktop?.getConfig?.(),
-      cdpEvents: ${JSON.stringify(cdpEvents)}
-    }))()`);
+    return sanitizeDiagnosticValue(await evaluate(`(async () => {
+      const desktopConfig = await window.openlineopsDesktop?.getConfig?.();
+      return {
+        page: {
+          text: document.body?.innerText ?? '',
+          hubState: document.querySelector(".rail-footer .status-pill")?.textContent?.trim() ?? null,
+          runDisabled: document.querySelector('[data-testid="run-active-project"]')?.disabled ?? null,
+          refreshDisabled: document.querySelector('[data-testid="refresh-backend"]')?.disabled ?? null,
+          events: window.__openlineopsSmokeEvents ?? null,
+          last3DDrag: window.__openlineopsLast3DDrag ?? null
+        },
+        backendStatus: await window.openlineopsDesktop?.getBackendStatus?.(),
+        config: desktopConfig == null
+          ? desktopConfig
+          : {
+              apiBaseUrl: desktopConfig.apiBaseUrl,
+              apiActorId: desktopConfig.apiActorId,
+              isPackaged: desktopConfig.isPackaged,
+              publicEvidenceMode: desktopConfig.publicEvidenceMode
+            },
+        cdpEvents: ${JSON.stringify(cdpEvents)}
+      };
+    })()`));
   } catch (error) {
-    return {
+    return sanitizeDiagnosticValue({
       diagnosticsError: error instanceof Error ? error.message : String(error),
       cdpEvents
-    };
+    });
   }
 }
 
@@ -4142,7 +4271,9 @@ async function waitForCdpTarget(port, previewUrl, timeoutMs, child, label) {
 
   while (Date.now() < deadline) {
     try {
-      const targets = await fetchJson(`http://127.0.0.1:${port}/json/list`);
+      const targets = await fetchJson(
+        `http://127.0.0.1:${port}/json/list`,
+        Math.max(1, Math.min(2000, deadline - Date.now())));
       const target = targets.find(item => item.type === 'page'
         && (previewUrl ? item.url.startsWith(previewUrl) : item.url.startsWith('file:')));
       if (target?.webSocketDebuggerUrl) {
@@ -4152,13 +4283,19 @@ async function waitForCdpTarget(port, previewUrl, timeoutMs, child, label) {
       // Electron may still be starting.
     }
 
-    if (child && (child.exitCode !== null || child.signalCode !== null)) {
+    if (child?.openlineopsLaunchError instanceof Error) {
+      throw new Error(
+        `${label} failed to start before exposing its renderer CDP target on port ${port}. `
+        + `Diagnostics: ${JSON.stringify(childProcessDiagnostics(child, label))}`,
+        { cause: child.openlineopsLaunchError });
+    }
+    if (child && hasChildExited(child)) {
       throw new Error(
         `${label} exited before exposing its renderer CDP target on port ${port}. `
         + `Diagnostics: ${JSON.stringify(childProcessDiagnostics(child, label))}`);
     }
 
-    await delay(500);
+    await delay(Math.max(1, Math.min(500, deadline - Date.now())));
   }
 
   throw new Error(
@@ -4171,33 +4308,17 @@ function childProcessDiagnostics(child, label) {
     pid: child?.pid ?? null,
     exitCode: child?.exitCode ?? null,
     signalCode: child?.signalCode ?? null,
+    launchError: child?.openlineopsLaunchError?.message ?? null,
     recentProcessLogs: childLogs
       .filter(line => line.startsWith(`[${label}] `))
       .slice(-40)
   };
 }
 
-async function waitForHttp(url, timeoutMs, description) {
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return;
-      }
-    } catch {
-      // Server may still be starting.
-    }
-
-    await delay(400);
-  }
-
-  throw new Error(`Timed out waiting for ${description} at ${url}.`);
-}
-
-async function fetchJson(url) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
+async function fetchJson(url, timeoutMilliseconds) {
+  const response = await fetch(
+    url,
+    { signal: AbortSignal.timeout(timeoutMilliseconds) });
   if (!response.ok) {
     throw new Error(`GET ${url} returned ${response.status}.`);
   }
@@ -4211,19 +4332,153 @@ function spawnLogged(command, args, options, label) {
     windowsHide: options.windowsHide ?? true,
     stdio: ['ignore', 'pipe', 'pipe']
   });
+  return observeLoggedChild(child, label);
+}
+
+function observeLoggedChild(child, label) {
+  child.openlineopsLaunchError = null;
 
   child.stdout.on('data', chunk => appendChildLog(label, chunk));
   child.stderr.on('data', chunk => appendChildLog(label, chunk));
+  child.once('error', error => {
+    child.openlineopsLaunchError = error;
+    appendChildLog(label, `failed to start: ${error.message}`);
+  });
   child.on('exit', code => appendChildLog(label, `exited with code ${code ?? 'unknown'}`));
 
   return child;
+}
+
+function spawnContained(command, args, options, label) {
+  const hostedExecutable = path.resolve(command);
+  const hostedWorkingDirectory = path.resolve(options.cwd);
+  const child = spawnLogged(
+    processTreeHostExecutable,
+    [
+      String(process.pid),
+      String(smokeProcessStartedAtUnixMilliseconds),
+      hostedExecutable,
+      hostedWorkingDirectory,
+      ...args
+    ],
+    {
+      ...options,
+      cwd: path.dirname(processTreeHostExecutable)
+    },
+    label);
+  child.openlineopsOwnsKillOnCloseJob = true;
+  child.openlineopsHostedProcessId = null;
+  child.openlineopsHostedProcessStartedAtUnixMilliseconds = null;
+  child.openlineopsProcessTreeIdentityBuffer = '';
+
+  child.stderr.on('data', chunk => {
+    if (child.openlineopsHostedProcessId !== null) {
+      return;
+    }
+    const combined =
+      `${child.openlineopsProcessTreeIdentityBuffer}${chunk.toString()}`;
+    const match = combined.match(
+      /(?:^|\r?\n)OPENLINEOPS_PROCESS_TREE_ROOT ([1-9][0-9]*) ([1-9][0-9]*)(?:\r?\n|$)/u);
+    if (match) {
+      const processId = Number(match[1]);
+      const startedAtUnixMilliseconds = Number(match[2]);
+      if (Number.isSafeInteger(processId) && processId > 0
+          && Number.isSafeInteger(startedAtUnixMilliseconds)
+          && startedAtUnixMilliseconds > 0) {
+        child.openlineopsHostedProcessId = processId;
+        child.openlineopsHostedProcessStartedAtUnixMilliseconds =
+          startedAtUnixMilliseconds;
+      }
+    }
+    const finalNewline = Math.max(
+      combined.lastIndexOf('\n'),
+      combined.lastIndexOf('\r'));
+    child.openlineopsProcessTreeIdentityBuffer = (
+      finalNewline >= 0
+        ? combined.slice(finalNewline + 1)
+        : combined
+    ).slice(-256);
+  });
+  return child;
+}
+
+async function waitForContainedRootProcessId(child, timeoutMs, label) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (Number.isSafeInteger(child.openlineopsHostedProcessId)
+        && child.openlineopsHostedProcessId > 0
+        && Number.isSafeInteger(
+          child.openlineopsHostedProcessStartedAtUnixMilliseconds)
+        && child.openlineopsHostedProcessStartedAtUnixMilliseconds > 0) {
+      return child.openlineopsHostedProcessId;
+    }
+    if (child.openlineopsLaunchError instanceof Error) {
+      throw new Error(
+        `${label} Process Tree Host failed to start.`,
+        { cause: child.openlineopsLaunchError });
+    }
+    if (hasChildExited(child)) {
+      throw new Error(
+        `${label} Process Tree Host exited before reporting its hosted process. `
+        + `Diagnostics: ${JSON.stringify(childProcessDiagnostics(child, label))}`);
+    }
+    await delay(Math.max(1, Math.min(50, deadline - Date.now())));
+  }
+  throw new Error(
+    `${label} Process Tree Host did not report its hosted process within ${timeoutMs} ms.`);
+}
+
+function containedRootProcessId(child, description) {
+  const processId = child?.openlineopsHostedProcessId;
+  if (!Number.isSafeInteger(processId) || processId <= 0) {
+    throw new Error(`${description} has no validated hosted process identity: ${processId}`);
+  }
+  return processId;
+}
+
+function containedRootProcessIdentity(child, description) {
+  const processId = containedRootProcessId(child, description);
+  const startedAtUnixMilliseconds =
+    child?.openlineopsHostedProcessStartedAtUnixMilliseconds;
+  if (!Number.isSafeInteger(startedAtUnixMilliseconds)
+      || startedAtUnixMilliseconds <= 0) {
+    throw new Error(
+      `${description} has no validated creation identity: ${
+        startedAtUnixMilliseconds}`);
+  }
+  return { processId, startedAtUnixMilliseconds };
+}
+
+function backendProcessIdentity(status, description) {
+  const processId = status?.pid;
+  const startedAtUnixMilliseconds = status?.startedAtUnixMilliseconds;
+  if (!Number.isSafeInteger(processId) || processId <= 0
+      || !Number.isSafeInteger(startedAtUnixMilliseconds)
+      || startedAtUnixMilliseconds <= 0) {
+    throw new Error(
+      `${description} has no exact backend process identity: ${JSON.stringify({
+        processId,
+        startedAtUnixMilliseconds
+      })}`);
+  }
+  return { processId, startedAtUnixMilliseconds };
+}
+
+function assertCleanContainedProcessExit(child, description) {
+  if (child.exitCode !== 0 || child.signalCode !== null) {
+    throw new Error(
+      `${description} did not exit cleanly: ${JSON.stringify({
+        exitCode: child.exitCode,
+        signalCode: child.signalCode
+      })}`);
+  }
 }
 
 function appendChildLog(label, chunk) {
   for (const rawLine of chunk.toString().split(/\r?\n/)) {
     const line = rawLine.trim();
     if (line) {
-      childLogs.push(`[${label}] ${line}`);
+      childLogs.push(redactDiagnosticText(`[${label}] ${line}`));
     }
   }
 
@@ -4242,7 +4497,7 @@ function appendCdpEvent(message) {
     return;
   }
 
-  cdpEvents.push(message);
+  cdpEvents.push(createSafeCdpEvent(message));
   if (cdpEvents.length > maxCdpEvents) {
     cdpEvents.splice(0, cdpEvents.length - maxCdpEvents);
   }
@@ -4267,20 +4522,24 @@ async function getFreePort() {
 }
 
 function assertNodeRuntime() {
-  if (typeof WebSocket === 'undefined') {
-    throw new Error('Node.js 22 or newer is required because the smoke test uses the built-in WebSocket API.');
+  if (typeof fetch !== 'function'
+      || typeof AbortSignal === 'undefined'
+      || typeof AbortSignal.timeout !== 'function') {
+    throw new Error(
+      'Node.js 22 or newer is required for bounded smoke-test HTTP operations.');
   }
 }
 
 async function prepareDevelopmentHosts() {
   for (const host of developmentHosts) {
     await runLoggedProcess(
-      'dotnet',
+      dotnetExecutable,
       [
         'build',
         host.projectPath,
         '--configuration',
         developmentHostConfiguration,
+        '--disable-build-servers',
         '--nologo',
         '--verbosity',
         'minimal',
@@ -4301,14 +4560,143 @@ async function prepareDevelopmentHosts() {
       + developmentHosts.map(host => host.projectName).join(', '));
 }
 
-async function runLoggedProcess(command, args, options, label) {
-  const child = spawnLogged(command, args, options, label);
-  await new Promise((resolve, reject) => {
-    child.once('error', reject);
-    child.once('exit', code => code === 0
-      ? resolve()
-      : reject(new Error(`${label} exited with code ${code ?? 'unknown'}.`)));
+async function prepareProcessTreeHost() {
+  const executable = await fs.stat(processTreeHostExecutable).catch(() => null);
+  if (!executable?.isFile()) {
+    throw new Error(
+      `Process Tree Host is missing; run npm run build:process-tree-host first: ${
+        processTreeHostExecutable}.`);
+  }
+}
+
+async function runLoggedProcess(
+  command,
+  args,
+  options,
+  label,
+  timeoutMilliseconds = 300_000
+) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  const child = await spawnOwnedProcessTree({
+    processTreeHostPath: processTreeHostExecutable,
+    command,
+    args,
+    workingDirectory: options.cwd,
+    environment: options.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    onStdoutData: chunk => appendChildLog(label, chunk),
+    onStderrData: chunk => appendChildLog(label, chunk),
+    startupTimeoutMilliseconds: timeoutMilliseconds
   });
+  child.on('error', error => {
+    appendChildLog(label, `process error: ${error.message}`);
+  });
+  void child.openlineopsClosePromise.then(({ exitCode }) => {
+    appendChildLog(label, `closed with code ${exitCode ?? 'unknown'}`);
+  });
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    const complete = action => {
+      if (settled) return false;
+      settled = true;
+      clearTimeout(timeout);
+      action();
+      return true;
+    };
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      void stopChild(child).then(
+        () => reject(new Error(
+          `${label} did not exit within ${timeoutMilliseconds} ms.`)),
+        terminationError => reject(new AggregateError(
+          [
+            new Error(
+              `${label} did not exit within ${timeoutMilliseconds} ms.`),
+            terminationError
+          ],
+          `${label} timed out and its process tree could not be confirmed stopped.`)));
+    }, remainingCommandMilliseconds(deadline, label));
+    child.once('error', error => complete(() => reject(error)));
+    void child.openlineopsClosePromise.then(({ exitCode, signalCode }) => complete(
+      () => exitCode === 0 && signalCode === null
+      ? resolve()
+      : reject(new Error(
+        `${label} closed with code ${exitCode ?? 'unknown'} and signal ${
+          signalCode ?? 'none'}.`))));
+  });
+}
+
+async function runCapturedProcess(
+  command,
+  args,
+  options,
+  description,
+  timeoutMilliseconds,
+  maxOutputCharacters
+) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  let standardOutput = '';
+  let standardError = '';
+  const appendBounded = (current, chunk) =>
+    `${current}${chunk.toString()}`.slice(-maxOutputCharacters);
+  const child = await spawnOwnedProcessTree({
+    processTreeHostPath: processTreeHostExecutable,
+    command,
+    args,
+    workingDirectory: options.cwd ?? repoRoot,
+    environment: options.env ?? process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    onStdoutData: chunk => {
+      standardOutput = appendBounded(standardOutput, chunk);
+    },
+    onStderrData: chunk => {
+      standardError = appendBounded(standardError, chunk);
+    },
+    startupTimeoutMilliseconds: timeoutMilliseconds
+  });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const complete = action => {
+      if (settled) return false;
+      settled = true;
+      clearTimeout(timeout);
+      action();
+      return true;
+    };
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      void stopChild(child).then(
+        () => reject(new Error(
+          `${description} did not exit within ${timeoutMilliseconds} ms.`)),
+        terminationError => reject(new AggregateError(
+          [
+            new Error(
+              `${description} did not exit within ${timeoutMilliseconds} ms.`),
+            terminationError
+          ],
+          `${description} timed out and its process tree could not be confirmed stopped.`)));
+    }, remainingCommandMilliseconds(deadline, description));
+    child.once('error', error => complete(() => reject(error)));
+    void child.openlineopsClosePromise.then(({ exitCode, signalCode }) => complete(() => {
+      if (exitCode !== 0 || signalCode !== null) {
+        reject(new Error(
+          `${description} failed with code ${exitCode ?? 'unknown'} and signal ${
+            signalCode ?? 'none'}: ${standardError.trim()}`));
+        return;
+      }
+      resolve({ standardOutput, standardError });
+    }));
+  });
+}
+
+function remainingCommandMilliseconds(deadline, description) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw new Error(`${description} exceeded its hard command deadline during startup.`);
+  }
+  return remaining;
 }
 
 function delay(ms) {
@@ -4320,6 +4708,15 @@ function escapeSelectorValue(value) {
 }
 
 async function cleanup() {
+  const failures = [];
+  const attempt = async (description, action) => {
+    try {
+      await action();
+    } catch (error) {
+      failures.push(new Error(description, { cause: error }));
+    }
+  };
+
   if (cdp) {
     try {
       await withTimeout(
@@ -4338,39 +4735,61 @@ async function cleanup() {
     } catch {
       // Best effort.
     } finally {
-      cdp.close();
+      try {
+        cdp.close();
+      } catch (error) {
+        failures.push(new Error('CDP connection cleanup failed.', { cause: error }));
+      }
     }
   }
 
-  await stopChild(electronProcess);
-  await stopChild(previewProcess);
+  await attempt(
+    'Electron process-tree cleanup failed.',
+    () => stopChild(electronProcess));
+  await attempt(
+    'Renderer preview process-tree cleanup failed.',
+    () => stopChild(previewProcess));
   if (apiSquatterServer) {
     const server = apiSquatterServer;
     apiSquatterServer = undefined;
-    await new Promise((resolve, reject) => {
-      server.close(error => error ? reject(error) : resolve());
-      server.closeAllConnections();
-    });
+    await attempt(
+      'API squatter server cleanup failed.',
+      () => withTimeout(
+        new Promise((resolve, reject) => {
+          server.close(error => error ? reject(error) : resolve());
+          server.closeAllConnections();
+        }),
+        5000,
+        'API squatter server cleanup'));
   }
   for (const smokeProjectDirectory of new Set(smokeProjectDirectories)) {
-    await fs.rm(smokeProjectDirectory, {
-      recursive: true,
-      force: true,
-      maxRetries: 5,
-      retryDelay: 200
-    });
+    await attempt(
+      `Smoke Project directory cleanup failed: ${smokeProjectDirectory}`,
+      () => fs.rm(smokeProjectDirectory, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 200
+      }));
   }
   if (smokeUserDataDirectory) {
-    await fs.rm(smokeUserDataDirectory, {
-      recursive: true,
-      force: true,
-      maxRetries: 5,
-      retryDelay: 200
-    });
+    await attempt(
+      `Smoke user-data cleanup failed: ${smokeUserDataDirectory}`,
+      () => fs.rm(smokeUserDataDirectory, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 200
+      }));
   }
   if (sampleExtensionArchive) {
-    await sampleExtensionArchive.cleanup();
+    await attempt(
+      'Sample extension archive cleanup failed.',
+      () => sampleExtensionArchive.cleanup());
     sampleExtensionArchive = undefined;
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'Electron smoke cleanup did not finish safely.');
   }
 }
 
@@ -4381,7 +4800,7 @@ function logSmokeMilestone(message) {
 async function startApiSquatter() {
   const server = http.createServer((request, response) => {
     if (request.headers.authorization) {
-      apiSquatterAuthorizationHeaders.push(request.headers.authorization);
+      apiSquatterCredentialAttemptCount += 1;
     }
     response.writeHead(503, { 'cache-control': 'no-store' });
     response.end('untrusted loopback process');
@@ -4399,125 +4818,105 @@ async function startApiSquatter() {
 }
 
 async function stopChild(child) {
-  if (!child || child.killed || child.exitCode !== null) {
+  if (!child) {
+    return;
+  }
+  if (hasChildExited(child)) {
+    if (child.openlineopsOwnsKillOnCloseJob === true) {
+      return;
+    }
+    throw new Error(
+      `Process tree root ${child.pid ?? 'unknown'} exited before descendant cleanup could be confirmed.`);
+  }
+  if (child.openlineopsLaunchError instanceof Error
+      && child.pid === undefined) {
     return;
   }
 
-  child.kill();
-  const exited = await Promise.race([
-    new Promise(resolve => child.once('exit', () => resolve(true))),
-    delay(5000).then(() => false)
-  ]);
+  if (process.platform === 'win32'
+      && child.openlineopsOwnsKillOnCloseJob !== true) {
+    throw new Error(
+      'Windows smoke cleanup requires an owning kill-on-close Job Host.');
+  }
 
-  if (!exited && child.exitCode === null) {
-    child.kill('SIGKILL');
+  const accepted = child.kill('SIGKILL');
+  if (!accepted && !hasChildExited(child)) {
+    throw new Error('Owning smoke process handle rejected termination.');
+  }
+  if (!await waitForChildExit(child, 5000)) {
+    throw new Error(
+      `Owning smoke process ${child.pid ?? 'unknown'} remained alive after exact-handle termination.`);
   }
 }
 
 async function waitForChildExit(child, timeoutMs) {
-  if (!child || child.exitCode !== null) {
+  if (!child || hasChildExited(child)) {
     return true;
   }
-  return Promise.race([
-    new Promise(resolve => {
-      child.once('exit', () => resolve(true));
-      if (child.exitCode !== null) {
-        resolve(true);
-      }
-    }),
-    delay(timeoutMs).then(() => false)
-  ]);
+  if (child.openlineopsLaunchError instanceof Error) {
+    throw child.openlineopsLaunchError;
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const complete = action => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      child.removeListener('exit', onExit);
+      child.removeListener('error', onError);
+      action();
+    };
+    const onExit = () => complete(() => resolve(true));
+    const onError = error => complete(() => reject(error));
+    const timeout = setTimeout(
+      () => complete(() => resolve(false)),
+      timeoutMs);
+    child.once('exit', onExit);
+    child.once('error', onError);
+    if (hasChildExited(child)) complete(() => resolve(true));
+    else if (child.openlineopsLaunchError instanceof Error) {
+      complete(() => reject(child.openlineopsLaunchError));
+    }
+  });
 }
 
 async function withTimeout(promise, timeoutMs, description) {
-  return Promise.race([
-    promise,
-    delay(timeoutMs).then(() => {
-      throw new Error(`Timed out waiting for ${description}.`);
-    })
-  ]);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const complete = action => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      action();
+    };
+    const timeout = setTimeout(
+      () => complete(() => reject(
+        new Error(`Timed out waiting for ${description}.`))),
+      timeoutMs);
+    Promise.resolve(promise).then(
+      value => complete(() => resolve(value)),
+      error => complete(() => reject(error)));
+  });
 }
 
-class CdpClient {
-  constructor(socket) {
-    this.socket = socket;
-    this.nextId = 1;
-    this.pending = new Map();
-  }
-
-  static connect(webSocketUrl) {
-    return new Promise((resolve, reject) => {
-      const socket = new WebSocket(webSocketUrl);
-      const client = new CdpClient(socket);
-
-      socket.addEventListener('open', () => resolve(client), { once: true });
-      socket.addEventListener('error', event => reject(event.error ?? new Error('CDP socket error.')), { once: true });
-      socket.addEventListener('error', event => {
-        client.rejectPending(event.error ?? new Error('CDP socket error.'));
-      });
-      socket.addEventListener('close', event => {
-        client.rejectPending(new Error(
-          `CDP socket closed with code ${event.code}${event.reason ? `: ${event.reason}` : '.'}`));
-      });
-      socket.addEventListener('message', event => client.handleMessage(event.data));
-    });
-  }
-
-  send(method, params = {}) {
-    if (this.socket.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new Error(
-        `Cannot send ${method}; the CDP socket is not open (state ${this.socket.readyState}).`));
-    }
-    const id = this.nextId++;
-    const payload = JSON.stringify({ id, method, params });
-
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.socket.send(payload);
-    });
-  }
-
-  close() {
-    this.rejectPending(new Error('CDP socket closed.'));
-    if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) {
-      this.socket.close();
-    }
-  }
-
-  rejectPending(error) {
-    for (const pending of this.pending.values()) {
-      pending.reject(error);
-    }
-
-    this.pending.clear();
-  }
-
-  handleMessage(data) {
-    const message = JSON.parse(data);
-    if (!message.id) {
-      appendCdpEvent(message);
-      return;
-    }
-
-    const pending = this.pending.get(message.id);
-    if (!pending) {
-      return;
-    }
-
-    this.pending.delete(message.id);
-    if (message.error) {
-      pending.reject(new Error(message.error.message));
-      return;
-    }
-
-    pending.resolve(message.result);
-  }
+function hasChildExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
 }
 
 main()
   .catch(async error => {
-    console.error(error);
-    const diagnostics = await collectDiagnostics();
+    console.error(formatDiagnosticError(error));
+    let diagnostics;
+    try {
+      diagnostics = await withTimeout(
+        collectDiagnostics(),
+        5000,
+        'smoke failure diagnostics');
+    } catch (diagnosticError) {
+      diagnostics = sanitizeDiagnosticValue({
+        diagnosticsError: formatDiagnosticError(diagnosticError)
+      });
+    }
     if (diagnostics) {
       console.error('\nSmoke diagnostics:');
       console.error(JSON.stringify(diagnostics, null, 2));
@@ -4530,6 +4929,8 @@ main()
 
     process.exitCode = 1;
   })
-  .finally(async () => {
-    await cleanup();
+  .finally(() => cleanup())
+  .catch(error => {
+    console.error(formatDiagnosticError(error));
+    process.exitCode = 1;
   });

@@ -665,9 +665,8 @@ function Write-ProductionClosureEvidenceFixture {
         }
         externalProgramTrial = [ordered]@{
             status = "passed"
-            executionStatus = "Completed"
-            judgement = "Passed"
-            artifactCount = 1
+            coordinatorPolicy = "Conflict.Projects.ApplicationExecutableProtocolTrialDisabled"
+            executionBoundary = "StationAgent"
             directoryImport = [ordered]@{
                 entryPoint = "files/bin/OpenLineOps.VendorTestHelper.exe"
                 files = @(
@@ -1138,7 +1137,7 @@ function Write-StagedAgentEvidenceFixture {
                 executable = "OpenLineOps.Agent.exe"
                 executableSha256 = "1" * 64
                 exitCode = 1
-                outputContract = '^OpenLineOps Station Agent terminated: OpenLineOps:WindowsServiceName must contain 1-80 ASCII letters, digits, periods, underscores, or hyphens\.$'
+                outputContract = '^OpenLineOps Station Agent terminated: [A-Za-z.]+: OpenLineOps:WindowsServiceName must contain 1-80 ASCII letters, digits, periods, underscores, or hyphens\.$'
                 status = "passed"
             },
             [ordered]@{

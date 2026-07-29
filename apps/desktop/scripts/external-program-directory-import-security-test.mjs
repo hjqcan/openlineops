@@ -208,7 +208,9 @@ test('privileged IPC binds bounded one-shot selections to backend session, Appli
   assert.match(mainSource, /if \(pending\.inFlight\)[\s\S]*?already being imported/u);
   assert.match(mainSource, /pending\.inFlight = true/u);
   assert.match(mainSource, /if \(response\.ok\) \{[\s\S]*?pendingExternalProgramDirectories\.delete\(selectionId\)/u);
-  assert.match(mainSource, /activeBackendSession = null;\s*pendingExternalProgramDirectories\.clear\(\)/u);
+  assert.match(
+    mainSource,
+    /backendSessionLifecycle\.release(?:FailedSpawn|ConfirmedExit)\([\s\S]*?pendingExternalProgramDirectories\.clear\(\)/u);
   assert.match(mainSource, /desktop:release-external-program-directory-selection/u);
   assert.match(mainSource, /assertExternalProgramDirectoryUnchanged\(pending\.identity\)[\s\S]*?openAsBlob[\s\S]*?assertExternalProgramDirectoryUnchanged\(pending\.identity\)/u);
   assert.doesNotMatch(selectionFunctionSource, /pendingExternalProgramDirectories\.clear\(\)/u);

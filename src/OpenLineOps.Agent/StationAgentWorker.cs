@@ -16,6 +16,9 @@ internal sealed class StationAgentWorker(
     StationAgentShutdownState shutdownState,
     ILogger<StationAgentWorker> logger) : BackgroundService
 {
+    private readonly object _lifecycleSync = new();
+    private Task _workerQuiescence = Task.CompletedTask;
+
     private static readonly Action<ILogger, StationJobId, string, Exception?> LogRecoveryRequired =
         LoggerMessage.Define<StationJobId, string>(
             LogLevel.Critical,
@@ -58,10 +61,43 @@ internal sealed class StationAgentWorker(
             new EventId(1007, nameof(LogJobCancel)),
             "Station job cancellation request {RequestId} for job {JobId} completed. Accepted={Accepted}, FailureCode={FailureCode}.");
 
+    public override async Task StartAsync(CancellationToken cancellationToken)
+    {
+        Task startTask;
+        try
+        {
+            lock (_lifecycleSync)
+            {
+                if (!shutdownState.TryMarkWorkerRunning())
+                {
+                    return;
+                }
+
+                startTask = base.StartAsync(cancellationToken);
+                var execution = ExecuteTask
+                    ?? throw new InvalidOperationException(
+                        "Station Agent worker execution was not created during startup.");
+                _workerQuiescence = execution.ContinueWith(
+                    static (_, state) =>
+                        ((StationAgentShutdownState)state!).MarkWorkerQuiesced(),
+                    shutdownState,
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+
+            await startTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            shutdownState.MarkWorkerQuiesced();
+            throw;
+        }
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var workerLoopsStarted = false;
-        var quiesced = false;
         try
         {
             var recovered = await coordinator.RecoverAsync(stoppingToken).ConfigureAwait(false);
@@ -73,15 +109,13 @@ internal sealed class StationAgentWorker(
 
             workerLoopsStarted = true;
             await RunWorkerLoopsAsync(stoppingToken).ConfigureAwait(false);
-            quiesced = true;
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            quiesced = true;
         }
         finally
         {
-            if (!workerLoopsStarted || quiesced)
+            if (!workerLoopsStarted)
             {
                 shutdownState.MarkWorkerQuiesced();
             }
@@ -90,10 +124,31 @@ internal sealed class StationAgentWorker(
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        await StationAgentWorkerLifecycle.RequireQuiescenceAsync(
+        Task stopAndQuiescence;
+        lock (_lifecycleSync)
+        {
+            shutdownState.BeginShutdown();
+            stopAndQuiescence = StopAndObserveQuiescenceAsync(
                 base.StopAsync(cancellationToken),
+                _workerQuiescence,
+                cancellationToken);
+        }
+
+        await StationAgentWorkerLifecycle.RequireQuiescenceAsync(
+                stopAndQuiescence,
                 shutdownState,
                 cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task StopAndObserveQuiescenceAsync(
+        Task stopTask,
+        Task workerQuiescence,
+        CancellationToken cancellationToken)
+    {
+        await stopTask.ConfigureAwait(false);
+        await workerQuiescence
+            .WaitAsync(cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -109,6 +164,7 @@ internal sealed class StationAgentWorker(
         await StationAgentWorkerLifecycle.AwaitLoopsAsync(
                 loops,
                 lifetime,
+                shutdownState,
                 stoppingToken)
             .ConfigureAwait(false);
     }
@@ -142,7 +198,12 @@ internal sealed class StationAgentWorker(
             }
             catch (Exception exception)
             {
-                LogSafetyDisconnected(logger, retryDelay, exception);
+                LogSafetyDisconnected(
+                    logger,
+                    retryDelay,
+                    StationAgentDiagnostics.CreateLogSafeException(
+                        "Independent station safety channel transport failed",
+                        exception));
                 await Task.Delay(retryDelay, stoppingToken).ConfigureAwait(false);
                 retryDelay = TimeSpan.FromSeconds(Math.Min(5, retryDelay.TotalSeconds * 2));
             }
@@ -225,7 +286,12 @@ internal sealed class StationAgentWorker(
             }
             catch (Exception exception)
             {
-                LogDisconnected(logger, retryDelay, exception);
+                LogDisconnected(
+                    logger,
+                    retryDelay,
+                    StationAgentDiagnostics.CreateLogSafeException(
+                        "Station job channel transport failed",
+                        exception));
                 await Task.Delay(retryDelay, stoppingToken).ConfigureAwait(false);
                 retryDelay = TimeSpan.FromSeconds(Math.Min(30, retryDelay.TotalSeconds * 2));
             }

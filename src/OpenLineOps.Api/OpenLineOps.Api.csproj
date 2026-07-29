@@ -18,6 +18,7 @@
     <ProjectReference Include="..\..\shared\OpenLineOps.Agent.Contracts\OpenLineOps.Agent.Contracts.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Application.Abstractions\OpenLineOps.Application.Abstractions.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.EventBus\OpenLineOps.EventBus.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.ProcessIsolation\OpenLineOps.ProcessIsolation.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Runtime.Contracts\OpenLineOps.Runtime.Contracts.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Devices.Api\OpenLineOps.Devices.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Engineering.Api\OpenLineOps.Engineering.Api.csproj" />

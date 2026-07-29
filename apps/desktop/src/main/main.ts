@@ -1,5 +1,13 @@
-import { app, BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from 'electron';
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  type IpcMainInvokeEvent,
+  type MessageBoxOptions,
+  type WebContents
+} from 'electron';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import {
   createReadStream,
   existsSync,
@@ -27,6 +35,7 @@ import type {
   ApplicationExtensionImportResult,
   BackendStatus,
   DesktopConfig,
+  DesktopCloseCoordinatorBinding,
   EditorDocumentWriteOptions,
   ExternalProgramDirectorySelectionResult,
   SelectDirectoryOptions,
@@ -40,13 +49,17 @@ import {
   fetchAuthenticatedBackend,
   resolveCanonicalBackendApiUrl
 } from './backend-api-security.js';
+import { classifyBackendProcessError } from './backend-process-error-policy.js';
 import { verifyBackendProcessHandshakeServer } from './backend-process-handshake.js';
+import {
+  BackendSessionLifecycle,
+  type AuthenticatedBackendSession
+} from './backend-session-lifecycle.js';
 import {
   protectCredentialPath,
   verifyCredentialPathProtection
 } from './api-credential-security.js';
 import { createLocalSqliteConnectionString } from './local-sqlite-connection.js';
-import { windowsSystemExecutablePath } from './windows-system-tools.js';
 import {
   ensurePackagedRuntimeDataBinding,
   ensureCanonicalDesktopUserDataDirectory,
@@ -74,26 +87,49 @@ import {
   resolveActiveProjectFile
 } from './backend-project-session.js';
 import {
-  DesktopCloseRequestCoordinator
+  DesktopCloseRequestCoordinator,
+  desktopCloseBindingsEqual
 } from './desktop-close-request-coordinator.js';
+import {
+  DesktopApplicationQuitCoordinator
+} from './desktop-application-quit-coordinator.js';
+import {
+  hasDesktopBackendProcessExited,
+  stopDesktopBackendForApplicationShutdown
+} from './desktop-backend-shutdown.js';
+import {
+  DesktopRendererRecoveryCoordinator,
+  type DesktopRendererRecoveryRequest
+} from './desktop-renderer-recovery-coordinator.js';
+import {
+  DesktopRendererCloseReadiness
+} from './desktop-renderer-close-readiness.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const desktopProcessCreationTime = process.getCreationTime();
+if (desktopProcessCreationTime === null
+    || !Number.isFinite(desktopProcessCreationTime)
+    || desktopProcessCreationTime <= 0) {
+  throw new Error('Electron did not expose its exact process creation identity.');
+}
+const desktopProcessStartedAtUnixMilliseconds = Math.trunc(
+  desktopProcessCreationTime);
 
 let mainWindow: BrowserWindow | null = null;
 let backendProcess: ChildProcessWithoutNullStreams | null = null;
 let backendStartedAtUtc: string | null = null;
 let lastExitCode: number | null = null;
-let pendingCloseWindow: BrowserWindow | null = null;
-let approvedCloseRequest: { requestId: number; window: BrowserWindow } | null = null;
 let trustedRendererDocumentUrl: string | null = null;
-let activeBackendSession: ActiveBackendSession | null = null;
+const backendSessionLifecycle =
+  new BackendSessionLifecycle<ChildProcessWithoutNullStreams>();
 let backendStartPromise: Promise<BackendStatus> | null = null;
-let pendingHandshakePath: string | null = null;
+let applicationShutdownPromise: Promise<void> | null = null;
 let activeProjectFilePath: string | null = null;
 let backendStatusSequence = 0;
 let applicationQuitting = false;
-const closeRequestCoordinator = new DesktopCloseRequestCoordinator();
+const applicationQuitCoordinator = new DesktopApplicationQuitCoordinator();
+const desktopCloseSessions = new Map<number, DesktopCloseWindowSession>();
 const recentLogs: string[] = [];
 
 const ownsPrimaryInstance = app.requestSingleInstanceLock();
@@ -118,6 +154,16 @@ const desktopBaseConfig = apiCredentials
   : null;
 
 const backendHandshakeTimeoutMs = 30000;
+const backendProcessTerminationTimeoutMs = 10000;
+
+interface DesktopCloseWindowSession {
+  readonly window: BrowserWindow;
+  readonly webContents: WebContents;
+  readonly coordinator: DesktopCloseRequestCoordinator;
+  readonly recoveryCoordinator: DesktopRendererRecoveryCoordinator;
+  readonly readiness: DesktopRendererCloseReadiness;
+  binding: DesktopCloseCoordinatorBinding;
+}
 
 interface BackendLaunchConfig {
   executablePath: string;
@@ -145,13 +191,8 @@ interface DesktopBaseConfig {
   publicEvidenceMode: boolean;
 }
 
-interface ActiveBackendSession {
-  process: ChildProcessWithoutNullStreams;
-  apiBaseUrl: string;
-  standardToken: string;
-  safetyToken: string;
-  nonce: string;
-}
+type ActiveBackendSession =
+  AuthenticatedBackendSession<ChildProcessWithoutNullStreams>;
 
 interface PendingExternalProgramDirectory {
   identity: ExternalProgramDirectoryIdentity;
@@ -170,6 +211,7 @@ const maximumPendingExternalProgramDirectories = 16;
 interface BackendHandshakeDocument {
   ProcessId: number;
   Origin: string;
+  StartedAtUnixMilliseconds: number;
 }
 
 function createDesktopBaseConfig(apiActorId: string): DesktopBaseConfig {
@@ -265,6 +307,8 @@ function createBackendLaunchConfig(
         OPENLINEOPS_DESKTOP_HANDSHAKE_FILE: handshakePath,
         OPENLINEOPS_DESKTOP_HANDSHAKE_NONCE: handshakeNonce,
         OPENLINEOPS_DESKTOP_PARENT_PROCESS_ID: String(process.pid),
+        OPENLINEOPS_DESKTOP_PARENT_PROCESS_STARTED_AT_UNIX_MS:
+          String(desktopProcessStartedAtUnixMilliseconds),
         ASPNETCORE_ENVIRONMENT: process.env.ASPNETCORE_ENVIRONMENT ?? 'Development',
         OpenLineOps__Traceability__ArtifactStorage__RootPath: traceArtifactRoot,
         OpenLineOps__Plugins__EventLog__DatabasePath: path.join(
@@ -320,6 +364,8 @@ function createBackendLaunchConfig(
       OPENLINEOPS_DESKTOP_HANDSHAKE_FILE: handshakePath,
       OPENLINEOPS_DESKTOP_HANDSHAKE_NONCE: handshakeNonce,
       OPENLINEOPS_DESKTOP_PARENT_PROCESS_ID: String(process.pid),
+      OPENLINEOPS_DESKTOP_PARENT_PROCESS_STARTED_AT_UNIX_MS:
+        String(desktopProcessStartedAtUnixMilliseconds),
       ASPNETCORE_ENVIRONMENT: 'Production',
       DOTNET_ENVIRONMENT: 'Production',
       OpenLineOps__Runtime__Persistence__DatabasePath: path.join(
@@ -630,6 +676,22 @@ async function createWindow(): Promise<void> {
     }
   });
   mainWindow = ownedWindow;
+  const ownedWebContents = ownedWindow.webContents;
+  const ownedWebContentsId = ownedWebContents.id;
+  const closeReadiness = new DesktopRendererCloseReadiness();
+  const closeSession: DesktopCloseWindowSession = {
+    window: ownedWindow,
+    webContents: ownedWebContents,
+    coordinator: new DesktopCloseRequestCoordinator(),
+    recoveryCoordinator: new DesktopRendererRecoveryCoordinator(),
+    readiness: closeReadiness,
+    binding: {
+      windowId: ownedWindow.id,
+      webContentsId: ownedWebContentsId,
+      rendererGeneration: closeReadiness.generation
+    }
+  };
+  desktopCloseSessions.set(ownedWebContentsId, closeSession);
 
   const preventUntrustedNavigation = (event: Electron.Event, navigationUrl: string): void => {
     if (!trustedRendererDocumentUrl
@@ -637,133 +699,250 @@ async function createWindow(): Promise<void> {
       event.preventDefault();
     }
   };
-  ownedWindow.webContents.on('will-navigate', preventUntrustedNavigation);
-  ownedWindow.webContents.on('will-redirect', preventUntrustedNavigation);
-  let rendererRecoveryPrompt: Promise<void> | null = null;
-  const releaseOwnedCloseRequest = (): void => {
-    if (pendingCloseWindow === ownedWindow) {
-      closeRequestCoordinator.reset();
-      pendingCloseWindow = null;
+  ownedWebContents.on('will-navigate', preventUntrustedNavigation);
+  ownedWebContents.on('will-redirect', preventUntrustedNavigation);
+  const releaseOwnedCloseRequest = (reason: string): boolean => {
+    const requestId = closeSession.coordinator.pendingId;
+    if (closeSession.coordinator.release(closeSession.binding)) {
+      appendLog(`Desktop close request ${requestId} released because ${reason}.`);
+      return true;
     }
-    if (approvedCloseRequest?.window === ownedWindow) {
-      approvedCloseRequest = null;
-    }
+    return false;
   };
-  const runRendererRecoveryPrompt = (
-    action: () => Promise<void>
+  const advanceRendererGeneration = (reason: string): void => {
+    if (releaseOwnedCloseRequest(reason)) {
+      cancelCoordinatedApplicationQuit(
+        `the renderer generation changed during ${reason}`);
+    }
+    const rendererGeneration = closeSession.readiness.startNavigation();
+    closeSession.binding = {
+      windowId: ownedWindow.id,
+      webContentsId: ownedWebContentsId,
+      rendererGeneration
+    };
+  };
+  const showRendererRecoveryMessageBox = (
+    options: MessageBoxOptions
+  ): Promise<Electron.MessageBoxReturnValue> => {
+    if (ownedWebContents.isDestroyed()) {
+      return dialog.showMessageBox(options);
+    }
+    return dialog.showMessageBox(ownedWindow, options);
+  };
+  const closeCoordinatorIsReady = (): boolean => closeSession.readiness.isReady;
+  const presentRendererRecoveryRequest = (
+    recoveryRequest: DesktopRendererRecoveryRequest
   ): void => {
-    if (rendererRecoveryPrompt
-        || applicationQuitting
-        || ownedWindow.isDestroyed()) {
+    const continueRecoveryQueue = (): void => {
+      const nextRequest = closeSession.recoveryCoordinator.complete(
+        recoveryRequest,
+        closeSession.readiness.generation);
+      if (nextRequest !== null && !ownedWindow.isDestroyed()) {
+        presentRendererRecoveryRequest(nextRequest);
+      }
+    };
+    if (applicationQuitting
+        || ownedWindow.isDestroyed()
+        || recoveryRequest.rendererGeneration !== closeSession.readiness.generation) {
+      cancelCoordinatedApplicationQuit('a stale renderer recovery request was dropped');
+      continueRecoveryQueue();
       return;
     }
-    rendererRecoveryPrompt = action()
+
+    const action = async (): Promise<void> => {
+      if (recoveryRequest.reason === 'Unresponsive') {
+        const result = await showRendererRecoveryMessageBox({
+          type: 'warning',
+          title: 'OpenLineOps is not responding',
+          message: 'The Studio editor is not responding.',
+          detail: 'Wait to preserve in-memory work. Force Close may lose unsaved editor changes.',
+          buttons: ['Wait', 'Force Close'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true
+        });
+        if (ownedWindow.isDestroyed()
+            || recoveryRequest.rendererGeneration !== closeSession.readiness.generation) {
+          cancelCoordinatedApplicationQuit('the unresponsive renderer recovery became stale');
+          return;
+        }
+        if (result.response !== 1) {
+          cancelCoordinatedApplicationQuit('the operator chose Wait for the renderer');
+          return;
+        }
+        if (closeCoordinatorIsReady()) {
+          ownedWindow.close();
+          return;
+        }
+        releaseOwnedCloseRequest('the operator explicitly chose Force Close');
+        ownedWindow.destroy();
+        return;
+      }
+
+      if (recoveryRequest.reason === 'RendererGone') {
+        const result = await showRendererRecoveryMessageBox({
+          type: 'error',
+          title: 'OpenLineOps renderer stopped',
+          message: 'The Studio editor process stopped unexpectedly.',
+          detail: 'Reload Studio to reconnect to the current backend. Closing may lose unsaved in-memory changes.',
+          buttons: ['Reload Studio', 'Close Studio'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true
+        });
+        if (ownedWindow.isDestroyed()
+            || recoveryRequest.rendererGeneration !== closeSession.readiness.generation) {
+          cancelCoordinatedApplicationQuit('the stopped-renderer recovery became stale');
+          return;
+        }
+        if (result.response === 0) {
+          cancelCoordinatedApplicationQuit('the operator chose to reload the renderer');
+          ownedWebContents.reload();
+          return;
+        }
+        releaseOwnedCloseRequest('the operator explicitly closed the stopped renderer');
+        ownedWindow.destroy();
+        return;
+      }
+
+      const result = await showRendererRecoveryMessageBox({
+        type: 'warning',
+        title: 'OpenLineOps editor unavailable',
+        message: 'Studio could not verify that every editor is safe to close.',
+        detail: 'Keep Studio open to preserve in-memory work. Close Studio may lose unsaved changes.',
+        buttons: ['Keep Studio Open', 'Close Studio'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true
+      });
+      if (ownedWindow.isDestroyed()
+          || recoveryRequest.rendererGeneration !== closeSession.readiness.generation) {
+        cancelCoordinatedApplicationQuit('the close recovery became stale');
+        return;
+      }
+      if (result.response !== 1) {
+        cancelCoordinatedApplicationQuit('the operator kept Studio open');
+        return;
+      }
+      releaseOwnedCloseRequest('the operator explicitly chose the native recovery close');
+      ownedWindow.destroy();
+    };
+
+    void action()
       .catch(error => {
         appendLog(`Renderer recovery prompt failed: ${
           error instanceof Error ? error.message : String(error)}`);
+        cancelCoordinatedApplicationQuit('the renderer recovery prompt failed');
       })
-      .finally(() => {
-        rendererRecoveryPrompt = null;
-      });
+      .finally(continueRecoveryQueue);
   };
-  ownedWindow.webContents.on('unresponsive', () => {
-    runRendererRecoveryPrompt(async () => {
-      const result = await dialog.showMessageBox(ownedWindow, {
-        type: 'warning',
-        title: 'OpenLineOps is not responding',
-        message: 'The Studio editor is not responding.',
-        detail: 'Wait to preserve in-memory work. Force Close may lose unsaved editor changes.',
-        buttons: ['Wait', 'Force Close'],
-        defaultId: 0,
-        cancelId: 0,
-        noLink: true
-      });
-      if (result.response !== 1
-          || applicationQuitting
-          || ownedWindow.isDestroyed()) {
+  const requestRendererRecovery = (
+    reason: 'Unresponsive' | 'CloseCoordinationUnavailable' | 'RendererGone'
+  ): void => {
+    const evaluation = closeSession.recoveryCoordinator.request(
+      reason,
+      closeSession.readiness.generation);
+    if (evaluation.action === 'Start') {
+      presentRendererRecoveryRequest(evaluation.request);
+      return;
+    }
+    if (evaluation.action === 'Queue') {
+      appendLog(
+        `Renderer recovery ${evaluation.request.reason} queued for generation ${
+          evaluation.request.rendererGeneration}.`);
+    }
+  };
+  ownedWebContents.on(
+    'did-start-navigation',
+    (_event, _navigationUrl, isInPlace, isMainFrame) => {
+      if (isInPlace || !isMainFrame) {
         return;
       }
-      releaseOwnedCloseRequest();
-      ownedWindow.destroy();
+      advanceRendererGeneration('the main renderer document started navigating');
     });
+  ownedWebContents.on('did-finish-load', () => {
+    closeSession.readiness.completeLoad(closeSession.readiness.generation);
   });
-  ownedWindow.webContents.on('render-process-gone', (_event, details) => {
-    releaseOwnedCloseRequest();
+  ownedWebContents.on('unresponsive', () => {
+    closeSession.readiness.setResponsive(closeSession.readiness.generation, false);
+    releaseOwnedCloseRequest('the renderer became unresponsive');
+    requestRendererRecovery('Unresponsive');
+  });
+  ownedWebContents.on('responsive', () => {
+    closeSession.readiness.setResponsive(closeSession.readiness.generation, true);
+  });
+  ownedWebContents.on('render-process-gone', (_event, details) => {
+    const rendererGeneration = closeSession.readiness.generation;
+    closeSession.readiness.setResponsive(closeSession.readiness.generation, false);
+    const closeRequestReleased = releaseOwnedCloseRequest(
+      `the renderer process exited (${details.reason})`);
+    if (closeRequestReleased) {
+      cancelCoordinatedApplicationQuit(
+        `the renderer process exited (${details.reason}) during coordinated close`);
+    }
     appendLog(`Renderer process exited (${details.reason}); a pending close request was released.`);
     if (details.reason === 'clean-exit') {
+      setImmediate(() => {
+        if (!ownedWindow.isDestroyed()
+            && !ownedWebContents.isDestroyed()
+            && rendererGeneration === closeSession.readiness.generation) {
+          requestRendererRecovery('RendererGone');
+        }
+      });
       return;
     }
-    runRendererRecoveryPrompt(async () => {
-      const result = await dialog.showMessageBox(ownedWindow, {
-        type: 'error',
-        title: 'OpenLineOps renderer stopped',
-        message: 'The Studio editor process stopped unexpectedly.',
-        detail: 'Reload Studio to reconnect to the current backend. Closing may lose unsaved in-memory changes.',
-        buttons: ['Reload Studio', 'Close Studio'],
-        defaultId: 0,
-        cancelId: 0,
-        noLink: true
-      });
-      if (applicationQuitting || ownedWindow.isDestroyed()) {
-        return;
-      }
-      if (result.response === 0) {
-        ownedWindow.webContents.reload();
-        return;
-      }
-      ownedWindow.destroy();
-    });
+    requestRendererRecovery('RendererGone');
   });
-  ownedWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  ownedWebContents.once('destroyed', () => {
+    closeSession.readiness.setResponsive(closeSession.readiness.generation, false);
+    closeSession.readiness.setCoordinatorRegistered(
+      closeSession.readiness.generation,
+      false);
+    releaseOwnedCloseRequest('the renderer WebContents was destroyed');
+    desktopCloseSessions.delete(ownedWebContentsId);
+  });
+  ownedWebContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   ownedWindow.on('close', event => {
-    if (ownedWindow.webContents.isDestroyed()) {
-      appendLog('Desktop close bypassed renderer coordination because its WebContents is destroyed.');
-      return;
-    }
-    if (approvedCloseRequest?.window === ownedWindow) {
-      appendLog(`Desktop close request ${approvedCloseRequest.requestId} consumed its one-shot approval.`);
-      approvedCloseRequest = null;
-      return;
-    }
     event.preventDefault();
-    const requestId = closeRequestCoordinator.request(expiredRequestId => {
+    if (!closeCoordinatorIsReady() || ownedWebContents.isDestroyed()) {
+      appendLog('Desktop close stayed fail-closed because the renderer is unavailable.');
+      requestRendererRecovery('CloseCoordinationUnavailable');
+      return;
+    }
+    const requestBinding = closeSession.binding;
+    const requestId = closeSession.coordinator.request(requestBinding, expiredRequestId => {
       appendLog(`Desktop close request ${expiredRequestId} expired; the window remains open for retry.`);
-      if (pendingCloseWindow === ownedWindow) {
-        pendingCloseWindow = null;
-      }
-      if (!ownedWindow.isDestroyed() && !ownedWindow.webContents.isDestroyed()) {
+      if (!ownedWindow.isDestroyed() && !ownedWebContents.isDestroyed()) {
         try {
-          ownedWindow.webContents.send('desktop:close-request-expired', expiredRequestId);
+          ownedWebContents.send('desktop:close-request-expired', expiredRequestId);
         } catch (error) {
           appendLog(`Desktop close expiry notification ${expiredRequestId} failed: ${
             error instanceof Error ? error.message : String(error)}`);
         }
       }
+      cancelCoordinatedApplicationQuit(
+        `desktop close request ${expiredRequestId} acknowledgement expired`);
+      requestRendererRecovery('CloseCoordinationUnavailable');
     });
     if (requestId === null) {
       appendLog('Desktop close ignored because a renderer decision is already pending.');
       return;
     }
-    pendingCloseWindow = ownedWindow;
     appendLog(`Desktop close request ${requestId} sent to the renderer.`);
     try {
-      ownedWindow.webContents.send('desktop:close-requested', requestId);
+      ownedWebContents.send('desktop:close-requested', requestId);
     } catch (error) {
-      closeRequestCoordinator.reset();
-      pendingCloseWindow = null;
+      closeSession.coordinator.release(requestBinding);
       appendLog(`Desktop close request ${requestId} could not reach the renderer: ${
         error instanceof Error ? error.message : String(error)}`);
+      cancelCoordinatedApplicationQuit(`desktop close request ${requestId} delivery failed`);
+      requestRendererRecovery('CloseCoordinationUnavailable');
     }
   });
   ownedWindow.on('closed', () => {
-    if (pendingCloseWindow === ownedWindow) {
-      closeRequestCoordinator.reset();
-      pendingCloseWindow = null;
-    }
-    if (approvedCloseRequest?.window === ownedWindow) {
-      approvedCloseRequest = null;
-    }
+    releaseOwnedCloseRequest('the window closed');
+    desktopCloseSessions.delete(ownedWebContentsId);
     if (mainWindow === ownedWindow) {
       mainWindow = null;
     }
@@ -813,7 +992,7 @@ ipcMain.handle('backend:stop', async event => {
   const child = backendProcess;
   if (child !== null) {
     await terminateBackendProcessTree(child);
-    clearBackendSession(child);
+    releaseBackendSessionAfterConfirmedExit(child);
     if (backendProcess === child) {
       backendProcess = null;
       backendStartedAtUtc = null;
@@ -827,19 +1006,69 @@ ipcMain.handle('desktop:set-active-project-file', (event, projectFilePath: strin
   assertTrustedRendererIpcSender(event);
   activeProjectFilePath = resolveActiveProjectFile(projectFilePath);
 });
+ipcMain.handle('desktop:get-close-coordinator-binding', event => {
+  assertTrustedRendererIpcSender(event);
+  const closeSession = desktopCloseSessions.get(event.sender.id);
+  if (!closeSession
+      || closeSession.window.isDestroyed()
+      || closeSession.webContents !== event.sender) {
+    throw new Error('Desktop close coordinator has no active renderer binding.');
+  }
+  return { ...closeSession.binding };
+});
+ipcMain.on('desktop:close-coordinator-ready', (
+  event,
+  binding: unknown,
+  ready: boolean
+) => {
+  try {
+    assertTrustedRendererIpcSender(event);
+  } catch {
+    return;
+  }
+  const closeSession = desktopCloseSessions.get(event.sender.id);
+  if (typeof ready !== 'boolean'
+      || !closeSession
+      || closeSession.window.isDestroyed()
+      || closeSession.webContents !== event.sender
+      || !desktopCloseBindingsEqual(binding, closeSession.binding)) {
+    return;
+  }
+  if (!ready) {
+    closeSession.readiness.setCoordinatorRegistered(
+      closeSession.readiness.generation,
+      false);
+    const requestId = closeSession.coordinator.pendingId;
+    if (closeSession.coordinator.release(closeSession.binding)) {
+      appendLog(
+        `Desktop close request ${requestId} released because the renderer close coordinator became unavailable.`);
+      cancelCoordinatedApplicationQuit(
+        `renderer close coordinator became unavailable during request ${requestId}`);
+    }
+    return;
+  }
+  closeSession.readiness.setCoordinatorRegistered(
+    closeSession.readiness.generation,
+    true);
+  appendLog(
+    `Renderer close coordinator registered for generation ${
+      closeSession.readiness.generation}.`);
+});
 ipcMain.on('desktop:close-request-acknowledged', (event, requestId: number) => {
   try {
     assertTrustedRendererIpcSender(event);
   } catch {
     return;
   }
+  const closeSession = desktopCloseSessions.get(event.sender.id);
   if (!Number.isSafeInteger(requestId)
       || requestId <= 0
-      || !pendingCloseWindow
-      || event.sender !== pendingCloseWindow.webContents) {
+      || !closeSession
+      || closeSession.window.isDestroyed()
+      || closeSession.webContents !== event.sender) {
     return;
   }
-  if (closeRequestCoordinator.acknowledge(requestId)) {
+  if (closeSession.coordinator.acknowledge(closeSession.binding, requestId)) {
     appendLog(`Desktop close request ${requestId} acknowledged by the renderer.`);
   }
 });
@@ -849,35 +1078,36 @@ ipcMain.on('desktop:close-response', (event, requestId: number, allowClose: bool
   } catch {
     return;
   }
-  const windowToClose = pendingCloseWindow;
+  const closeSession = desktopCloseSessions.get(event.sender.id);
+  const windowToClose = closeSession?.window ?? null;
   if (!Number.isSafeInteger(requestId)
       || requestId <= 0
       || typeof allowClose !== 'boolean'
+      || !closeSession
       || !windowToClose
-      || event.sender !== windowToClose.webContents
-      || !closeRequestCoordinator.complete(requestId)) {
+      || windowToClose.isDestroyed()
+      || event.sender !== closeSession.webContents
+      || !closeSession.coordinator.complete(closeSession.binding, requestId)) {
     return;
   }
-  pendingCloseWindow = null;
   appendLog(`Desktop close request ${requestId} completed with allowClose=${allowClose}.`);
   if (!allowClose) {
+    cancelCoordinatedApplicationQuit(
+      `the renderer denied desktop close request ${requestId}`);
     return;
   }
-  approvedCloseRequest = { requestId, window: windowToClose };
   try {
-    windowToClose.close();
+    windowToClose.destroy();
   } catch (error) {
-    if (approvedCloseRequest?.requestId === requestId
-        && approvedCloseRequest.window === windowToClose) {
-      approvedCloseRequest = null;
-    }
+    cancelCoordinatedApplicationQuit(
+      `approved desktop close request ${requestId} could not destroy its window`);
     appendLog(`Approved desktop close request ${requestId} failed: ${
       error instanceof Error ? error.message : String(error)}`);
   }
 });
 
 async function startBackend(): Promise<BackendStatus> {
-  if (activeBackendSession !== null) {
+  if (backendSessionLifecycle.authenticated !== null) {
     requireActiveBackendSession();
     return getBackendStatus();
   }
@@ -894,7 +1124,7 @@ async function startBackend(): Promise<BackendStatus> {
 }
 
 async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
-  if (backendProcess !== null) {
+  if (backendProcess !== null || backendSessionLifecycle.process !== null) {
     throw new Error('Backend process exists without one authenticated Studio session.');
   }
 
@@ -902,7 +1132,6 @@ async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
   const nonce = randomBytes(32).toString('base64url');
   const sessionCredentials = deriveBackendSessionCredentials(requireApiCredentials(), nonce);
   const handshakePath = createBackendHandshakePlaceholder();
-  pendingHandshakePath = handshakePath;
   let launch: BackendLaunchConfig;
   try {
     launch = createBackendLaunchConfig(
@@ -912,7 +1141,6 @@ async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
       launchProjectFilePath);
   } catch (error) {
     cleanupBackendHandshakeFile(handshakePath);
-    pendingHandshakePath = null;
     throw error;
   }
   let child: ChildProcessWithoutNullStreams;
@@ -928,7 +1156,6 @@ async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
       });
   } catch (error) {
     cleanupBackendHandshakeFile(handshakePath);
-    pendingHandshakePath = null;
     try {
       launch.packagedRuntimeBinding?.rollback();
     } catch (rollbackError) {
@@ -938,30 +1165,38 @@ async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
     }
     throw error;
   }
-  if (child.pid === undefined) {
-    cleanupBackendHandshakeFile(handshakePath);
-    pendingHandshakePath = null;
-    launch.packagedRuntimeBinding?.rollback();
-    throw new Error('OpenLineOps.Api did not receive an operating-system process identity.');
-  }
-
-  backendProcess = child;
-  backendStartedAtUtc = new Date().toISOString();
-  lastExitCode = null;
-  child.stdout.on('data', chunk => appendLog(chunk.toString()));
-  child.stderr.on('data', chunk => appendLog(chunk.toString()));
+  backendSessionLifecycle.beginPending({
+    process: child,
+    standardToken: sessionCredentials.standardToken,
+    safetyToken: sessionCredentials.safetyToken,
+    nonce,
+    handshakePath
+  });
+  let spawnConfirmed = false;
+  child.once('spawn', () => {
+    spawnConfirmed = true;
+  });
   child.on('error', error => {
-    clearBackendSession(child);
-    if (backendProcess === child) {
-      backendProcess = null;
-      backendStartedAtUtc = null;
-      lastExitCode = -1;
+    const disposition = classifyBackendProcessError(child, spawnConfirmed);
+    if (disposition === 'ReleaseFailedSpawn') {
+      releaseBackendSessionAfterFailedSpawn(child);
+    } else if (disposition === 'ReleaseExitedProcess') {
+      releaseBackendSessionAfterConfirmedExit(child);
     }
-    appendLog(`OpenLineOps.Api failed to start: ${error.message}`);
+    if (disposition !== 'RetainLiveProcess') {
+      if (backendProcess === child) {
+        backendProcess = null;
+        backendStartedAtUtc = null;
+        lastExitCode = -1;
+      }
+    }
+    appendLog(disposition === 'RetainLiveProcess'
+      ? `OpenLineOps.Api process control failed while the exact process remains active; retaining its identity and credentials: ${error.message}`
+      : `OpenLineOps.Api failed to start or exited with an operating-system error: ${error.message}`);
     void notifyBackendStatusChanged();
   });
   child.on('exit', code => {
-    clearBackendSession(child);
+    releaseBackendSessionAfterConfirmedExit(child);
     if (backendProcess === child) {
       backendProcess = null;
       backendStartedAtUtc = null;
@@ -970,22 +1205,29 @@ async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
     appendLog(`OpenLineOps.Api exited with code ${code ?? 'unknown'}.`);
     void notifyBackendStatusChanged();
   });
+  if (child.pid === undefined) {
+    releaseBackendSessionAfterFailedSpawn(child);
+    launch.packagedRuntimeBinding?.rollback();
+    throw new Error('OpenLineOps.Api did not receive an operating-system process identity.');
+  }
+
+  backendProcess = child;
+  backendStartedAtUtc = null;
+  lastExitCode = null;
+  child.stdout.on('data', chunk => appendLog(chunk.toString()));
+  child.stderr.on('data', chunk => appendLog(chunk.toString()));
 
   try {
     const document = await waitForBackendHandshakeDocument(child, handshakePath);
+    backendStartedAtUtc = new Date(
+      document.StartedAtUnixMilliseconds).toISOString();
     const apiBaseUrl = canonicalizeLocalBackendBaseUrl(document.Origin);
     await verifyBackendProcessHandshakeServer(
       apiBaseUrl,
       nonce,
       () => assertBackendProcessAlive(child));
     assertBackendProcessAlive(child);
-    activeBackendSession = {
-      process: child,
-      apiBaseUrl,
-      standardToken: sessionCredentials.standardToken,
-      safetyToken: sessionCredentials.safetyToken,
-      nonce
-    };
+    backendSessionLifecycle.authenticate(child, apiBaseUrl);
     launch.packagedRuntimeBinding?.verify();
     launch.packagedRuntimeBinding?.commit();
     const status = await getBackendStatus();
@@ -1005,7 +1247,7 @@ async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
     } catch (candidate) {
       rollbackError = candidate;
     }
-    clearBackendSession(child);
+    releaseBackendSessionAfterConfirmedExit(child);
     if (backendProcess === child) {
       backendProcess = null;
       backendStartedAtUtc = null;
@@ -1019,9 +1261,6 @@ async function launchAndAuthenticateBackend(): Promise<BackendStatus> {
     throw error;
   } finally {
     cleanupBackendHandshakeFile(handshakePath);
-    if (pendingHandshakePath === handshakePath) {
-      pendingHandshakePath = null;
-    }
   }
 }
 
@@ -1066,7 +1305,8 @@ async function waitForBackendHandshakeDocument(
       if (!parsed
           || typeof parsed !== 'object'
           || Array.isArray(parsed)
-          || Object.keys(parsed).sort().join(',') !== 'Origin,ProcessId') {
+          || Object.keys(parsed).sort().join(',')
+            !== 'Origin,ProcessId,StartedAtUnixMilliseconds') {
         throw new Error('Backend handshake document has unexpected fields.');
       }
       const document = parsed as Partial<BackendHandshakeDocument>;
@@ -1074,10 +1314,17 @@ async function waitForBackendHandshakeDocument(
       if (typeof processId !== 'number'
           || !Number.isSafeInteger(processId)
           || processId !== child.pid
-          || typeof document.Origin !== 'string') {
+          || typeof document.Origin !== 'string'
+          || typeof document.StartedAtUnixMilliseconds !== 'number'
+          || !Number.isSafeInteger(document.StartedAtUnixMilliseconds)
+          || document.StartedAtUnixMilliseconds <= 0) {
         throw new Error('Backend handshake document does not identify the spawned API process.');
       }
-      return { ProcessId: processId, Origin: document.Origin };
+      return {
+        ProcessId: processId,
+        Origin: document.Origin,
+        StartedAtUnixMilliseconds: document.StartedAtUnixMilliseconds
+      };
     }
     await new Promise(resolve => setTimeout(resolve, 50));
   }
@@ -1099,36 +1346,53 @@ function assertBackendProcessAlive(child: ChildProcessWithoutNullStreams): void 
   if (backendProcess !== child
       || child.pid === undefined
       || child.exitCode !== null
-      || child.signalCode !== null
-      || child.killed) {
+      || child.signalCode !== null) {
     throw new Error('Spawned API process exited before its authenticated session was usable.');
   }
 }
 
 function requireActiveBackendSession(): ActiveBackendSession {
-  const session = activeBackendSession;
+  const session = backendSessionLifecycle.authenticated;
   if (session === null) {
     throw new Error('No authenticated local API process session is active.');
   }
   try {
     assertBackendProcessAlive(session.process);
   } catch (error) {
-    clearBackendSession(session.process);
+    if (hasDesktopBackendProcessExited(session.process)) {
+      releaseBackendSessionAfterConfirmedExit(session.process);
+    }
     throw error;
   }
   return session;
 }
 
-function clearBackendSession(child?: ChildProcessWithoutNullStreams): void {
-  if (activeBackendSession !== null
-      && (child === undefined || activeBackendSession.process === child)) {
-    activeBackendSession = null;
-    pendingExternalProgramDirectories.clear();
+function releaseBackendSessionAfterFailedSpawn(
+  child: ChildProcessWithoutNullStreams
+): void {
+  const releasedSession = backendSessionLifecycle.releaseFailedSpawn(child);
+  if (releasedSession === null) {
+    return;
   }
-  if (pendingHandshakePath !== null) {
-    cleanupBackendHandshakeFile(pendingHandshakePath);
-    pendingHandshakePath = null;
+  pendingExternalProgramDirectories.clear();
+  cleanupBackendHandshakeForSession(releasedSession.handshakePath);
+}
+
+function releaseBackendSessionAfterConfirmedExit(
+  child: ChildProcessWithoutNullStreams
+): void {
+  const releasedSession = backendSessionLifecycle.releaseConfirmedExit(
+    child,
+    hasDesktopBackendProcessExited(child));
+  if (releasedSession === null) {
+    return;
   }
+  pendingExternalProgramDirectories.clear();
+  cleanupBackendHandshakeForSession(releasedSession.handshakePath);
+}
+
+function cleanupBackendHandshakeForSession(handshakePath: string): void {
+  cleanupBackendHandshakeFile(handshakePath);
 }
 
 function cleanupBackendHandshakeFile(handshakePath: string): void {
@@ -1142,40 +1406,30 @@ function cleanupBackendHandshakeFile(handshakePath: string): void {
 async function terminateBackendProcessTree(
   child: ChildProcessWithoutNullStreams
 ): Promise<void> {
-  if (child.pid === undefined || child.exitCode !== null) {
+  if (child.pid === undefined || hasDesktopBackendProcessExited(child)) {
     return;
   }
-  if (process.platform === 'win32') {
-    const result = spawnSync(
-      windowsSystemExecutablePath('taskkill.exe'),
-      ['/pid', String(child.pid), '/t', '/f'],
-      {
-        encoding: 'utf8',
-        windowsHide: true
-      });
-    try {
-      await waitForBackendProcessExit(child, 10000);
-    } catch (error) {
-      const detail = result.error?.message
-        ?? result.stderr?.trim()
-        ?? `taskkill exited with ${result.status ?? 'no status'}`;
-      throw new Error(
-        `Backend process tree did not stop after taskkill: ${detail}`,
-        { cause: error });
-    }
-    return;
+
+  // ChildProcess.kill targets the process handle owned by this exact spawn,
+  // avoiding a stale/reused PID. The desktop-bound API owns a kill-on-close
+  // Windows Job, so terminating that root also terminates its complete tree.
+  const terminationAccepted = child.kill();
+  try {
+    await waitForBackendProcessExit(child, backendProcessTerminationTimeoutMs);
+  } catch (error) {
+    throw new Error(
+      terminationAccepted
+        ? 'Backend root process did not exit after exact-handle termination.'
+        : 'Backend process rejected exact-handle termination and remained alive.',
+      { cause: error });
   }
-  if (!child.kill('SIGTERM')) {
-    throw new Error('Backend process rejected its termination signal.');
-  }
-  await waitForBackendProcessExit(child, 10000);
 }
 
 async function waitForBackendProcessExit(
   child: ChildProcessWithoutNullStreams,
   timeoutMs: number
 ): Promise<void> {
-  if (child.exitCode !== null) {
+  if (hasDesktopBackendProcessExited(child)) {
     return;
   }
   await new Promise<void>((resolve, reject) => {
@@ -1196,7 +1450,7 @@ async function waitForBackendProcessExit(
     }, timeoutMs);
     child.once('exit', onExit);
     child.once('error', onError);
-    if (child.exitCode !== null) {
+    if (hasDesktopBackendProcessExited(child)) {
       onExit();
     }
   });
@@ -1334,6 +1588,13 @@ ipcMain.handle('trace:save-artifact', async (
 
 if (ownsPrimaryInstance) {
   app.on('second-instance', () => {
+    if (applicationQuitCoordinator.phase === 'ShutdownFailed') {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.destroy();
+      }
+      app.quit();
+      return;
+    }
     if (!mainWindow) {
       return;
     }
@@ -1363,41 +1624,179 @@ if (ownsPrimaryInstance) {
       console.error(recentLogs.join('\n'));
     }
     const child = backendProcess;
-    if (child !== null) {
+    try {
+      await stopBackendAndReleaseState(child);
+    } catch (terminationError) {
+      const terminationDetail = terminationError instanceof Error
+        ? terminationError.message
+        : String(terminationError);
+      appendLog(
+        `Backend termination failed during Studio startup shutdown: ${terminationDetail}`);
       try {
-        await terminateBackendProcessTree(child);
-      } catch (terminationError) {
-        appendLog(`Backend termination failed during Studio startup shutdown: ${terminationError instanceof Error
-          ? terminationError.message
-          : String(terminationError)}`);
+        dialog.showErrorBox(
+          'OpenLineOps startup failed safely',
+          `${message}\n\nThe local automation backend could not be confirmed stopped. OpenLineOps will retry through its guarded shutdown flow.\n\n${
+            terminationDetail}`);
+      } catch (dialogError) {
+        appendLog(`Studio startup shutdown error dialog failed: ${
+          dialogError instanceof Error ? dialogError.message : String(dialogError)}`);
       }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        try {
+          mainWindow.destroy();
+        } catch (windowError) {
+          appendLog(`Studio startup window cleanup failed: ${
+            windowError instanceof Error ? windowError.message : String(windowError)}`);
+        }
+      }
+      app.quit();
+      return;
     }
-    clearBackendSession(child ?? undefined);
-    backendProcess = null;
     app.exit(1);
   });
 }
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
+  if (process.platform !== 'darwin'
+      || applicationQuitCoordinator.phase === 'WaitingForWindowClose') {
     app.quit();
   }
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', event => {
+  const windowToCoordinate = mainWindow && !mainWindow.isDestroyed()
+    ? mainWindow
+    : null;
+  const action = applicationQuitCoordinator.handleBeforeQuit(
+    windowToCoordinate !== null);
+  if (action === 'AllowFinalShutdown') {
+    return;
+  }
+
+  event.preventDefault();
+  if (action === 'WaitForCoordinatedWindowClose'
+      || action === 'WaitForFinalShutdown') {
+    return;
+  }
+  if (action === 'BeginCoordinatedWindowClose') {
+    try {
+      windowToCoordinate?.close();
+    } catch (error) {
+      cancelCoordinatedApplicationQuit('the application quit close request failed');
+      appendLog(`Application quit could not request coordinated window close: ${
+        error instanceof Error ? error.message : String(error)}`);
+    }
+    return;
+  }
+
+  beginFinalApplicationShutdown();
+});
+
+function cancelCoordinatedApplicationQuit(reason: string): void {
+  if (applicationQuitCoordinator.cancelCoordinatedWindowClose()) {
+    appendLog(`Application quit coordination canceled because ${reason}.`);
+  }
+}
+
+function beginFinalApplicationShutdown(): void {
+  if (applicationShutdownPromise !== null) {
+    return;
+  }
+
   applicationQuitting = true;
   const child = backendProcess;
-  clearBackendSession(child ?? undefined);
-  backendProcess = null;
-  backendStartedAtUtc = null;
-  if (child !== null) {
-    void terminateBackendProcessTree(child).catch(error => {
-      appendLog(`Backend termination failed during Studio shutdown: ${error instanceof Error
-        ? error.message
-        : String(error)}`);
+  const shutdownAttempt = (async () => {
+    await stopBackendAndReleaseState(child);
+    if (!applicationQuitCoordinator.completeFinalShutdown()) {
+      throw new Error(
+        `Application shutdown completion arrived in unexpected phase ${
+          applicationQuitCoordinator.phase}.`);
+    }
+  })();
+  applicationShutdownPromise = shutdownAttempt;
+  void shutdownAttempt.then(
+    () => {
+      if (applicationShutdownPromise === shutdownAttempt) {
+        applicationShutdownPromise = null;
+      }
+      app.quit();
+    },
+    error => {
+      if (applicationShutdownPromise === shutdownAttempt) {
+        applicationShutdownPromise = null;
+      }
+      applicationQuitting = false;
+      const detail = error instanceof Error ? error.message : String(error);
+      appendLog(`Backend termination failed during Studio shutdown: ${detail}`);
+      if (!applicationQuitCoordinator.failFinalShutdown()) {
+        appendLog(
+          `Application shutdown failure arrived in unexpected phase ${
+            applicationQuitCoordinator.phase}.`);
+        return;
+      }
+      void presentApplicationShutdownFailure(detail);
     });
+}
+
+async function presentApplicationShutdownFailure(detail: string): Promise<void> {
+  try {
+    const decision = await dialog.showMessageBox({
+      type: 'error',
+      title: 'OpenLineOps could not shut down safely',
+      message: 'The local automation backend is still running.',
+      detail: `${detail}\n\nStudio kept the backend identity and credentials so shutdown can be retried safely.`,
+      buttons: ['Retry Shutdown', 'Reopen Studio'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true
+    });
+    if (decision.response === 0) {
+      app.quit();
+      return;
+    }
+
+    if (applicationQuitCoordinator.phase !== 'ShutdownFailed') {
+      return;
+    }
+    await createWindow();
+    if (!applicationQuitCoordinator.resumeAfterFailedShutdown()) {
+      throw new Error(
+        `Application shutdown recovery arrived in unexpected phase ${
+          applicationQuitCoordinator.phase}.`);
+    }
+  } catch (error) {
+    const recoveryDetail = error instanceof Error ? error.message : String(error);
+    appendLog(`Application shutdown recovery failed: ${recoveryDetail}`);
+    try {
+      dialog.showErrorBox(
+        'OpenLineOps remains running',
+        `The local automation backend could not be stopped and Studio recovery failed.\n\n${
+          recoveryDetail}\n\nLaunch OpenLineOps again to retry shutdown.`);
+    } catch (dialogError) {
+      appendLog(`Application shutdown recovery error dialog failed: ${
+        dialogError instanceof Error ? dialogError.message : String(dialogError)}`);
+    }
   }
-});
+}
+
+async function stopBackendAndReleaseState(
+  child: ChildProcessWithoutNullStreams | null
+): Promise<void> {
+  await stopDesktopBackendForApplicationShutdown(
+    child,
+    terminateBackendProcessTree,
+    stoppedProcess => {
+      if (backendProcess !== null && backendProcess !== stoppedProcess) {
+        throw new Error(
+          'Backend process identity changed during Studio shutdown.');
+      }
+      if (stoppedProcess !== null) {
+        releaseBackendSessionAfterConfirmedExit(stoppedProcess);
+      }
+      backendProcess = null;
+      backendStartedAtUtc = null;
+    });
+}
 
 async function getBackendStatus(): Promise<BackendStatus> {
   const health = await probeHealth();
@@ -1406,8 +1805,11 @@ async function getBackendStatus(): Promise<BackendStatus> {
     isRunning: backendProcess !== null,
     pid: backendProcess?.pid ?? null,
     health,
-    apiBaseUrl: activeBackendSession?.apiBaseUrl ?? null,
+    apiBaseUrl: backendSessionLifecycle.authenticated?.apiBaseUrl ?? null,
     startedAtUtc: backendStartedAtUtc,
+    startedAtUnixMilliseconds: backendStartedAtUtc === null
+      ? null
+      : Date.parse(backendStartedAtUtc),
     lastExitCode,
     recentLogs: recentLogs.slice(-80)
   };
@@ -1662,7 +2064,7 @@ function externalProgramDefinitionResourceId(definition: unknown): string {
 
 function pruneExpiredExternalProgramDirectories(): void {
   const now = Date.now();
-  const activeSessionNonce = activeBackendSession?.nonce;
+  const activeSessionNonce = backendSessionLifecycle.authenticated?.nonce;
   for (const [selectionId, pending] of pendingExternalProgramDirectories) {
     if (pending.expiresAtMilliseconds <= now
         || pending.backendSessionNonce !== activeSessionNonce) {
@@ -1830,6 +2232,7 @@ function assertTrustedRendererIpcSender(event: IpcMainInvokeEvent): void {
   const senderDocumentUrl = event.sender.getURL();
   if (!mainWindow
       || event.sender !== mainWindow.webContents
+      || event.senderFrame !== event.sender.mainFrame
       || trustedRendererDocumentUrl === null
       || !isTrustedRendererIpcContext(
         senderFrameUrl,

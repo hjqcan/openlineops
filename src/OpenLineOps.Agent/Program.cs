@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Microsoft.Data.Sqlite;
 using OpenLineOps.Agent;
 using OpenLineOps.Agent.Application.StationJobs;
@@ -11,7 +10,6 @@ using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
 using OpenLineOps.WindowsSecurity;
 
-const int hostFailureExitCode = 70;
 string? windowsServiceEventLogSource = null;
 
 try
@@ -191,29 +189,30 @@ try
     builder.Services.AddHostedService<StationAgentWorker>();
     builder.Services.AddHostedService<StationMaterialArrivalWorker>();
 
-    await builder.Build().RunAsync();
-    return 0;
+    StationAgentDiagnostics.ProtectLoggingProviders(builder.Services);
+    builder.Services.Configure<HostOptions>(hostOptions =>
+    {
+        hostOptions.BackgroundServiceExceptionBehavior =
+            BackgroundServiceExceptionBehavior.StopHost;
+        hostOptions.ServicesStartConcurrently = false;
+        hostOptions.ServicesStopConcurrently = false;
+        hostOptions.ShutdownTimeout = StationAgentProcess.ShutdownTimeout;
+    });
+    var host = builder.Build();
+    return await StationAgentProcess.RunHostAsync(
+        host,
+        exception => StationAgentFailureReporter.ReportAsync(
+            exception,
+            windowsServiceEventLogSource),
+        terminateProcessOnUnrecoverableTimeout:
+            static exitCode => Environment.Exit(exitCode));
 }
 catch (Exception exception)
 {
-    var failureMessage = $"OpenLineOps Station Agent terminated: {exception.Message}";
-    await Console.Error.WriteLineAsync(failureMessage);
-    if (OperatingSystem.IsWindows()
-        && windowsServiceEventLogSource is not null)
-    {
-        try
-        {
-            EventLog.WriteEntry(
-                windowsServiceEventLogSource,
-                StationAgentStartupDiagnostics.CreateEventLogFailureMessage(exception),
-                EventLogEntryType.Error);
-        }
-        catch (Exception diagnosticException)
-        {
-            await Console.Error.WriteLineAsync(
-                $"OpenLineOps Station Agent could not write its startup failure to EventLog: {diagnosticException.Message}");
-        }
-    }
-
-    return hostFailureExitCode;
+    await StationAgentProcess.ReportFailureWithinDeadlineAsync(
+        exception,
+        failure => StationAgentFailureReporter.ReportAsync(
+            failure,
+            windowsServiceEventLogSource));
+    return StationAgentProcess.HostFailureExitCode;
 }

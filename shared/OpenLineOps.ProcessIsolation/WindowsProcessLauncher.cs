@@ -11,7 +11,7 @@ public sealed record IsolatedProcessStartRequest(
     IReadOnlyCollection<string> Arguments,
     string WorkingDirectory,
     IReadOnlyDictionary<string, string> Environment,
-    WindowsProcessLimits Limits,
+    WindowsProcessLimits? Limits,
     WindowsAppContainerPolicy? AppContainerPolicy = null);
 
 public sealed record WindowsAppContainerPolicy(
@@ -57,7 +57,9 @@ public sealed class WindowsProcessLauncher
         using var attributes = ProcessThreadAttributeList.Create(
             request.AppContainerPolicy,
             [standardInput.ChildHandle, standardOutput.ChildHandle, standardError.ChildHandle]);
-        WindowsProcessJob? job = WindowsProcessJob.Create(request.Limits);
+        WindowsProcessJob? job = request.Limits is null
+            ? WindowsProcessJob.CreateKillOnClose()
+            : WindowsProcessJob.Create(request.Limits);
 
         var startupInfo = new StartupInfoEx
         {
@@ -244,7 +246,7 @@ public sealed class WindowsProcessLauncher
                 nameof(request));
         }
 
-        request.Limits.Validate();
+        request.Limits?.Validate();
     }
 
     private static string ToNativePath(string path)
@@ -814,6 +816,10 @@ public sealed class WindowsIsolatedProcess : IIsolatedProcess
     public Stream StandardError { get; }
 
     public int Id => _process.Id;
+
+    public long StartedAtUnixMilliseconds =>
+        new DateTimeOffset(_process.StartTime.ToUniversalTime())
+            .ToUnixTimeMilliseconds();
 
     public int ExitCode
     {

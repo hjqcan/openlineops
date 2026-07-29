@@ -1,40 +1,171 @@
 using System.Diagnostics;
 using System.Security.Principal;
 using System.Text;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace OpenLineOps.Agent.Tests;
 
 public sealed class StationAgentExecutableContractTests
 {
     [Fact]
-    public void WindowsServiceStartupDiagnosticRedactsCredentialsAndBoundsEventLogPayload()
+    public void ProcessFailureDiagnosticIsSingleLineAndNeverEmitsAStackOrSourcePath()
     {
-        const string variableName = "OPENLINEOPS_STARTUP_DIAGNOSTIC_TEST_TOKEN";
-        var token = $"diagnostic-token-{Guid.NewGuid():N}";
-        var previous = Environment.GetEnvironmentVariable(variableName);
+        Exception exception;
         try
         {
-            Environment.SetEnvironmentVariable(variableName, token);
-            var exception = new InvalidOperationException(
-                "broker amqp://diagnostic-user:diagnostic-password@127.0.0.1:5672/ "
-                + token + "\r\n" + new string('x', 5_000));
-
-            var diagnostic = StationAgentStartupDiagnostics
-                .CreateEventLogFailureMessage(exception);
-
-            Assert.Equal(4_096, diagnostic.Length);
-            Assert.Contains("InvalidOperationException", diagnostic, StringComparison.Ordinal);
-            Assert.Contains("[REDACTED]", diagnostic, StringComparison.Ordinal);
-            Assert.DoesNotContain("diagnostic-user", diagnostic, StringComparison.Ordinal);
-            Assert.DoesNotContain("diagnostic-password", diagnostic, StringComparison.Ordinal);
-            Assert.DoesNotContain(token, diagnostic, StringComparison.Ordinal);
-            Assert.DoesNotContain('\r', diagnostic);
-            Assert.DoesNotContain('\n', diagnostic);
+            throw new InvalidOperationException("Deterministic process failure.");
         }
-        finally
+        catch (Exception caught)
         {
-            Environment.SetEnvironmentVariable(variableName, previous);
+            exception = caught;
         }
+
+        var diagnostic = StationAgentDiagnostics.FormatFailureMessage(
+            "OpenLineOps Station Agent terminated",
+            exception);
+
+        Assert.Equal(
+            "OpenLineOps Station Agent terminated: System.InvalidOperationException: Deterministic process failure.",
+            diagnostic);
+        Assert.DoesNotContain(" at ", diagnostic, StringComparison.Ordinal);
+        Assert.DoesNotContain(".cs:", diagnostic, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void DiagnosticFormatterRedactsCredentialsAuthorizationAndBoundsEveryPayload()
+    {
+        const string brokerUri =
+            "amqps://diagnostic-user:diagnostic-password@rabbitmq.local:5671/production";
+        const string authorizationSecret = "startup-authorization-secret";
+        var exception = new InvalidOperationException(
+            $"BrokerUri={brokerUri}; Authorization: Bearer {authorizationSecret}\r\n"
+            + new string('x', 5_000));
+
+        var diagnostic = StationAgentDiagnostics.FormatFailureMessage(
+            "OpenLineOps Station Agent startup failed",
+            exception);
+
+        Assert.Equal(4_096, diagnostic.Length);
+        Assert.Contains("InvalidOperationException", diagnostic, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", diagnostic, StringComparison.Ordinal);
+        Assert.DoesNotContain("diagnostic-user", diagnostic, StringComparison.Ordinal);
+        Assert.DoesNotContain("diagnostic-password", diagnostic, StringComparison.Ordinal);
+        Assert.DoesNotContain(authorizationSecret, diagnostic, StringComparison.Ordinal);
+        Assert.DoesNotContain('\r', diagnostic);
+        Assert.DoesNotContain('\n', diagnostic);
+    }
+
+    [Fact]
+    public void AgentLoggingBoundarySanitizesExceptionAndMessageCredentials()
+    {
+        const string brokerUri =
+            "amqps://logger-user:logger-password@rabbitmq.local:5671/production";
+        const string authorizationSecret = "logger-authorization-secret";
+        var sink = new CapturingLoggerProvider();
+        var services = new ServiceCollection();
+        services.AddLogging(logging =>
+        {
+            logging.ClearProviders();
+            logging.AddProvider(sink);
+        });
+        StationAgentDiagnostics.ProtectLoggingProviders(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var logger = serviceProvider
+            .GetRequiredService<ILoggerFactory>()
+            .CreateLogger("OpenLineOps.Agent.Diagnostics");
+        logger.Log(
+            LogLevel.Error,
+            new EventId(1201, "AgentDiagnosticFailure"),
+            $"Station Agent failed for BrokerUri={brokerUri}",
+            new InvalidOperationException(
+                $"BrokerUri={brokerUri}; Authorization=Basic {authorizationSecret}"),
+            static (message, _) => message);
+
+        Assert.NotNull(sink.Message);
+        Assert.Contains("[REDACTED]", sink.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("logger-user", sink.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("logger-password", sink.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(authorizationSecret, sink.Message, StringComparison.Ordinal);
+        Assert.Null(sink.Exception);
+
+        using (logger.BeginScope(
+                   $"BrokerUri={brokerUri}; Authorization: Bearer {authorizationSecret}"))
+        {
+            logger.Log(
+                LogLevel.Information,
+                new EventId(1203, "AgentDiagnosticScope"),
+                "Transport scope diagnostic",
+                exception: null,
+                static (message, _) => message);
+        }
+
+        Assert.NotNull(sink.Scope);
+        Assert.Contains("[REDACTED]", sink.Scope, StringComparison.Ordinal);
+        Assert.DoesNotContain("logger-user", sink.Scope, StringComparison.Ordinal);
+        Assert.DoesNotContain("logger-password", sink.Scope, StringComparison.Ordinal);
+        Assert.DoesNotContain(authorizationSecret, sink.Scope, StringComparison.Ordinal);
+
+        logger.Log(
+            LogLevel.Information,
+            new EventId(1202, "AgentDiagnosticMessage"),
+            $"Transport status BrokerUri={brokerUri}; Authorization: Bearer {authorizationSecret}",
+            exception: null,
+            static (message, _) => message);
+
+        Assert.NotNull(sink.Message);
+        Assert.Contains("[REDACTED]", sink.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("logger-user", sink.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("logger-password", sink.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(authorizationSecret, sink.Message, StringComparison.Ordinal);
+        Assert.Null(sink.Exception);
+    }
+
+    [Fact]
+    public void AgentLoggingBoundaryNeverForwardsStructuredStateOrReinvokesFormatter()
+    {
+        const string structuredSecret = "structured-state-secret";
+        var sink = new CapturingLoggerProvider();
+        var services = new ServiceCollection();
+        services.AddLogging(logging =>
+        {
+            logging.ClearProviders();
+            logging.AddProvider(sink);
+        });
+        StationAgentDiagnostics.ProtectLoggingProviders(services);
+
+        using var serviceProvider = services.BuildServiceProvider();
+        var logger = serviceProvider
+            .GetRequiredService<ILoggerFactory>()
+            .CreateLogger("OpenLineOps.Agent.Diagnostics.Structured");
+        var formatterCalls = 0;
+        var structuredState = new Dictionary<string, string>
+        {
+            ["safe"] = "Safe diagnostic",
+            ["secret"] = structuredSecret
+        };
+
+        logger.Log(
+            LogLevel.Information,
+            new EventId(1204, "StructuredBoundary"),
+            structuredState,
+            exception: null,
+            (state, _) =>
+            {
+                formatterCalls++;
+                return formatterCalls == 1
+                    ? state["safe"]
+                    : state["secret"];
+            });
+
+        Assert.Equal(1, formatterCalls);
+        Assert.Equal("Safe diagnostic", sink.Message);
+        Assert.IsType<string>(sink.State);
+        Assert.DoesNotContain(
+            structuredSecret,
+            sink.Message,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -198,4 +329,69 @@ public sealed class StationAgentExecutableContractTests
         int ExitCode,
         string StandardOutput,
         string StandardError);
+
+    private sealed class CapturingLoggerProvider :
+        ILoggerProvider,
+        ISupportExternalScope
+    {
+        private IExternalScopeProvider? _scopeProvider;
+
+        public string? Message { get; private set; }
+
+        public Exception? Exception { get; private set; }
+
+        public string? Scope { get; private set; }
+
+        public object? State { get; private set; }
+
+        public ILogger CreateLogger(string categoryName) =>
+            new CapturingLogger(this);
+
+        public void SetScopeProvider(IExternalScopeProvider scopeProvider) =>
+            _scopeProvider = scopeProvider;
+
+        public void Dispose()
+        {
+        }
+
+        private void CaptureScopes()
+        {
+            _scopeProvider?.ForEachScope(
+                static (scope, provider) =>
+                    provider.Scope = scope?.ToString(),
+                this);
+        }
+
+        private sealed class CapturingLogger(
+            CapturingLoggerProvider provider) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull =>
+                NoopScope.Instance;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            {
+                provider.State = state;
+                provider.Message = formatter(state, exception);
+                provider.Exception = exception;
+                provider.CaptureScopes();
+            }
+        }
+    }
+
+    private sealed class NoopScope : IDisposable
+    {
+        public static NoopScope Instance { get; } = new();
+
+        public void Dispose()
+        {
+        }
+    }
 }

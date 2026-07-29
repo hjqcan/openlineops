@@ -704,7 +704,7 @@ $probes += Invoke-EntryPointProbe `
     -ExecutablePath (Join-Path $agentBundleRoot "OpenLineOps.Agent.exe") `
     -WorkingDirectory $agentBundleRoot `
     -RequireNonZeroExit `
-    -ExpectedOutputPattern "^OpenLineOps Station Agent terminated: OpenLineOps:WindowsServiceName must contain 1-80 ASCII letters, digits, periods, underscores, or hyphens\.$"
+    -ExpectedOutputPattern "^OpenLineOps Station Agent terminated: [A-Za-z.]+: OpenLineOps:WindowsServiceName must contain 1-80 ASCII letters, digits, periods, underscores, or hyphens\.$"
 $probes += Invoke-EntryPointProbe `
     -Name "station-runtime" `
     -ExecutablePath (Join-Path $agentBundleRoot "OpenLineOps.StationRuntime.exe") `

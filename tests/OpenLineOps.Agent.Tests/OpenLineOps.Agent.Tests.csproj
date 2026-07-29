@@ -33,6 +33,7 @@
     <ProjectReference Include="..\..\shared\OpenLineOps.Agent.Contracts\OpenLineOps.Agent.Contracts.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.WindowsSecurity\OpenLineOps.WindowsSecurity.csproj" />
     <ProjectReference Include="..\OpenLineOps.StationRuntime.TestHelper\OpenLineOps.StationRuntime.TestHelper.csproj" />
+    <ProjectReference Include="..\OpenLineOps.Agent.SafetyActuator.TestHelper\OpenLineOps.Agent.SafetyActuator.TestHelper.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.StationRuntime\OpenLineOps.StationRuntime.csproj"
                       ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\..\src\OpenLineOps.PluginHost\OpenLineOps.PluginHost.csproj"

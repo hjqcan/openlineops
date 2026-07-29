@@ -21,7 +21,11 @@ import {
   Square,
   X
 } from 'lucide-react';
-import type { BackendStatus, DesktopConfig } from '../shared/desktop-api';
+import type {
+  BackendStatus,
+  DesktopCloseCoordinatorBinding,
+  DesktopConfig
+} from '../shared/desktop-api';
 import type {
   AutomationProjectWorkspaceResponse,
   PlatformResponse,
@@ -1055,32 +1059,56 @@ function App(): React.ReactElement {
     if (tab) activateEditor(tab);
   }, [activateEditor, editorTabState.tabs]);
 
-  useEffect(() => desktop.onCloseRequested(requestId => {
-    const next = beginApplicationCloseRequest(
-      applicationCloseStateRef.current,
-      requestId,
-      Date.now());
-    commitApplicationCloseState(next);
-    recordSmokeEvent('application-close-requested');
-    desktop.acknowledgeCloseRequest(requestId);
-    recordSmokeEvent('application-close-acknowledged');
-  }), [commitApplicationCloseState]);
-
-  useEffect(() => desktop.onCloseRequestExpired(requestId => {
-    const current = applicationCloseStateRef.current;
-    const next = expireApplicationCloseRequest(current, requestId);
-    if (next === current) {
-      return;
-    }
-    commitApplicationCloseState(next);
-    if (pendingUnsavedGuardRef.current?.applicationCloseRequestId === requestId) {
-      unsavedGuardPendingRef.current = false;
-      pendingUnsavedGuardRef.current = null;
-      setPendingUnsavedGuard(null);
-      setUnsavedGuardBusy(false);
-    }
-    setMessage('The renderer could not acknowledge the close request in time. Close the window again to retry.');
-  }), [commitApplicationCloseState]);
+  useEffect(() => {
+    let active = true;
+    let closeCoordinatorBinding: DesktopCloseCoordinatorBinding | null = null;
+    const removeCloseRequestedListener = desktop.onCloseRequested(requestId => {
+      const next = beginApplicationCloseRequest(
+        applicationCloseStateRef.current,
+        requestId,
+        Date.now());
+      commitApplicationCloseState(next);
+      recordSmokeEvent('application-close-requested');
+      desktop.acknowledgeCloseRequest(requestId);
+      recordSmokeEvent('application-close-acknowledged');
+    });
+    const removeCloseRequestExpiredListener = desktop.onCloseRequestExpired(requestId => {
+      const current = applicationCloseStateRef.current;
+      const next = expireApplicationCloseRequest(current, requestId);
+      if (next === current) {
+        return;
+      }
+      commitApplicationCloseState(next);
+      if (pendingUnsavedGuardRef.current?.applicationCloseRequestId === requestId) {
+        unsavedGuardPendingRef.current = false;
+        pendingUnsavedGuardRef.current = null;
+        setPendingUnsavedGuard(null);
+        setUnsavedGuardBusy(false);
+      }
+      setMessage('The renderer could not acknowledge the close request in time. Close the window again to retry.');
+    });
+    void desktop.getCloseCoordinatorBinding()
+      .then(binding => {
+        if (!active) {
+          return;
+        }
+        closeCoordinatorBinding = binding;
+        desktop.setCloseCoordinatorReady(binding, true);
+      })
+      .catch(error => {
+        if (active) {
+          setMessage(`Close coordinator registration failed: ${String(error)}`);
+        }
+      });
+    return () => {
+      active = false;
+      if (closeCoordinatorBinding !== null) {
+        desktop.setCloseCoordinatorReady(closeCoordinatorBinding, false);
+      }
+      removeCloseRequestExpiredListener();
+      removeCloseRequestedListener();
+    };
+  }, [commitApplicationCloseState]);
 
   useEffect(() => {
     const current = applicationCloseStateRef.current;

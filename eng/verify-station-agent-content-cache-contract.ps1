@@ -39,6 +39,7 @@ function Assert-ForbiddenPattern {
 }
 
 $program = Read-RequiredText "src/OpenLineOps.Agent/Program.cs"
+$processLifecycle = Read-RequiredText "src/OpenLineOps.Agent/StationAgentProcess.cs"
 $command = Read-RequiredText "src/OpenLineOps.Agent/StationAgentContentCacheProvisioningCommand.cs"
 $commandLine = Read-RequiredText "src/OpenLineOps.Agent/StationAgentCommandLine.cs"
 $hostOptions = Read-RequiredText "src/OpenLineOps.Agent/StationAgentHostOptions.cs"
@@ -106,12 +107,16 @@ Assert-ContainsLiteral $program "StationAgentContentCacheProvisioningCommand.Exe
     "Station Agent provisioning mode is not connected to its administrative command."
 Assert-ContainsLiteral $program "StationAgentContentCacheProvisioningCommand.RemovePackageAsync(" `
     "Station Agent protected-package removal mode is not connected to its administrative command."
-Assert-ContainsLiteral $program "EventLog.WriteEntry(" `
+Assert-ContainsLiteral $processLifecycle "EventLog.WriteEntry(" `
     "Station Agent startup failures are not written to the registered Windows service EventLog source."
-Assert-ContainsLiteral $program "StationAgentStartupDiagnostics.CreateEventLogFailureMessage(exception)" `
+Assert-ContainsLiteral $processLifecycle "StationAgentDiagnostics.FormatFailureMessage(" `
     "Station Agent startup failures are written to EventLog without the bounded credential-redaction boundary."
-Assert-ContainsLiteral $executableContract "WindowsServiceStartupDiagnosticRedactsCredentialsAndBoundsEventLogPayload" `
-    "Station Agent startup EventLog credential redaction lacks a regression test."
+Assert-ContainsLiteral $program "StationAgentDiagnostics.ProtectLoggingProviders(builder.Services);" `
+    "Station Agent runtime logging providers are not protected by the unified credential-redaction boundary."
+Assert-ContainsLiteral $executableContract "DiagnosticFormatterRedactsCredentialsAuthorizationAndBoundsEveryPayload" `
+    "Station Agent startup diagnostic credential redaction lacks a regression test."
+Assert-ContainsLiteral $executableContract "AgentLoggingBoundarySanitizesExceptionAndMessageCredentials" `
+    "Station Agent runtime message, exception, and scope redaction lacks a regression test."
 Assert-ContainsLiteral $agentStagedE2E "Startup diagnostic: {startupDiagnostic}" `
     "Staged Agent service startup failures do not preserve the EventLog diagnostic in CI output."
 Assert-ContainsLiteral $command "OperatingSystem.IsWindows()" `

@@ -127,6 +127,12 @@ $cases = @(
         ExpectedFailure = "version-suffix verifier mutation tests"
     },
     [pscustomobject]@{
+        Name = "Coordinator executable trial security"
+        Search = "./eng/verify-coordinator-external-program-trial-security.ps1"
+        Replacement = "Write-Host 'Coordinator executable trial security disabled'"
+        ExpectedFailure = "Coordinator executable protocol trials fail closed"
+    },
+    [pscustomobject]@{
         Name = "Windows PostgreSQL service"
         Search = '$serviceName = "postgresql-x64-17"'
         Replacement = '$serviceName = "postgresql-x64-16"'
@@ -425,6 +431,18 @@ $cases = @(
         Search = "npm run test:runtime-data-binding"
         Replacement = "npm run test:runtime-binding"
         ExpectedFailure = "fail-closed packaged runtime data binding and destructive incompatible-state reset"
+    },
+    [pscustomobject]@{
+        Name = "Development launcher shutdown smoke deletion"
+        Search = "      - name: Smoke test development launcher shutdown`n        working-directory: apps/desktop`n        timeout-minutes: 5`n        run: npm run smoke:dev-launcher-shutdown`n"
+        Replacement = ""
+        ExpectedFailure = "bounded development launcher shutdown and owned process-tree cleanup"
+    },
+    [pscustomobject]@{
+        Name = "Primary desktop smoke finite timeout"
+        Search = "      - name: Smoke test desktop`n        working-directory: apps/desktop`n        timeout-minutes: 20`n        run: npm run smoke:e2e`n"
+        Replacement = "      - name: Smoke test desktop`n        working-directory: apps/desktop`n        run: npm run smoke:e2e`n"
+        ExpectedFailure = "finite timeout on the primary desktop E2E"
     },
     [pscustomobject]@{
         Name = "Staged packaged desktop smoke deletion"

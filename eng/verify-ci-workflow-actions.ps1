@@ -176,6 +176,10 @@ Test-ContentContains `
     -Message "Workflow must reject legacy production contracts and compatibility aliases."
 Test-ContentContains `
     -Content $workflowContent `
+    -Pattern "verify-coordinator-external-program-trial-security\.ps1" `
+    -Message "Workflow must prove Coordinator executable protocol trials fail closed."
+Test-ContentContains `
+    -Content $workflowContent `
     -Pattern "verify-solution-project-coverage\.ps1" `
     -Message "Workflow must prove every formal project, including Agent and Runner hosts, is covered by the solution."
 Test-ContentContains `
@@ -342,6 +346,14 @@ Test-ContentContains `
     -Message "Workflow must verify fail-closed packaged runtime data binding and destructive incompatible-state reset."
 Test-ContentContains `
     -Content $workflowContent `
+    -Pattern '(?ms)^\s{6}- name:\s*Smoke test development launcher shutdown\s*\r?\n\s*working-directory:\s*apps/desktop\s*\r?\n\s*timeout-minutes:\s*5\s*\r?\n\s*run:\s*npm run smoke:dev-launcher-shutdown\s*$' `
+    -Message "Workflow must behaviorally verify bounded development launcher shutdown and owned process-tree cleanup."
+Test-ContentContains `
+    -Content $workflowContent `
+    -Pattern '(?ms)^\s{6}- name:\s*Smoke test desktop\s*\r?\n\s*working-directory:\s*apps/desktop\s*\r?\n\s*timeout-minutes:\s*20\s*\r?\n\s*run:\s*npm run smoke:e2e\s*$' `
+    -Message "Workflow must impose a finite timeout on the primary desktop E2E."
+Test-ContentContains `
+    -Content $workflowContent `
     -Pattern '(?ms)^\s{6}- name:\s*Smoke test staged packaged desktop\s*\r?\n\s*working-directory:\s*apps/desktop\s*\r?\n\s*timeout-minutes:\s*15\s*\r?\n\s*run:\s*npm run smoke:e2e:packaged-existing\s*$' `
     -Message "Workflow must run the staged packaged desktop restart, persistence, and single-instance E2E without rebuilding it."
 Test-ContentContains `
@@ -391,6 +403,12 @@ Test-StepCannotContinueOnError `
 Test-StepCannotContinueOnError `
     -Content $workflowContent `
     -StepName "Smoke test packaged default user data"
+Test-StepCannotContinueOnError `
+    -Content $workflowContent `
+    -StepName "Smoke test development launcher shutdown"
+Test-StepCannotContinueOnError `
+    -Content $workflowContent `
+    -StepName "Smoke test desktop"
 Test-StepCannotContinueOnError `
     -Content $workflowContent `
     -StepName "Verify sanitized Studio two-Agent evidence"

@@ -1483,7 +1483,7 @@ function Assert-PublicProductionSummary {
     }
     if ($null -ne $Summary.externalProgramTrial) {
         Assert-ExactProperties $Summary.externalProgramTrial @(
-            "status", "executionStatus", "judgement", "artifactCount", "directoryImport") `
+            "status", "coordinatorPolicy", "executionBoundary", "directoryImport") `
             "Production closure external program trial"
         Assert-ExactProperties $Summary.externalProgramTrial.directoryImport @(
             "entryPoint", "files", "preservedSameBasenames") `
@@ -1628,10 +1628,10 @@ function Assert-ProductionSummary {
     }
 
     Assert-Condition ($Summary.externalProgramTrial.status -ceq "passed" `
-            -and $Summary.externalProgramTrial.executionStatus -ceq "Completed" `
-            -and $Summary.externalProgramTrial.judgement -ceq "Passed" `
-            -and $Summary.externalProgramTrial.artifactCount -gt 0) `
-        "External program protocol trial evidence is incomplete."
+            -and $Summary.externalProgramTrial.coordinatorPolicy `
+                -ceq "Conflict.Projects.ApplicationExecutableProtocolTrialDisabled" `
+            -and $Summary.externalProgramTrial.executionBoundary -ceq "StationAgent") `
+        "Coordinator executable protocol-trial policy evidence is incomplete."
     $directoryImport = $Summary.externalProgramTrial.directoryImport
     $importedFiles = @($directoryImport.files)
     $preservedSameBasenames = @($directoryImport.preservedSameBasenames)

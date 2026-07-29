@@ -9,16 +9,20 @@ using OpenLineOps.Operations.Api.DependencyInjection;
 using OpenLineOps.Operations.Infra.CrossCutting.IoC.DependencyInjection;
 using OpenLineOps.Plugins.Api.DependencyInjection;
 using OpenLineOps.Processes.Api.DependencyInjection;
+using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Production.Api.DependencyInjection;
 using OpenLineOps.Projects.Api.DependencyInjection;
 using OpenLineOps.Runtime.Api.DependencyInjection;
 using OpenLineOps.Topology.Api.DependencyInjection;
 using OpenLineOps.Traceability.Api.DependencyInjection;
 
-var builder = WebApplication.CreateBuilder(args);
 var desktopProcessHandshake = DesktopProcessHandshake.FromEnvironment();
 using var desktopParentProcessLifetime = DesktopParentProcessLifetime.FromEnvironment(
     desktopProcessHandshake is not null);
+var desktopProcessTreeLifetime = desktopProcessHandshake is null
+    ? null
+    : WindowsCurrentProcessTreeLifetime.BindCurrentProcess();
+var builder = WebApplication.CreateBuilder(args);
 
 HttpsOrLoopbackMiddleware.ValidateConfiguredUrls(builder.Configuration);
 
@@ -114,6 +118,7 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+var desktopParentMonitor = desktopParentProcessLifetime?.MonitorAsync(app.Lifetime);
 
 if (app.Environment.IsDevelopment())
 {
@@ -148,7 +153,6 @@ app.MapGet("/", () => Results.Redirect("/api/platform"))
     .ExcludeFromDescription();
 
 await app.StartAsync();
-var desktopParentMonitor = desktopParentProcessLifetime?.MonitorAsync(app.Lifetime);
 if (desktopProcessHandshake is not null)
 {
     await desktopProcessHandshake.PublishBoundEndpointAsync(app, app.Lifetime.ApplicationStopping);
@@ -158,5 +162,6 @@ if (desktopParentMonitor is not null)
 {
     await desktopParentMonitor;
 }
+GC.KeepAlive(desktopProcessTreeLifetime);
 
 public partial class Program;

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -91,7 +92,8 @@ internal sealed class DesktopProcessHandshake
                 stream,
                 new DesktopProcessHandshakeDocument(
                     Environment.ProcessId,
-                    address.GetLeftPart(UriPartial.Authority)),
+                    address.GetLeftPart(UriPartial.Authority),
+                    GetCurrentProcessStartedAtUnixMilliseconds()),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
             stream.Flush(flushToDisk: true);
@@ -137,6 +139,13 @@ internal sealed class DesktopProcessHandshake
         && value.Length == length
         && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
 
+    private static long GetCurrentProcessStartedAtUnixMilliseconds()
+    {
+        using var process = Process.GetCurrentProcess();
+        return new DateTimeOffset(process.StartTime.ToUniversalTime())
+            .ToUnixTimeMilliseconds();
+    }
+
     private static void ValidateAuthorizedTargetHandle(SafeFileHandle handle)
     {
         if (!OperatingSystem.IsWindows())
@@ -181,5 +190,8 @@ internal sealed class DesktopProcessHandshake
         SafeFileHandle file,
         out ByHandleFileInformation fileInformation);
 
-    private sealed record DesktopProcessHandshakeDocument(int ProcessId, string Origin);
+    private sealed record DesktopProcessHandshakeDocument(
+        int ProcessId,
+        string Origin,
+        long StartedAtUnixMilliseconds);
 }

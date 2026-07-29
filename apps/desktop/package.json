@@ -11,16 +11,17 @@
   "scripts": {
     "build": "node scripts/clean-electron-build.mjs && tsc -p tsconfig.electron.json && vite build",
     "build:electron": "node scripts/clean-electron-build.mjs && tsc -p tsconfig.electron.json",
+    "build:process-tree-host": "dotnet build ../../tools/OpenLineOps.ProcessTreeHost/OpenLineOps.ProcessTreeHost.csproj --configuration Release --nologo --verbosity minimal --property:TreatWarningsAsErrors=true --disable-build-servers",
     "build:renderer": "vite build",
-    "dev": "npm run build:electron && node scripts/dev-launcher.mjs",
+    "dev": "npm run build:electron && npm run build:process-tree-host && node scripts/dev-launcher.mjs",
     "package:win": "npm run build && npm run package:win:ci",
-    "package:win:ci": "node scripts/package-win-unpacked.mjs",
-    "smoke:e2e": "npm run build && node scripts/electron-smoke.mjs",
-    "smoke:dev-launcher-shutdown": "npm run build:electron && node scripts/dev-launcher-shutdown-smoke.mjs",
-    "smoke:e2e:packaged": "npm run package:win && node scripts/electron-smoke.mjs --packaged",
-    "smoke:e2e:packaged-existing": "node scripts/electron-smoke.mjs --packaged",
-    "smoke:e2e:packaged-default-user-data": "node --check scripts/packaged-default-user-data-smoke.mjs && node scripts/packaged-default-user-data-smoke.mjs",
-    "e2e:production-closure:packaged": "node --check scripts/electron-cdp-harness.mjs && node --check scripts/production-closure-e2e.mjs && node scripts/production-closure-e2e.mjs",
+    "package:win:ci": "npm run build:process-tree-host && node scripts/package-win-unpacked.mjs",
+    "smoke:e2e": "npm run build && npm run build:process-tree-host && node scripts/electron-smoke.mjs",
+    "smoke:dev-launcher-shutdown": "npm run build:electron && npm run build:process-tree-host && node scripts/dev-launcher-shutdown-smoke.mjs",
+    "smoke:e2e:packaged": "npm run package:win && npm run build:process-tree-host && node scripts/electron-smoke.mjs --packaged",
+    "smoke:e2e:packaged-existing": "npm run build:process-tree-host && node scripts/electron-smoke.mjs --packaged",
+    "smoke:e2e:packaged-default-user-data": "npm run build:process-tree-host && node --check scripts/packaged-default-user-data-smoke.mjs && node scripts/packaged-default-user-data-smoke.mjs",
+    "e2e:production-closure:packaged": "npm run build:process-tree-host && node --check scripts/electron-cdp-harness.mjs && node --check scripts/production-closure-e2e.mjs && node --test scripts/electron-cdp-harness-test.mjs && node scripts/production-closure-e2e.mjs",
     "e2e:production-closure:package-and-run": "npm run package:win && npm run e2e:production-closure:packaged",
     "test:line-projection": "node scripts/line-runtime-projection-test.mjs",
     "test:production-route-runtime": "node scripts/production-route-runtime-projection-test.mjs",
@@ -30,7 +31,7 @@
     "test:topology-draft-workspace": "node --test scripts/topology-draft-workspace-test.mjs",
     "test:configuration-draft-workspace": "node --test scripts/configuration-draft-workspace-test.mjs",
     "test:runtime-monitoring-fail-closed": "node --test scripts/runtime-monitoring-fail-closed-test.mjs",
-    "test:api-credential-security": "npm run build:electron && node --test scripts/api-credential-security-test.mjs scripts/backend-api-security-test.mjs scripts/backend-project-session-test.mjs",
+    "test:api-credential-security": "npm run build:electron && node --test scripts/api-credential-security-test.mjs scripts/backend-api-security-test.mjs scripts/backend-project-session-test.mjs scripts/backend-session-lifecycle-test.mjs",
     "test:desktop-close": "npm run build:electron && node --test scripts/application-close-coordinator-test.mjs scripts/desktop-close-request-coordinator-test.mjs",
     "test:extension-import-security": "npm run build:electron && node --test scripts/application-extension-import-security-test.mjs",
     "test:external-program-directory-import": "npm run build:electron && node --test scripts/external-program-directory-import-security-test.mjs scripts/external-program-directory-selection-test.mjs",
@@ -57,6 +58,7 @@
     "electron": "^42.5.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.3",
-    "wait-on": "^8.0.1"
+    "wait-on": "^8.0.1",
+    "ws": "^8.21.1"
   }
 }

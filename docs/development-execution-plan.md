@@ -1,6 +1,6 @@
 # OpenLineOps Production-Line Implementation Baseline
 
-Last updated: 2026-07-28
+Last updated: 2026-07-30
 
 ## Product Contract
 
@@ -120,6 +120,14 @@ actions. After opening, it presents project/application Explorer, hierarchical
 external-program import and protocol trial, configuration, run monitoring, and
 Trace.
 
+The independent Coordinator API never launches an imported Application
+executable under its ambient identity. Its application-executable protocol
+trial policy is `Disabled` by default. The only accepted enabled policy is
+`RestrictedHost`, and startup then requires the exact restricted Windows
+service identity, immutable content protection, and AppContainer isolation.
+Provider protocol trials remain available. Ordinary executable validation is
+performed through the restricted Station execution boundary.
+
 Edit mode changes Application source. Run mode consumes only an immutable
 published snapshot. The shared 2D/3D projection exposes active products,
 Station queues, Slot occupancy, resource states, current Operation, and material
@@ -157,6 +165,7 @@ $env:OPENLINEOPS_RUN_RABBITMQ_INTEGRATION = "1"
 dotnet test tests/OpenLineOps.PostgresIntegration.Tests/OpenLineOps.PostgresIntegration.Tests.csproj --configuration Release --property:TreatWarningsAsErrors=true
 powershell -NoProfile -File eng/verify-no-version-suffix-implementations.ps1
 powershell -NoProfile -File eng/verify-no-legacy-production-contracts.ps1
+powershell -NoProfile -File eng/verify-coordinator-external-program-trial-security.ps1
 powershell -NoProfile -File eng/verify-no-technical-debt-markers.ps1
 powershell -NoProfile -File eng/verify-solution-project-coverage.ps1
 powershell -NoProfile -File eng/verify-ci-workflow-actions.ps1

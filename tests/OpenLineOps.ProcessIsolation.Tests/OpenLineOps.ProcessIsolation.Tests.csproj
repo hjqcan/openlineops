@@ -22,6 +22,10 @@
     <ProjectReference Include="..\..\shared\OpenLineOps.ContentProtection\OpenLineOps.ContentProtection.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.ProcessIsolation\OpenLineOps.ProcessIsolation.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.WindowsSecurity\OpenLineOps.WindowsSecurity.csproj" />
+    <ProjectReference Include="..\OpenLineOps.ProcessIsolation.TestHelper\OpenLineOps.ProcessIsolation.TestHelper.csproj"
+                      ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\tools\OpenLineOps.ProcessTreeHost\OpenLineOps.ProcessTreeHost.csproj"
+                      ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\..\tools\OpenLineOps.VendorTestHelper\OpenLineOps.VendorTestHelper.csproj" />
   </ItemGroup>
 

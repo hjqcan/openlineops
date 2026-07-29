@@ -1,6 +1,8 @@
-using System.Diagnostics;
+using System.ComponentModel;
+using System.Runtime.ExceptionServices;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
+using OpenLineOps.ProcessIsolation;
 
 namespace OpenLineOps.Agent.Infrastructure.Execution;
 
@@ -11,26 +13,45 @@ public sealed record ProcessStationSafetyOptions(
 
 public sealed class ProcessStationSafetyActuator : IStationSafetyActuator
 {
+    private static readonly TimeSpan MaximumCancellationTimeout =
+        TimeSpan.FromMilliseconds(uint.MaxValue - 1L);
+    private static readonly TimeSpan TerminationDrainTimeout =
+        TimeSpan.FromSeconds(5);
+    private static readonly WindowsProcessLimits SafetyProcessLimits = new(
+        ActiveProcessLimit: 16,
+        ProcessMemoryLimitBytes: 512L * 1024 * 1024,
+        JobMemoryLimitBytes: 2L * 1024 * 1024 * 1024,
+        CpuTimeLimit: TimeSpan.FromHours(1));
     private readonly string _executablePath;
     private readonly string _workingDirectory;
     private readonly TimeSpan _timeout;
+    private readonly WindowsProcessLauncher _processLauncher;
 
-    public ProcessStationSafetyActuator(ProcessStationSafetyOptions options)
+    public ProcessStationSafetyActuator(
+        ProcessStationSafetyOptions options,
+        WindowsProcessLauncher? processLauncher = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ExecutablePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.WorkingDirectory);
-        if (options.Timeout <= TimeSpan.Zero)
+        if (options.Timeout <= TimeSpan.Zero
+            || options.Timeout > MaximumCancellationTimeout)
         {
-            throw new ArgumentOutOfRangeException(nameof(options), "Station safety timeout must be positive.");
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                $"Station safety timeout must be positive and no greater than "
+                + $"{MaximumCancellationTimeout}.");
         }
 
         _executablePath = Path.GetFullPath(options.ExecutablePath);
         _workingDirectory = Path.GetFullPath(options.WorkingDirectory);
         _timeout = options.Timeout;
+        _processLauncher = processLauncher ?? new WindowsProcessLauncher();
         if (!File.Exists(_executablePath))
         {
-            throw new FileNotFoundException("Station safety executable does not exist.", _executablePath);
+            throw new FileNotFoundException(
+                "Station safety executable does not exist.",
+                _executablePath);
         }
 
         Directory.CreateDirectory(_workingDirectory);
@@ -70,7 +91,9 @@ public sealed class ProcessStationSafetyActuator : IStationSafetyActuator
         };
         if (request.OperationRunId is not null)
         {
-            arguments.Add(new SafetyArgument("operation-run-id", request.OperationRunId));
+            arguments.Add(new SafetyArgument(
+                "operation-run-id",
+                request.OperationRunId));
         }
 
         return ExecuteAsync("safe-stop", arguments, cancellationToken);
@@ -81,88 +104,225 @@ public sealed class ProcessStationSafetyActuator : IStationSafetyActuator
         IReadOnlyCollection<SafetyArgument> arguments,
         CancellationToken cancellationToken)
     {
-        var startInfo = new ProcessStartInfo
+        cancellationToken.ThrowIfCancellationRequested();
+        WindowsIsolatedProcess process;
+        try
         {
-            FileName = _executablePath,
-            WorkingDirectory = _workingDirectory,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        startInfo.Environment.Clear();
-        CopyEnvironment(startInfo, "SystemRoot");
-        CopyEnvironment(startInfo, "WINDIR");
-        CopyEnvironment(startInfo, "PATH");
-        startInfo.ArgumentList.Add(command);
-        foreach (var argument in arguments)
-        {
-            startInfo.ArgumentList.Add($"--{argument.Name}");
-            startInfo.ArgumentList.Add(argument.Value);
+            process = _processLauncher.Launch(
+                new IsolatedProcessStartRequest(
+                    _executablePath,
+                    CreateArguments(command, arguments),
+                    _workingDirectory,
+                    CreateEnvironment(),
+                    SafetyProcessLimits));
         }
-
-        using var process = new Process
+        catch (Exception exception) when (IsProcessFailure(exception))
         {
-            StartInfo = startInfo,
-            EnableRaisingEvents = true
-        };
-        if (!process.Start())
-        {
-            return new StationSafetyExecutionResult(
-                false,
+            return Failure(
                 "Agent.SafetyStartFailed",
                 $"Station safety command '{command}' did not start.");
         }
 
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_timeout);
+        Task processTreeLifecycle = Task.CompletedTask;
+        Task observationLifecycle = Task.CompletedTask;
+        StationSafetyExecutionResult? result = null;
+        OperationCanceledException? cancellation = null;
         try
         {
-            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+            processTreeLifecycle = Task.WhenAll(
+                process.WaitForExitAsync(CancellationToken.None),
+                process.WaitForProcessTreeExitAsync(CancellationToken.None));
+            observationLifecycle = processTreeLifecycle;
+            process.StandardInput.Dispose();
+            observationLifecycle = Task.WhenAll(
+                observationLifecycle,
+                process.StandardOutput.CopyToAsync(
+                    Stream.Null,
+                    CancellationToken.None));
+            observationLifecycle = Task.WhenAll(
+                observationLifecycle,
+                process.StandardError.CopyToAsync(
+                    Stream.Null,
+                    CancellationToken.None));
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken);
+            deadline.CancelAfter(_timeout);
+            try
+            {
+                await observationLifecycle
+                    .WaitAsync(deadline.Token)
+                    .ConfigureAwait(false);
+                result = process.ExitCode == 0
+                    ? new StationSafetyExecutionResult(true, null, null)
+                    : Failure(
+                        "Agent.SafetyFailed",
+                        $"Station safety command '{command}' exited with code "
+                        + $"{process.ExitCode}.");
+            }
+            catch (OperationCanceledException exception)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                cancellation = exception;
+                if (!await TryTerminateAndDrainAsync(process)
+                    .ConfigureAwait(false))
+                {
+                    result = TerminationFailure(command);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                result = await TryTerminateAndDrainAsync(process)
+                    .ConfigureAwait(false)
+                    ? Failure(
+                        "Agent.SafetyTimedOut",
+                        $"Station safety command '{command}' exceeded {_timeout}.")
+                    : TerminationFailure(command);
+            }
+            catch (Exception exception) when (IsProcessFailure(exception))
+            {
+                result = await TryTerminateAndDrainAsync(process)
+                    .ConfigureAwait(false)
+                    ? Failure(
+                        "Agent.SafetyExecutionFailed",
+                        $"Station safety command '{command}' could not be observed safely.")
+                    : TerminationFailure(command);
+            }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        finally
         {
-            Kill(process);
-            throw;
-        }
-        catch (OperationCanceledException)
-        {
-            Kill(process);
-            return new StationSafetyExecutionResult(
-                false,
-                "Agent.SafetyTimedOut",
-                $"Station safety command '{command}' exceeded {_timeout}.");
+            try
+            {
+                process.Dispose();
+            }
+            catch (Exception exception) when (IsProcessFailure(exception))
+            {
+                result = TerminationFailure(command);
+            }
+
+            await ObserveAfterDisposalAsync(
+                    observationLifecycle,
+                    processTreeLifecycle)
+                .ConfigureAwait(false);
         }
 
-        return process.ExitCode == 0
-            ? new StationSafetyExecutionResult(true, null, null)
-            : new StationSafetyExecutionResult(
-                false,
-                "Agent.SafetyFailed",
-                $"Station safety command '{command}' exited with code {process.ExitCode}.");
+        if (cancellation is not null
+            && !string.Equals(
+                result?.FailureCode,
+                "Agent.SafetyTerminationFailed",
+                StringComparison.Ordinal))
+        {
+            ExceptionDispatchInfo.Capture(cancellation).Throw();
+        }
+
+        return result ?? TerminationFailure(command);
     }
 
-    private static void CopyEnvironment(ProcessStartInfo startInfo, string name)
+    private static List<string> CreateArguments(
+        string command,
+        IEnumerable<SafetyArgument> arguments)
+    {
+        var result = new List<string> { command };
+        foreach (var argument in arguments)
+        {
+            result.Add($"--{argument.Name}");
+            result.Add(argument.Value);
+        }
+
+        return result;
+    }
+
+    private static Dictionary<string, string> CreateEnvironment()
+    {
+        var environment = new Dictionary<string, string>(
+            StringComparer.OrdinalIgnoreCase);
+        CopyEnvironment(environment, "SystemRoot");
+        CopyEnvironment(environment, "WINDIR");
+        CopyEnvironment(environment, "PATH");
+        return environment;
+    }
+
+    private static void CopyEnvironment(
+        Dictionary<string, string> environment,
+        string name)
     {
         var value = Environment.GetEnvironmentVariable(name);
         if (!string.IsNullOrWhiteSpace(value))
         {
-            startInfo.Environment[name] = value;
+            environment[name] = value;
         }
     }
 
-    private static void Kill(Process process)
+    private static async Task<bool> TryTerminateAndDrainAsync(
+        WindowsIsolatedProcess process)
     {
         try
         {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit();
-            }
+            process.TerminateProcessTree();
+            using var deadline = new CancellationTokenSource(
+                TerminationDrainTimeout);
+            await Task.WhenAll(
+                    process.WaitForExitAsync(CancellationToken.None),
+                    process.WaitForProcessTreeExitAsync(CancellationToken.None))
+                .WaitAsync(deadline.Token)
+                .ConfigureAwait(false);
+            return process.ActiveProcessCount == 0;
         }
-        catch (InvalidOperationException)
+        catch (Exception exception) when (
+            exception is OperationCanceledException
+            || IsProcessFailure(exception))
+        {
+            return false;
+        }
+    }
+
+    private static async Task ObserveAfterDisposalAsync(
+        Task observationLifecycle,
+        Task processTreeLifecycle)
+    {
+        var completion = Task.WhenAll(
+            observationLifecycle,
+            processTreeLifecycle);
+        try
+        {
+            await completion
+                .WaitAsync(TimeSpan.FromSeconds(1))
+                .ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            _ = completion.ContinueWith(
+                static completed => _ = completed.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted
+                | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+        catch (Exception exception) when (IsProcessFailure(exception))
         {
         }
     }
+
+    private static bool IsProcessFailure(Exception exception) =>
+        exception is Win32Exception
+            or IOException
+            or AggregateException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or InvalidOperationException
+            or ObjectDisposedException
+            or PlatformNotSupportedException;
+
+    private static StationSafetyExecutionResult TerminationFailure(
+        string command) =>
+        Failure(
+            "Agent.SafetyTerminationFailed",
+            $"Station safety command '{command}' process tree could not be "
+            + "terminated within the safety deadline.");
+
+    private static StationSafetyExecutionResult Failure(
+        string code,
+        string reason) =>
+        new(false, code, reason);
 
     private sealed record SafetyArgument(string Name, string Value);
 }

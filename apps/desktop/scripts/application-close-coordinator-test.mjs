@@ -47,6 +47,26 @@ test('busy editor settles to clean and approves the same close request', () => {
   assert.equal(approved.requestId, 2);
 });
 
+test('busy editor can outlive the main acknowledgement watchdog without replacing its request', () => {
+  const waiting = beginApplicationCloseRequest(idleApplicationCloseState, 20, 100);
+  const stillBusy = evaluateApplicationClose(
+    waiting,
+    { busy: true, dirty: false },
+    10_101,
+    30_000);
+
+  assert.equal(stillBusy.action, 'WaitForEditors');
+  assert.equal(stillBusy.requestId, 20);
+  assert.equal(stillBusy.remainingMilliseconds, 19_999);
+  const approved = evaluateApplicationClose(
+    stillBusy.state,
+    { busy: false, dirty: false },
+    10_102,
+    30_000);
+  assert.equal(approved.action, 'Approve');
+  assert.equal(approved.requestId, 20);
+});
+
 test('busy editor becoming dirty prompts once and duplicate evaluations do nothing', () => {
   const waiting = beginApplicationCloseRequest(idleApplicationCloseState, 3, 100);
   const prompt = evaluateApplicationClose(waiting, { busy: false, dirty: true }, 120);
@@ -70,6 +90,29 @@ test('draft handling always returns to a complete busy and dirty recheck', () =>
   assert.equal(secondPrompt.requestId, 4);
 });
 
+test('successful save or discard must make the registry clean before close is approved', () => {
+  const waiting = beginApplicationCloseRequest(idleApplicationCloseState, 21, 100);
+  const prompt = evaluateApplicationClose(waiting, { busy: false, dirty: true }, 100);
+  const resumed = resumeApplicationCloseAfterDraftHandling(prompt.state, 21, 200);
+
+  const stillDirty = evaluateApplicationClose(
+    resumed,
+    { busy: false, dirty: true },
+    200);
+  assert.equal(stillDirty.action, 'PromptForUnsavedChanges');
+
+  const cleanAfterDraftHandling = resumeApplicationCloseAfterDraftHandling(
+    stillDirty.state,
+    21,
+    300);
+  const approved = evaluateApplicationClose(
+    cleanAfterDraftHandling,
+    { busy: false, dirty: false },
+    300);
+  assert.equal(approved.action, 'Approve');
+  assert.equal(approved.requestId, 21);
+});
+
 test('cancel denies only the exact close request', () => {
   const waiting = beginApplicationCloseRequest(idleApplicationCloseState, 5, 100);
   const prompt = evaluateApplicationClose(waiting, { busy: false, dirty: true }, 100);
@@ -78,6 +121,10 @@ test('cancel denies only the exact close request', () => {
   const canceled = cancelApplicationClose(prompt.state, 5);
   assert.equal(canceled.action, 'DenyCanceled');
   assert.deepEqual(canceled.state, idleApplicationCloseState);
+
+  const retry = beginApplicationCloseRequest(canceled.state, 6, 200);
+  assert.equal(retry.phase, 'WaitingForEditors');
+  assert.equal(retry.requestId, 6);
 });
 
 test('expired request and late callbacks cannot mutate a newer close request', () => {

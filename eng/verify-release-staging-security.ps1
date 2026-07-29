@@ -158,7 +158,7 @@ if ($stageText -cmatch 'CodeSigningCertificate(?:Path|Password)' `
     throw "Release staging or final publication still contains a removed file/password signing chain."
 }
 $stationAgentUndeployedContract =
-    '-ExpectedOutputPattern "^OpenLineOps Station Agent terminated: OpenLineOps:WindowsServiceName must contain 1-80 ASCII letters, digits, periods, underscores, or hyphens\.$"'
+    '-ExpectedOutputPattern "^OpenLineOps Station Agent terminated: [A-Za-z.]+: OpenLineOps:WindowsServiceName must contain 1-80 ASCII letters, digits, periods, underscores, or hyphens\.$"'
 if ($stagedAgentBundleText -cnotmatch [regex]::Escape(
         'Agent release template must expose an explicit empty WindowsServiceName') `
     -or $stagedAgentBundleText -cnotmatch [regex]::Escape(

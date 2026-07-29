@@ -40,8 +40,14 @@ public static class DevicesModuleServiceCollectionExtensions
         services.AddSingleton(pythonScriptRuntimeOptions);
         var externalProgramHostOptions = LoadExternalProgramHostOptions(configuration);
         services.AddSingleton(externalProgramHostOptions);
-        services.TryAddSingleton<IExternalProgramHost, ExternalProgramHost>();
-        services.TryAddSingleton<IExternalProgramTrialExecutor, ExternalProgramResourceTrialExecutor>();
+        var externalProgramProtocolTrialOptions =
+            LoadExternalProgramProtocolTrialOptions(configuration);
+        externalProgramProtocolTrialOptions.Validate(externalProgramHostOptions);
+        services.AddSingleton(externalProgramProtocolTrialOptions);
+        services.Replace(ServiceDescriptor.Singleton<IExternalProgramHost, ExternalProgramHost>());
+        services.Replace(ServiceDescriptor.Singleton<
+            IExternalProgramTrialExecutor,
+            ExternalProgramResourceTrialExecutor>());
 
         services.TryAddSingleton<ProjectReleaseSimulatorDeviceCommandExecutor>();
         services.TryAddSingleton<PluginDeviceCommandExecutor>();
@@ -209,6 +215,20 @@ public static class DevicesModuleServiceCollectionExtensions
         }
 
         options.Validate();
+        return options;
+    }
+
+    private static ExternalProgramProtocolTrialOptions LoadExternalProgramProtocolTrialOptions(
+        IConfiguration? configuration)
+    {
+        var section = configuration?.GetSection(ExternalProgramProtocolTrialOptions.SectionName);
+        var options = new ExternalProgramProtocolTrialOptions
+        {
+            ApplicationExecutablePolicy = section?["ApplicationExecutablePolicy"]
+                ?? ApplicationExecutableProtocolTrialPolicies.Disabled
+        };
+        ApplicationExecutableProtocolTrialPolicies.RequireCurrent(
+            options.ApplicationExecutablePolicy);
         return options;
     }
 

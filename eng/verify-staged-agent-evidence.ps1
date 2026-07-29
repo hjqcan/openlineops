@@ -367,7 +367,7 @@ $expectedEntryPoints = [ordered]@{
     "station-agent-service" = [pscustomobject][ordered]@{
         executable = "OpenLineOps.Agent.exe"
         requiredExitCode = $null
-        outputContract = '^OpenLineOps Station Agent terminated: OpenLineOps:WindowsServiceName must contain 1-80 ASCII letters, digits, periods, underscores, or hyphens\.$'
+        outputContract = '^OpenLineOps Station Agent terminated: [A-Za-z.]+: OpenLineOps:WindowsServiceName must contain 1-80 ASCII letters, digits, periods, underscores, or hyphens\.$'
     }
     "station-runtime" = [pscustomobject][ordered]@{
         executable = "OpenLineOps.StationRuntime.exe"

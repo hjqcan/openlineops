@@ -1,8 +1,12 @@
 import { createRequire } from 'node:module';
-import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stopProcess } from './electron-cdp-harness.mjs';
+import {
+  resolveDotnetExecutablePath,
+  spawnOwnedProcessTree
+} from './owned-process-tree.mjs';
 import { writePackageContentManifest } from './write-package-content-manifest.mjs';
 
 const require = createRequire(import.meta.url);
@@ -40,6 +44,15 @@ const pluginHostProject = path.join(
   'src',
   'OpenLineOps.PluginHost',
   'OpenLineOps.PluginHost.csproj');
+const processTreeHostPath = path.join(
+  repoRoot,
+  'tools',
+  'OpenLineOps.ProcessTreeHost',
+  'bin',
+  'Release',
+  'net10.0',
+  'OpenLineOps.ProcessTreeHost.exe');
+const dotnetExecutable = await resolveDotnetExecutablePath(process.env);
 
 async function assertDirectory(directory, label) {
   const stat = await fs.stat(directory).catch(() => null);
@@ -71,32 +84,70 @@ async function renameElectronExecutable() {
 }
 
 async function run(command, args, cwd) {
+  const timeoutMilliseconds = 900_000;
+  const deadline = Date.now() + timeoutMilliseconds;
+  const child = await spawnOwnedProcessTree({
+    processTreeHostPath,
+    command,
+    args,
+    workingDirectory: cwd,
+    environment: process.env,
+    stdio: 'inherit',
+    startupTimeoutMilliseconds: timeoutMilliseconds
+  });
   await new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd,
-      stdio: 'inherit',
-      windowsHide: true
-    });
-    child.once('error', reject);
-    child.once('exit', code => {
-      if (code === 0) {
+    let settled = false;
+    const complete = action => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      action();
+    };
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      void stopProcess(child, 15_000).then(
+        () => reject(new Error(
+          `${command} did not exit within ${timeoutMilliseconds} ms.`)),
+        terminationError => reject(new AggregateError(
+          [
+            new Error(
+              `${command} did not exit within ${timeoutMilliseconds} ms.`),
+            terminationError
+          ],
+          `${command} timed out and its process tree could not be confirmed stopped.`)));
+    }, remainingCommandMilliseconds(deadline, command));
+    child.once('error', error => complete(() => reject(error)));
+    void child.openlineopsClosePromise.then(({ exitCode, signalCode }) => complete(() => {
+      if (exitCode === 0 && signalCode === null) {
         resolve();
         return;
       }
 
-      reject(new Error(`${command} exited with code ${code ?? 'unknown'}.`));
-    });
+      reject(new Error(
+        `${command} closed with code ${exitCode ?? 'unknown'} and signal ${
+          signalCode ?? 'none'}.`));
+    }));
   });
+}
+
+function remainingCommandMilliseconds(deadline, description) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw new Error(`${description} exceeded its hard command deadline during startup.`);
+  }
+  return remaining;
 }
 
 async function publishBundledRuntime() {
   await run(
-    'dotnet',
+    dotnetExecutable,
     [
       'publish',
       apiProject,
       '--configuration',
       'Release',
+      '--disable-build-servers',
       '--runtime',
       'win-x64',
       '--self-contained',
@@ -111,12 +162,13 @@ async function publishBundledRuntime() {
   await assertDirectory(bundledApiRoot, 'Bundled API');
 
   await run(
-    'dotnet',
+    dotnetExecutable,
     [
       'publish',
       scriptWorkerProject,
       '--configuration',
       'Release',
+      '--disable-build-servers',
       '--runtime',
       'win-x64',
       '--self-contained',
@@ -131,12 +183,13 @@ async function publishBundledRuntime() {
   await assertDirectory(bundledScriptWorkerRoot, 'Bundled Python script worker');
 
   await run(
-    'dotnet',
+    dotnetExecutable,
     [
       'publish',
       pluginHostProject,
       '--configuration',
       'Release',
+      '--disable-build-servers',
       '--runtime',
       'win-x64',
       '--self-contained',

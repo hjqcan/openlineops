@@ -85,7 +85,9 @@
     <Project Path="src/OpenLineOps.StationRuntime/OpenLineOps.StationRuntime.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/OpenLineOps.Agent.SafetyActuator.TestHelper/OpenLineOps.Agent.SafetyActuator.TestHelper.csproj" />
     <Project Path="tests/OpenLineOps.Agent.Tests/OpenLineOps.Agent.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Api.TestHelper/OpenLineOps.Api.TestHelper.csproj" />
     <Project Path="tests/OpenLineOps.Api.Tests/OpenLineOps.Api.Tests.csproj" />
     <Project Path="tests/OpenLineOps.BoundedContext.Scaffolder.Tests/OpenLineOps.BoundedContext.Scaffolder.Tests.csproj" />
     <Project Path="tests/OpenLineOps.ContentProtection.Tests/OpenLineOps.ContentProtection.Tests.csproj" />
@@ -98,6 +100,7 @@
     <Project Path="tests/OpenLineOps.Plugins.Tests/OpenLineOps.Plugins.Tests.csproj" />
     <Project Path="tests/OpenLineOps.PostgresIntegration.Tests/OpenLineOps.PostgresIntegration.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Processes.Tests/OpenLineOps.Processes.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.ProcessIsolation.TestHelper/OpenLineOps.ProcessIsolation.TestHelper.csproj" />
     <Project Path="tests/OpenLineOps.ProcessIsolation.Tests/OpenLineOps.ProcessIsolation.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Production.Tests/OpenLineOps.Production.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Projects.Tests/OpenLineOps.Projects.Tests.csproj" />
@@ -113,6 +116,7 @@
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/OpenLineOps.BoundedContext.Scaffolder/OpenLineOps.BoundedContext.Scaffolder.csproj" />
+    <Project Path="tools/OpenLineOps.ProcessTreeHost/OpenLineOps.ProcessTreeHost.csproj" />
     <Project Path="tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj" />
     <Project Path="tools/OpenLineOps.VendorTestHelper/OpenLineOps.VendorTestHelper.csproj" />
   </Folder>

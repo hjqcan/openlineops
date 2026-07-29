@@ -98,7 +98,7 @@ internal sealed class WindowsProcessJob : IDisposable
         {
             throw new Win32Exception(
                 Marshal.GetLastWin32Error(),
-                "Could not create the external program Job Object.");
+                "Could not create the Windows process Job Object.");
         }
 
         return new WindowsProcessJob(handle);
@@ -121,7 +121,7 @@ internal sealed class WindowsProcessJob : IDisposable
                 {
                     throw new Win32Exception(
                         Marshal.GetLastWin32Error(),
-                        "Could not query the external-program Job Object.");
+                        "Could not query the Windows process Job Object.");
                 }
 
                 return Marshal.PtrToStructure<JobObjectBasicAccountingInformationData>(buffer)
@@ -167,7 +167,7 @@ internal sealed class WindowsProcessJob : IDisposable
         if (processHandle.IsInvalid || processHandle.IsClosed)
         {
             throw new ArgumentException(
-                "External program process handle must be open.",
+                "The process handle assigned to a Windows Job Object must be open.",
                 nameof(processHandle));
         }
 
@@ -175,7 +175,7 @@ internal sealed class WindowsProcessJob : IDisposable
         {
             throw new Win32Exception(
                 Marshal.GetLastWin32Error(),
-                "Could not assign the suspended external program to its Job Object. "
+                "Could not assign the process to its Windows Job Object. "
                 + "The host may already belong to a Job Object that prohibits nested jobs.");
         }
     }
@@ -186,7 +186,7 @@ internal sealed class WindowsProcessJob : IDisposable
         {
             throw new Win32Exception(
                 Marshal.GetLastWin32Error(),
-                "Could not terminate the external-program Job Object.");
+                "Could not terminate the Windows process Job Object.");
         }
     }
 
@@ -244,7 +244,7 @@ internal sealed class WindowsProcessJob : IDisposable
             {
                 throw new Win32Exception(
                     Marshal.GetLastWin32Error(),
-                    "Could not configure the external program Job Object.");
+                    "Could not configure the Windows process Job Object.");
             }
         }
         finally

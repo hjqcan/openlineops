@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -27,7 +28,7 @@ public sealed class ExternalProgramDefinitionTrialApiTests
     }
 
     [Fact]
-    public async Task DirectoryImportPersistsCanonicalNestedInventoryThroughHttpBoundary()
+    public async Task DirectoryImportPersistsInventoryAndExecutableTrialFailsClosed()
     {
         using var client = _factory.CreateAuthenticatedClient();
         var workspace = await CreateWorkspaceAsync(client);
@@ -122,6 +123,25 @@ public sealed class ExternalProgramDefinitionTrialApiTests
             Assert.Equal(
                 ["files/bin/vendor-helper.exe", "files/lib/shared.settings.json"],
                 body.Files.Select(file => file.RelativePath).ToArray());
+
+            using var trialResponse = await client.PostAsJsonAsync(
+                $"/api/automation-projects/{workspace.ProjectId}"
+                    + $"/applications/{workspace.ApplicationId}"
+                    + "/external-programs/program.vendor-helper/trial",
+                new
+                {
+                    inputs = new Dictionary<string, object>
+                    {
+                        ["serial"] = new { kind = "Text", canonicalValue = "board-001" },
+                        ["model"] = new { kind = "Text", canonicalValue = "sample-board" }
+                    }
+                });
+            Assert.Equal(HttpStatusCode.Conflict, trialResponse.StatusCode);
+            var problem = await trialResponse.Content.ReadFromJsonAsync<ProblemDetails>();
+            Assert.NotNull(problem);
+            Assert.Equal(
+                "Conflict.Projects.ApplicationExecutableProtocolTrialDisabled",
+                problem.Title);
         }
         finally
         {

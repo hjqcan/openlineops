@@ -446,6 +446,8 @@ Test-FileContains ".github/workflows/build.yml" "Verify third-party license meta
 Test-FileContains ".github/workflows/build.yml" "verify-dotnet-package-vulnerabilities\.ps1" "CI must run the fail-closed NuGet vulnerability audit."
 Test-FileContains ".github/workflows/build.yml" "verify-dotnet-package-vulnerabilities\.tests\.ps1" "CI must prove vulnerable NuGet JSON fails the build."
 Test-FileContains ".github/workflows/build.yml" "verify-release-staging-security\.ps1" "CI must regression-test release staging security boundaries."
+Test-FileContains ".github/workflows/build.yml" "verify-coordinator-external-program-trial-security\.ps1" "CI must enforce the Coordinator executable protocol-trial boundary."
+Test-FileContains "src/OpenLineOps.Api/appsettings.json" '"ApplicationExecutablePolicy"\s*:\s*"Disabled"' "Coordinator release defaults must disable application-executable protocol trials."
 Test-FileContains ".github/workflows/build.yml" "verify-station-agent-content-cache-contract\.ps1" "CI must enforce explicit administrator-only Station content-cache provisioning."
 Test-FileContains ".github/workflows/build.yml" "verify-evidence-validation\.tests\.ps1" "CI must regression-test fail-closed publication evidence validation."
 Test-FileContains ".github/workflows/build.yml" "verify-production-closure-evidence\.ps1" "CI must independently scan sanitized production closure evidence before upload."

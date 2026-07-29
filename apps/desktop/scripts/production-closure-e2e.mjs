@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -8,12 +8,19 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import {
   delay,
-  ElectronCdpHarness
+  ElectronCdpHarness,
+  stopProcess
 } from './electron-cdp-harness.mjs';
 import {
-  createWindowsPowerShellHost,
-  windowsSystemExecutablePath
+  createWindowsPowerShellHost
 } from './windows-powershell-host.mjs';
+import {
+  terminateWindowsProcessIdentity
+} from './windows-process-identity.mjs';
+import {
+  resolveDotnetExecutablePath,
+  spawnOwnedProcessTree
+} from './owned-process-tree.mjs';
 
 const execFileAsync = promisify(execFile);
 const scriptPath = fileURLToPath(import.meta.url);
@@ -35,6 +42,15 @@ const packagedRuntimeApiExecutable = path.join(
   'runtime',
   'api',
   'OpenLineOps.Api.exe');
+const processTreeHostExecutable = path.join(
+  repoRoot,
+  'tools',
+  'OpenLineOps.ProcessTreeHost',
+  'bin',
+  'Release',
+  'net10.0',
+  'OpenLineOps.ProcessTreeHost.exe');
+const dotnetExecutable = await resolveDotnetExecutablePath(process.env);
 const helperOutputDirectory = path.join(
   repoRoot,
   'tools',
@@ -105,7 +121,7 @@ const summary = {
   failure: null
 };
 
-let harness;
+let harness = null;
 let userDataDirectory;
 let projectPath;
 let sourceProjectPath;
@@ -116,9 +132,6 @@ let evidenceManifestWritten = false;
 let preservePrivateExecutionRoot = false;
 
 async function main() {
-  if (typeof WebSocket === 'undefined') {
-    throw new Error('Node.js 22 or newer is required for the Electron CDP harness.');
-  }
   await resetProductionClosureEvidence();
   await assertFile(packagedExecutable, 'Packaged OpenLineOps executable');
   await assertFile(packagedRuntimeApiExecutable, 'Packaged OpenLineOps runtime API executable');
@@ -129,6 +142,9 @@ async function main() {
   summary.packagedBinaries.before = await capturePackagedBinaryIdentity();
   await persistSummary();
   await buildVendorHelper();
+  await assertFile(
+    processTreeHostExecutable,
+    'OpenLineOps Process Tree Host executable');
 
   userDataDirectory = path.join(privateExecutionRoot, 'user-data');
   projectPath = path.join(privateExecutionRoot, 'project');
@@ -178,6 +194,7 @@ async function main() {
     summary.packagedBinaries.before,
     summary.packagedBinaries.after);
   summary.packagedBinaries.unchangedDuringRun = true;
+  await harness.close();
   summary.status = 'passed';
   summary.completedAtUtc = new Date().toISOString();
   await persistSummary();
@@ -286,6 +303,7 @@ async function assertNoReparsePointsForRecursiveDelete(root, label) {
 function createHarness() {
   return new ElectronCdpHarness({
     executablePath: packagedExecutable,
+    processTreeHostPath: processTreeHostExecutable,
     workingDirectory: path.dirname(packagedExecutable),
     userDataDirectory,
     environment: {
@@ -301,13 +319,17 @@ function createHarness() {
 }
 
 async function buildVendorHelper() {
+  await assertFile(
+    processTreeHostExecutable,
+    'Process Tree Host test boundary');
   await runCommand(
-    'dotnet',
+    dotnetExecutable,
     [
       'build',
       path.join(repoRoot, 'tools', 'OpenLineOps.VendorTestHelper', 'OpenLineOps.VendorTestHelper.csproj'),
       '--configuration',
       'Release',
+      '--disable-build-servers',
       '--nologo',
       '--property:TreatWarningsAsErrors=true'
     ],
@@ -520,16 +542,16 @@ async function authorProductionFixture(targetPath) {
         }
       }
     },
-    200,
-    'run the imported external program protocol trial')).body;
-  assert(protocolTrial.executionStatus === 'Completed', 'Protocol trial did not complete.');
-  assert(protocolTrial.judgement === 'Passed', 'Protocol trial did not return Passed.');
-  assert(protocolTrial.artifacts.length > 0, 'Protocol trial produced no hashed artifacts.');
+    409,
+    'reject Coordinator execution of the imported executable protocol trial')).body;
+  assert(
+    protocolTrial.title
+      === 'Conflict.Projects.ApplicationExecutableProtocolTrialDisabled',
+    'Coordinator executable protocol trial did not fail closed.');
   summary.externalProgramTrial = {
     status: 'passed',
-    executionStatus: protocolTrial.executionStatus,
-    judgement: protocolTrial.judgement,
-    artifactCount: protocolTrial.artifacts.length,
+    coordinatorPolicy: protocolTrial.title,
+    executionBoundary: 'StationAgent',
     directoryImport: {
       entryPoint: vendorProgramEntryPoint,
       files: vendorProgramInventoryPaths,
@@ -1797,11 +1819,16 @@ async function runRecoveryScenario() {
     'recovery vendor parent and child');
   const backend = await harness.evaluate('window.openlineopsDesktop.getBackendStatus()');
   const backendConfig = await harness.evaluate('window.openlineopsDesktop.getConfig()');
-  assert(Number.isInteger(backend.pid) && backend.pid > 0, 'Packaged backend PID is unavailable.');
-  await execFileAsync(
-    windowsSystemExecutablePath('taskkill.exe'),
-    ['/PID', String(backend.pid), '/F'],
-    { windowsHide: true });
+  assert(
+    Number.isInteger(backend.pid)
+      && backend.pid > 0
+      && Number.isSafeInteger(backend.startedAtUnixMilliseconds)
+      && backend.startedAtUnixMilliseconds > 0,
+    'Packaged backend exact process identity is unavailable.');
+  await terminateWindowsProcessIdentity({
+    processId: backend.pid,
+    startedAtUnixMilliseconds: backend.startedAtUnixMilliseconds
+  });
   await harness.waitFor(
     '(async () => {'
       + ' const status = await window.openlineopsDesktop.getBackendStatus();'
@@ -2242,7 +2269,8 @@ async function downloadAndVerifyArtifacts(artifacts) {
       {
         method: 'GET',
         headers: { authorization: `Bearer ${config.apiAccessToken}` },
-        redirect: 'error'
+        redirect: 'error',
+        signal: AbortSignal.timeout(30_000)
       });
     assert(response.status === 200,
       `Trace artifact ${artifact.name} download returned HTTP ${response.status}.`);
@@ -2350,7 +2378,9 @@ async function listVendorProcesses() {
     {
       env: powerShellHost.environment,
       windowsHide: true,
-      maxBuffer: 1024 * 1024
+      maxBuffer: 1024 * 1024,
+      timeout: 5_000,
+      killSignal: 'SIGKILL'
     });
   const parsed = JSON.parse(stdout.trim() || '[]');
   const projectNeedle = projectPath.toLowerCase();
@@ -3137,14 +3167,65 @@ async function listFiles(root, extension) {
   return result.sort();
 }
 
-async function runCommand(command, args, cwd) {
-  await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, windowsHide: true, stdio: 'inherit' });
-    child.once('error', reject);
-    child.once('exit', code => code === 0
-      ? resolve()
-      : reject(new Error(`${command} exited with code ${code ?? 'unknown'}.`)));
+async function runCommand(
+  command,
+  args,
+  cwd,
+  timeoutMilliseconds = 300_000
+) {
+  if (!Number.isSafeInteger(timeoutMilliseconds)
+      || timeoutMilliseconds <= 0) {
+    throw new Error('Command timeout must be a positive safe integer.');
+  }
+  const deadline = Date.now() + timeoutMilliseconds;
+  const child = await spawnOwnedProcessTree({
+    processTreeHostPath: processTreeHostExecutable,
+    command,
+    args,
+    workingDirectory: cwd,
+    environment: process.env,
+    stdio: 'inherit',
+    startupTimeoutMilliseconds: timeoutMilliseconds
   });
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    const complete = action => {
+      if (settled) return false;
+      settled = true;
+      clearTimeout(timeout);
+      action();
+      return true;
+    };
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      void stopProcess(child, 15_000).then(
+        () => reject(new Error(
+          `${command} did not exit within ${timeoutMilliseconds} ms.`)),
+        terminationError => reject(new AggregateError(
+          [
+            new Error(
+              `${command} did not exit within ${timeoutMilliseconds} ms.`),
+            terminationError
+          ],
+          `${command} timed out and its process tree could not be confirmed stopped.`)));
+    }, remainingCommandMilliseconds(deadline, command));
+    child.once('error', error => complete(() => reject(error)));
+    void child.openlineopsClosePromise.then(({ exitCode, signalCode }) => complete(
+      () => exitCode === 0 && signalCode === null
+      ? resolve()
+      : reject(new Error(
+        `${command} closed with code ${exitCode ?? 'unknown'} and signal ${
+          signalCode ?? 'none'}.`))));
+  });
+}
+
+function remainingCommandMilliseconds(deadline, description) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw new Error(`${description} exceeded its hard command deadline during startup.`);
+  }
+  return remaining;
 }
 
 async function persistSummary() {
@@ -3215,7 +3296,16 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    await harness?.close().catch(() => undefined);
+    const cleanupFailures = [];
+    let applicationProcessesStopped = harness === null;
+    if (harness) {
+      try {
+        await harness.close();
+        applicationProcessesStopped = true;
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+    }
     try {
       if (!evidenceManifestWritten) {
         await writeEvidenceManifest();
@@ -3227,15 +3317,18 @@ main()
     }
     if (summary.status === 'passed'
         && evidenceManifestWritten
+        && cleanupFailures.length === 0
         && (process.exitCode === undefined || process.exitCode === 0)) {
+      if (privateHandoffPath !== null) {
+        preservePrivateExecutionRoot = true;
+      }
       try {
         await writePrivateHandoff();
       } catch (error) {
-        console.error(`Private production closure handoff failed: ${error instanceof Error ? error.stack : String(error)}`);
-        process.exitCode = 1;
+        cleanupFailures.push(error);
       }
     }
-    if (!preservePrivateExecutionRoot) {
+    if (!preservePrivateExecutionRoot && applicationProcessesStopped) {
       try {
         await assertNoReparsePointsForRecursiveDelete(
           privateExecutionRoot,
@@ -3247,9 +3340,18 @@ main()
           retryDelay: 250
         });
       } catch (error) {
-        console.error(`Private production closure cleanup failed outside the publishable root: ${String(error)}`);
-        process.exitCode = 1;
+        cleanupFailures.push(error);
       }
+    } else if (!preservePrivateExecutionRoot) {
+      cleanupFailures.push(new Error(
+        `Private production closure execution root was preserved because application process shutdown was not confirmed: ${privateExecutionRoot}`));
+    }
+    if (cleanupFailures.length > 0) {
+      const cleanupError = new AggregateError(
+        cleanupFailures,
+        'Production closure cleanup did not complete.');
+      console.error(cleanupError);
+      process.exitCode = 1;
     }
   });
 

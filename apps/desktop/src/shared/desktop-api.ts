@@ -13,6 +13,7 @@ export interface BackendStatus {
   health: 'Healthy' | 'Unreachable';
   apiBaseUrl: string | null;
   startedAtUtc: string | null;
+  startedAtUnixMilliseconds: number | null;
   lastExitCode: number | null;
   recentLogs: string[];
 }
@@ -95,6 +96,12 @@ export interface ApplicationExtensionImportResult<T = unknown> {
   response: ApiResponse<T> | null;
 }
 
+export interface DesktopCloseCoordinatorBinding {
+  readonly windowId: number;
+  readonly webContentsId: number;
+  readonly rendererGeneration: number;
+}
+
 export interface OpenLineOpsDesktopApi {
   getConfig(): Promise<DesktopConfig>;
   getBackendStatus(): Promise<BackendStatus>;
@@ -104,6 +111,11 @@ export interface OpenLineOpsDesktopApi {
   onBackendStatusChanged(listener: (change: BackendStatusChanged) => void): () => void;
   onCloseRequested(listener: (requestId: number) => void): () => void;
   onCloseRequestExpired(listener: (requestId: number) => void): () => void;
+  getCloseCoordinatorBinding(): Promise<DesktopCloseCoordinatorBinding>;
+  setCloseCoordinatorReady(
+    binding: DesktopCloseCoordinatorBinding,
+    ready: boolean
+  ): void;
   acknowledgeCloseRequest(requestId: number): void;
   respondToCloseRequest(requestId: number, allowClose: boolean): void;
   selectDirectory(options?: SelectDirectoryOptions): Promise<SelectDirectoryResult>;

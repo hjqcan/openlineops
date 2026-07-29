@@ -35,30 +35,36 @@ internal sealed class StationAgentPresenceWorker(
             "Station Agent presence {PresenceState} sequence {Sequence} was not confirmed; the presence policy will retry when allowed.");
     private readonly Guid _sessionId = Guid.NewGuid();
     private readonly SemaphoreSlim _publishGate = new(1, 1);
+    private readonly object _lifecycleSync = new();
+    private Task? _stopTask;
+    private AgentPresenceReported? _stoppingMessage;
+    private bool _disposeRequested;
     private long _lastIssuedSequence;
     private int _startedConfirmed;
     private int _stopping;
     private int _executeStarted;
+    private int _publishGateDisposed;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         Volatile.Write(ref _executeStarted, 1);
-        var started = CreateMessage(AgentPresenceState.Started, sequence: 1);
-        while (Volatile.Read(ref _stopping) == 0
-               && !await TryPublishStartedAsync(started, stoppingToken)
-                   .ConfigureAwait(false))
-        {
-            await Task.Delay(options.HeartbeatInterval, stoppingToken).ConfigureAwait(false);
-        }
-
-        if (Volatile.Read(ref _stopping) != 0)
-        {
-            return;
-        }
-
-        using var timer = new PeriodicTimer(options.HeartbeatInterval);
         try
         {
+            var started = CreateMessage(AgentPresenceState.Started, sequence: 1);
+            while (Volatile.Read(ref _stopping) == 0
+                   && !await TryPublishStartedAsync(started, stoppingToken)
+                       .ConfigureAwait(false))
+            {
+                await Task.Delay(options.HeartbeatInterval, stoppingToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (Volatile.Read(ref _stopping) != 0)
+            {
+                return;
+            }
+
+            using var timer = new PeriodicTimer(options.HeartbeatInterval);
             while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
             {
                 if (Volatile.Read(ref _stopping) == 0)
@@ -75,37 +81,109 @@ internal sealed class StationAgentPresenceWorker(
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        var publishStopping = Volatile.Read(ref _executeStarted) == 1
-                              && Interlocked.Exchange(ref _stopping, 1) == 0;
-        await base.StopAsync(cancellationToken).ConfigureAwait(false);
-
-        if (publishStopping)
+        while (true)
         {
-            await shutdownState.WaitForWorkerQuiescenceAsync(cancellationToken)
-                .ConfigureAwait(false);
-            await _publishGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            var stopTask = GetOrCreateStopTask(cancellationToken);
             try
             {
-                if (Volatile.Read(ref _startedConfirmed) == 1)
-                {
-                    var sequence = ReserveNextSequence();
-                    await PublishStoppingAsync(
-                            CreateMessage(AgentPresenceState.Stopping, sequence),
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                }
+                await stopTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+                return;
             }
-            finally
+            catch (OperationCanceledException)
+                when (!cancellationToken.IsCancellationRequested
+                      && stopTask.IsCanceled)
             {
-                _publishGate.Release();
             }
         }
     }
 
     public override void Dispose()
     {
-        _publishGate.Dispose();
+        Task executeTask;
+        Task? stopTask;
+        lock (_lifecycleSync)
+        {
+            if (_disposeRequested)
+            {
+                return;
+            }
+
+            _disposeRequested = true;
+            executeTask = ExecuteTask ?? Task.CompletedTask;
+            stopTask = _stopTask;
+        }
+
         base.Dispose();
+        var lifecycleCompletion = stopTask is null
+            ? executeTask
+            : Task.WhenAll(executeTask, stopTask);
+        if (lifecycleCompletion.IsCompleted)
+        {
+            _ = lifecycleCompletion.Exception;
+            DisposePublishGate();
+            return;
+        }
+
+        _ = lifecycleCompletion.ContinueWith(
+            static (completed, state) =>
+            {
+                _ = completed.Exception;
+                ((StationAgentPresenceWorker)state!).DisposePublishGate();
+            },
+            this,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private Task GetOrCreateStopTask(CancellationToken cancellationToken)
+    {
+        lock (_lifecycleSync)
+        {
+            if (_stopTask is null || _stopTask.IsCanceled)
+            {
+                ObjectDisposedException.ThrowIf(_disposeRequested, this);
+                _stopTask = StopCoreAsync(cancellationToken);
+            }
+
+            return _stopTask;
+        }
+    }
+
+    private async Task StopCoreAsync(CancellationToken cancellationToken)
+    {
+        Volatile.Write(ref _stopping, 1);
+        shutdownState.BeginShutdown();
+        await base.StopAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        await shutdownState.WaitForWorkerQuiescenceAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (Volatile.Read(ref _executeStarted) == 1
+            && Volatile.Read(ref _startedConfirmed) == 1)
+        {
+            await PublishStoppingAsync(
+                    GetOrCreateStoppingMessage(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private AgentPresenceReported GetOrCreateStoppingMessage()
+    {
+        lock (_lifecycleSync)
+        {
+            return _stoppingMessage ??= CreateMessage(
+                AgentPresenceState.Stopping,
+                ReserveNextSequence());
+        }
+    }
+
+    private void DisposePublishGate()
+    {
+        if (Interlocked.Exchange(ref _publishGateDisposed, 1) == 0)
+        {
+            _publishGate.Dispose();
+        }
     }
 
     private async ValueTask PublishNextAsync(
@@ -171,7 +249,13 @@ internal sealed class StationAgentPresenceWorker(
         }
         catch (Exception exception)
         {
-            LogPublishFailed(logger, message.State, message.Sequence, exception);
+            LogPublishFailed(
+                logger,
+                message.State,
+                message.Sequence,
+                StationAgentDiagnostics.CreateLogSafeException(
+                    "Station Agent presence broker publication failed",
+                    exception));
             return false;
         }
     }
@@ -195,7 +279,13 @@ internal sealed class StationAgentPresenceWorker(
             catch (Exception exception)
             {
                 lastFailure = exception;
-                LogPublishFailed(logger, message.State, message.Sequence, exception);
+                LogPublishFailed(
+                    logger,
+                    message.State,
+                    message.Sequence,
+                    StationAgentDiagnostics.CreateLogSafeException(
+                        "Station Agent Stopping presence broker publication failed",
+                        exception));
                 if (attempt < StoppingPublishAttemptLimit)
                 {
                     await Task.Delay(StoppingPublishRetryDelay, cancellationToken)
