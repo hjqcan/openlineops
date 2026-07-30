@@ -28,7 +28,7 @@ internal static class Program
                 out var childDelayMilliseconds)
             && childDelayMilliseconds > 0)
         {
-            await WriteProcessIdAsync(processIdFile);
+            await WriteProcessIdentityAsync(processIdFile);
             await Task.Delay(childDelayMilliseconds);
             return 0;
         }
@@ -178,7 +178,7 @@ internal static class Program
     {
         var root = Path.GetFullPath(workingDirectory);
         Directory.CreateDirectory(root);
-        await WriteProcessIdAsync(Path.Combine(root, "safety-root.pid"));
+        await WriteProcessIdentityAsync(Path.Combine(root, "safety-root.pid"));
         using var child = StartChildProcess(
             Path.Combine(root, "safety-child.pid"),
             delayMilliseconds: 300_000);
@@ -238,8 +238,16 @@ internal static class Program
             : throw new InvalidDataException(
                 $"Safety actuator test option '--{name}' is required.");
 
-    private static Task WriteProcessIdAsync(string path) =>
-        File.WriteAllTextAsync(
+    private static async Task WriteProcessIdentityAsync(string path)
+    {
+        using var process = Process.GetCurrentProcess();
+        var startedAtUnixMilliseconds = new DateTimeOffset(
+                process.StartTime.ToUniversalTime())
+            .ToUnixTimeMilliseconds();
+        await File.WriteAllTextAsync(
             Path.GetFullPath(path),
-            Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
+            $"{Environment.ProcessId.ToString(CultureInfo.InvariantCulture)} "
+            + startedAtUnixMilliseconds.ToString(
+                CultureInfo.InvariantCulture));
+    }
 }

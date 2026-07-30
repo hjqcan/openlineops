@@ -25,6 +25,56 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
     }
 
     [Fact]
+    public async Task MismatchedCreationIdentityDoesNotTerminatePidCandidate()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(_root);
+        var identityFile = Path.Combine(_root, "identity-mismatch.pid");
+        var assembly = typeof(SafetyActuatorTestHelperMarker).Assembly.Location;
+        var executable = Path.ChangeExtension(assembly, ".exe");
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = executable,
+            WorkingDirectory = _root,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add("safety-child");
+        startInfo.ArgumentList.Add(identityFile);
+        startInfo.ArgumentList.Add("300000");
+        using var process = Process.Start(startInfo)
+                            ?? throw new InvalidOperationException(
+                                "Safety identity test process did not start.");
+        try
+        {
+            var actualIdentity = await WaitForProcessIdentityAsync(identityFile);
+            Assert.Equal(process.Id, actualIdentity.ProcessId);
+            var reusedPidIdentity = actualIdentity with
+            {
+                StartedAtUnixMilliseconds =
+                    actualIdentity.StartedAtUnixMilliseconds + 1
+            };
+
+            Assert.Null(TryOpenRunningProcess(reusedPidIdentity));
+            await TerminateProcessAsync(reusedPidIdentity);
+            Assert.False(process.HasExited);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill();
+                await process.WaitForExitAsync()
+                    .WaitAsync(TimeSpan.FromSeconds(5));
+            }
+        }
+    }
+
+    [Fact]
     public async Task CleanProcessTreeCompletesSuccessfully()
     {
         if (!OperatingSystem.IsWindows())
@@ -106,12 +156,12 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
             CreateRequest("root-exit-child", childProcessIdFile));
 
         stopwatch.Stop();
-        var childProcessId = await ReadProcessIdAsync(childProcessIdFile);
+        var childIdentity = await ReadProcessIdentityAsync(childProcessIdFile);
         Assert.True(result.Accepted);
         Assert.True(
             stopwatch.Elapsed >= TimeSpan.FromMilliseconds(500),
             $"Actuator returned before its descendant drained: {stopwatch.Elapsed}.");
-        Assert.False(IsProcessRunning(childProcessId));
+        Assert.False(IsProcessRunning(childIdentity));
     }
 
     [Fact]
@@ -128,19 +178,24 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
         var execution = actuator.EmergencyStopAsync(
                 CreateRequest("wait-for-termination", childProcessIdFile))
             .AsTask();
-        var childProcessId = await WaitForProcessIdAsync(childProcessIdFile);
-        using var child = OpenRunningProcess(childProcessId);
+        var childIdentity = await WaitForProcessIdentityAsync(
+            childProcessIdFile);
+        using var child = TryOpenRunningProcess(childIdentity);
         try
         {
             var result = await execution.WaitAsync(TimeSpan.FromSeconds(10));
 
             Assert.False(result.Accepted);
             Assert.Equal("Agent.SafetyTimedOut", result.FailureCode);
-            Assert.True(await WaitUntilProcessExitsAsync(child));
+            if (child is not null)
+            {
+                Assert.True(await WaitUntilProcessExitsAsync(child));
+            }
+            Assert.False(IsProcessRunning(childIdentity));
         }
         finally
         {
-            await TerminateProcessTreeAsync(child);
+            await TerminateProcessAsync(childIdentity, child);
         }
     }
 
@@ -160,8 +215,9 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
                 CreateRequest("wait-for-termination", childProcessIdFile),
                 cancellation.Token)
             .AsTask();
-        var childProcessId = await WaitForProcessIdAsync(childProcessIdFile);
-        using var child = OpenRunningProcess(childProcessId);
+        var childIdentity = await WaitForProcessIdentityAsync(
+            childProcessIdFile);
+        using var child = OpenRunningProcess(childIdentity);
         try
         {
             cancellation.Cancel();
@@ -173,7 +229,7 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
         finally
         {
             cancellation.Cancel();
-            await TerminateProcessTreeAsync(child);
+            await TerminateProcessAsync(childIdentity, child);
         }
     }
 
@@ -222,16 +278,18 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
         using var owner = Process.Start(startInfo)
                           ?? throw new InvalidOperationException(
                               "Safety actuator owner test process did not start.");
+        ProcessIdentity? safetyRootIdentity = null;
+        ProcessIdentity? safetyChildIdentity = null;
         Process? safetyRoot = null;
         Process? safetyChild = null;
         try
         {
-            var safetyRootProcessId = await WaitForProcessIdAsync(
+            safetyRootIdentity = await WaitForProcessIdentityAsync(
                 Path.Combine(_root, "safety-root.pid"));
-            var safetyChildProcessId = await WaitForProcessIdAsync(
+            safetyChildIdentity = await WaitForProcessIdentityAsync(
                 Path.Combine(_root, "safety-child.pid"));
-            safetyRoot = OpenRunningProcess(safetyRootProcessId);
-            safetyChild = OpenRunningProcess(safetyChildProcessId);
+            safetyRoot = OpenRunningProcess(safetyRootIdentity);
+            safetyChild = OpenRunningProcess(safetyChildIdentity);
 
             owner.Kill();
             await owner.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
@@ -245,7 +303,7 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
             {
                 if (!owner.HasExited)
                 {
-                    owner.Kill(entireProcessTree: true);
+                    owner.Kill();
                     await owner.WaitForExitAsync()
                         .WaitAsync(TimeSpan.FromSeconds(5));
                 }
@@ -254,14 +312,18 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
             {
             }
 
-            if (safetyRoot is not null)
+            if (safetyRootIdentity is not null && safetyRoot is not null)
             {
-                await TerminateProcessTreeAsync(safetyRoot);
+                await TerminateProcessAsync(
+                    safetyRootIdentity,
+                    safetyRoot);
                 safetyRoot.Dispose();
             }
-            if (safetyChild is not null)
+            if (safetyChildIdentity is not null && safetyChild is not null)
             {
-                await TerminateProcessTreeAsync(safetyChild);
+                await TerminateProcessAsync(
+                    safetyChildIdentity,
+                    safetyChild);
                 safetyChild.Dispose();
             }
         }
@@ -294,7 +356,8 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
             requestedBy,
             DateTimeOffset.UtcNow);
 
-    private static async Task<int> WaitForProcessIdAsync(string path)
+    private static async Task<ProcessIdentity> WaitForProcessIdentityAsync(
+        string path)
     {
         var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
         while (DateTimeOffset.UtcNow < deadline)
@@ -303,7 +366,7 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
             {
                 try
                 {
-                    return await ReadProcessIdAsync(path);
+                    return await ReadProcessIdentityAsync(path);
                 }
                 catch (IOException)
                 {
@@ -317,21 +380,34 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
         }
 
         throw new TimeoutException(
-            $"Safety actuator child PID was not published: {path}");
+            $"Safety actuator child process identity was not published: {path}");
     }
 
-    private static async Task<int> ReadProcessIdAsync(string path)
+    private static async Task<ProcessIdentity> ReadProcessIdentityAsync(
+        string path)
     {
         var text = await File.ReadAllTextAsync(path);
-        return int.TryParse(
-            text,
-            NumberStyles.None,
-            CultureInfo.InvariantCulture,
-            out var processId)
-            && processId > 0
-                ? processId
-                : throw new FormatException(
-                    $"Safety actuator child PID is invalid: {text}");
+        var fields = text.Split(
+            ' ',
+            StringSplitOptions.RemoveEmptyEntries);
+        return fields.Length == 2
+               && int.TryParse(
+                   fields[0],
+                   NumberStyles.None,
+                   CultureInfo.InvariantCulture,
+                   out var processId)
+               && processId > 0
+               && long.TryParse(
+                   fields[1],
+                   NumberStyles.None,
+                   CultureInfo.InvariantCulture,
+                   out var startedAtUnixMilliseconds)
+               && startedAtUnixMilliseconds > 0
+            ? new ProcessIdentity(
+                processId,
+                startedAtUnixMilliseconds)
+            : throw new FormatException(
+                $"Safety actuator child process identity is invalid: {text}");
     }
 
     private static async Task<bool> WaitUntilProcessExitsAsync(Process process)
@@ -350,13 +426,21 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
         return process.HasExited;
     }
 
-    private static async Task TerminateProcessTreeAsync(Process process)
+    private static async Task TerminateProcessAsync(
+        ProcessIdentity identity,
+        Process? observedProcess = null)
     {
+        var process = observedProcess ?? TryOpenRunningProcess(identity);
+        if (process is null)
+        {
+            return;
+        }
+
         try
         {
             if (!process.HasExited)
             {
-                process.Kill(entireProcessTree: true);
+                process.Kill();
                 await process.WaitForExitAsync()
                     .WaitAsync(TimeSpan.FromSeconds(5));
             }
@@ -364,35 +448,62 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
         catch (InvalidOperationException)
         {
         }
+        finally
+        {
+            if (observedProcess is null)
+            {
+                process.Dispose();
+            }
+        }
     }
 
-    private static Process OpenRunningProcess(int processId)
+    private static Process OpenRunningProcess(ProcessIdentity identity) =>
+        TryOpenRunningProcess(identity)
+        ?? throw new InvalidOperationException(
+            $"Safety actuator child process {identity.ProcessId} is no longer "
+            + "running with its published creation identity.");
+
+    private static Process? TryOpenRunningProcess(ProcessIdentity identity)
     {
-        var process = Process.GetProcessById(processId);
+        Process? process = null;
         try
         {
+            process = Process.GetProcessById(identity.ProcessId);
             _ = process.SafeHandle;
-            Assert.False(process.HasExited);
+            var actualStartedAtUnixMilliseconds = new DateTimeOffset(
+                    process.StartTime.ToUniversalTime())
+                .ToUnixTimeMilliseconds();
+            if (actualStartedAtUnixMilliseconds
+                    != identity.StartedAtUnixMilliseconds
+                || process.HasExited)
+            {
+                process.Dispose();
+                return null;
+            }
+
             return process;
+        }
+        catch (ArgumentException)
+        {
+            process?.Dispose();
+            return null;
+        }
+        catch (InvalidOperationException)
+        {
+            process?.Dispose();
+            return null;
         }
         catch
         {
-            process.Dispose();
+            process?.Dispose();
             throw;
         }
     }
 
-    private static bool IsProcessRunning(int processId)
+    private static bool IsProcessRunning(ProcessIdentity identity)
     {
-        try
-        {
-            using var process = Process.GetProcessById(processId);
-            return !process.HasExited;
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
+        using var process = TryOpenRunningProcess(identity);
+        return process is not null;
     }
 
     public void Dispose()
@@ -409,4 +520,8 @@ public sealed class ProcessStationSafetyActuatorTests : IDisposable
             }
         }
     }
+
+    private sealed record ProcessIdentity(
+        int ProcessId,
+        long StartedAtUnixMilliseconds);
 }
