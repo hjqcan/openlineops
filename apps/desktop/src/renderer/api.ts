@@ -93,6 +93,7 @@ import type {
   UpdateSlotGroupRequest,
   WorkspaceResponse
 } from './contracts';
+import { buildActiveProductionRunsQuery } from './production-operations-filters';
 
 export async function getPlatform(): Promise<ApiResponse<PlatformResponse>> {
   return desktop.apiRequest<PlatformResponse>('/api/platform');
@@ -994,17 +995,8 @@ export async function deleteExternalProgramResource(
 export async function getActiveProductionRuns(
   filters: ProductionOperationsFilters
 ): Promise<ApiResponse<ActiveProductionRunsResponse>> {
-  const query = new URLSearchParams();
-  if (filters.productionLineDefinitionId) {
-    query.set('productionLineDefinitionId', filters.productionLineDefinitionId);
-  }
-  if (filters.stationSystemId) {
-    query.set('stationSystemId', filters.stationSystemId);
-  }
-  if (filters.slotId) {
-    query.set('slotId', filters.slotId);
-  }
-  const suffix = query.size > 0 ? `?${query.toString()}` : '';
+  const query = buildActiveProductionRunsQuery(filters);
+  const suffix = query ? `?${query}` : '';
   return desktop.apiRequest<ActiveProductionRunsResponse>(`/api/operations/active-runs${suffix}`);
 }
 

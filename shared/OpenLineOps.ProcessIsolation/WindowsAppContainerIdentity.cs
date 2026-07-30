@@ -83,6 +83,13 @@ public static class WindowsAppContainerIdentity
         using var operation = WindowsAppContainerProfileOperationLock.Enter(profileName);
         if (profileLifecycleManagerServiceSid is not null)
         {
+            WindowsAppContainerProfileLifecycleAccess.ValidateManagerServiceSid(
+                profileLifecycleManagerServiceSid);
+            if (!ProbeProfileArtifactsCore(profileName).AnyArtifactsExist)
+            {
+                return false;
+            }
+
             var appContainerSid = DeriveProfileSid(profileName);
             WindowsAppContainerProfileLifecycleAccess.PrepareForDeletion(
                 profileName,

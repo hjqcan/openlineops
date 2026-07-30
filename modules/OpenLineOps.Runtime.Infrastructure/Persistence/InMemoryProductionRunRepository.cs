@@ -209,30 +209,17 @@ public sealed class InMemoryProductionRunRepository :
     }
 
     public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
-        string? productionLineDefinitionId = null,
-        string? stationSystemId = null,
-        string? slotId = null,
+        ProductionRunActiveQuery query,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(query);
         cancellationToken.ThrowIfCancellationRequested();
-        var entries = _runs.Values
-            .Select(stored => new ProductionRunPersistenceEntry(
-                ProductionRunSnapshotMapper.ToAggregate(stored.Snapshot),
-                stored.Revision))
-            .Where(entry => !entry.Run.IsTerminal)
-            .Where(entry => productionLineDefinitionId is null || string.Equals(
-                entry.Run.ProductionLineDefinitionId,
-                productionLineDefinitionId,
-                StringComparison.Ordinal))
-            .Where(entry => stationSystemId is null || entry.Run.OperationDefinitions.Any(definition =>
-                string.Equals(definition.StationSystemId, stationSystemId, StringComparison.Ordinal)))
-            .Where(entry => slotId is null || entry.Run.OperationDefinitions.Any(definition =>
-                definition.ResourceRequirements.Any(requirement =>
-                    requirement.Kind == ResourceKind.Slot
-                    && string.Equals(requirement.ResourceId, slotId, StringComparison.Ordinal))))
-            .OrderBy(entry => entry.Run.CreatedAtUtc)
-            .ThenBy(entry => entry.Run.Id.Value)
-            .ToArray();
+        var entries = ProductionRunActiveResultOrdering.Apply(
+            _runs.Values
+                .Select(stored => new ProductionRunPersistenceEntry(
+                    ProductionRunSnapshotMapper.ToAggregate(stored.Snapshot),
+                    stored.Revision))
+                .Where(entry => ProductionRunActiveQueryEvaluator.Matches(entry.Run, query)));
         return ValueTask.FromResult<IReadOnlyCollection<ProductionRunPersistenceEntry>>(entries);
     }
 

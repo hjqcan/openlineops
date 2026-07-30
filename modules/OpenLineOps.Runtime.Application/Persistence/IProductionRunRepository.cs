@@ -30,9 +30,7 @@ public interface IProductionRunRepository
         CancellationToken cancellationToken = default);
 
     ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
-        string? productionLineDefinitionId = null,
-        string? stationSystemId = null,
-        string? slotId = null,
+        ProductionRunActiveQuery query,
         CancellationToken cancellationToken = default);
 
     ValueTask<ProductionRunTerminalPage> ListTerminalAsync(

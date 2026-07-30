@@ -237,6 +237,10 @@ jobs:
         working-directory: apps/desktop
         run: npm run test:production-command-policy
 
+      - name: Test production Operations filters
+        working-directory: apps/desktop
+        run: npm run test:production-operations-filters
+
       - name: Build desktop
         working-directory: apps/desktop
         run: npm run build

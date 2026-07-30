@@ -27,6 +27,10 @@ import {
   CdpCommandTimeoutError,
   waitForCdpValue
 } from './smoke-cdp-client.mjs';
+import {
+  captureBackendSessionIdentity,
+  waitForBoundBackendHealth
+} from './smoke-backend-health-wait.mjs';
 import { waitForHttp } from './smoke-http-wait.mjs';
 import {
   resolveDotnetExecutablePath,
@@ -2146,15 +2150,25 @@ async function assertPackagedPrimaryTerminationStopsBackend() {
   if (!cdp || !electronProcess) {
     throw new Error('Packaged parent-death test requires an active Electron CDP session and process.');
   }
-  await ensureBackendStarted();
-  await waitForHealthyBackend();
-  const backendBeforeTermination = await getBackendStatus();
-  if (!backendBeforeTermination.isRunning
-      || backendBeforeTermination.health !== 'Healthy'
-      || !Number.isSafeInteger(backendBeforeTermination.pid)
-      || backendBeforeTermination.pid <= 0) {
+  const startedBackend = await ensureBackendStarted();
+  const backendSessionIdentity = captureBackendSessionIdentity(
+    startedBackend,
+    'packaged parent-death backend');
+  const backendBeforeTermination = await waitForBoundBackendHealth({
+    sessionIdentity: backendSessionIdentity,
+    getStatus: timeoutMilliseconds => getBackendStatus(
+      Math.min(5_000, timeoutMilliseconds)),
+    timeoutMilliseconds: 30_000,
+    pollIntervalMilliseconds: 100,
+    description: 'packaged parent-death backend'
+  });
+  const backendBeforeTerminationIdentity = backendProcessIdentity(
+    backendBeforeTermination,
+    'backend before packaged Electron termination');
+  if (!await isWindowsProcessIdentityRunning(backendBeforeTerminationIdentity)) {
     throw new Error(
-      `Packaged parent-death test has no healthy backend PID: ${JSON.stringify(backendBeforeTermination)}`);
+      `Packaged parent-death backend identity is not running: ${
+        JSON.stringify(backendBeforeTerminationIdentity)}`);
   }
 
   const terminatedElectron = electronProcess;
@@ -2162,9 +2176,6 @@ async function assertPackagedPrimaryTerminationStopsBackend() {
     terminatedElectron,
     'packaged Electron');
   const terminatedElectronPid = terminatedElectronIdentity.processId;
-  const backendBeforeTerminationIdentity = backendProcessIdentity(
-    backendBeforeTermination,
-    'backend before packaged Electron termination');
   cdp.close();
   cdp = undefined;
   await terminateWindowsProcessIdentity(terminatedElectronIdentity);
@@ -2860,13 +2871,14 @@ async function waitForHealthyBackend() {
 async function ensureBackendStarted() {
   const status = await getBackendStatus();
   if (status.isRunning) {
-    return;
+    return status;
   }
 
   const started = await evaluate('window.openlineopsDesktop.startBackend()');
   if (!started.isRunning) {
     throw new Error(`Backend could not be started: ${JSON.stringify(started, null, 2)}`);
   }
+  return started;
 }
 
 async function clickByTestId(testId) {
@@ -4206,8 +4218,10 @@ async function evaluate(expression, timeoutMilliseconds) {
   return response.result.value;
 }
 
-async function getBackendStatus() {
-  return evaluate('window.openlineopsDesktop.getBackendStatus()');
+async function getBackendStatus(timeoutMilliseconds) {
+  return evaluate(
+    'window.openlineopsDesktop.getBackendStatus()',
+    timeoutMilliseconds);
 }
 
 async function getPageState() {

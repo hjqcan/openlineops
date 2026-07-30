@@ -447,6 +447,14 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
 
                 return true;
             },
+            appContainerProfileArtifactsProbe: _ =>
+                new WindowsAppContainerProfileArtifactState(
+                    PackageRootExists: attempts < 3,
+                    ProfileDirectoryExists: false,
+                    MappingExists: false,
+                    MappingChildrenExists: false,
+                    StorageExists: false,
+                    StorageChildrenExists: false),
             retryDelay: (delay, _) =>
             {
                 delays.Add(delay);
@@ -460,6 +468,92 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
         Assert.Equal(
             [TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(100)],
             delays);
+    }
+
+    [Fact]
+    public async Task CleanupAcceptsFileNotFoundOnlyAfterProfileArtifactsAreAbsent()
+    {
+        var deletionAttempts = 0;
+        var probeAttempts = 0;
+        var delays = new List<TimeSpan>();
+        var host = CreateHost(
+            TimeSpan.FromSeconds(30),
+            "OpenLineOps.AgentCleanupMissingProfileTests",
+            (_, _) =>
+            {
+                deletionAttempts++;
+                throw new Win32Exception(
+                    2,
+                    "Synthetic profile disappeared during lifecycle preparation.");
+            },
+            appContainerProfileArtifactsProbe: _ =>
+            {
+                probeAttempts++;
+                return new WindowsAppContainerProfileArtifactState(
+                    PackageRootExists: probeAttempts == 1,
+                    ProfileDirectoryExists: false,
+                    MappingExists: false,
+                    MappingChildrenExists: false,
+                    StorageExists: false,
+                    StorageChildrenExists: false);
+            },
+            retryDelay: (delay, _) =>
+            {
+                delays.Add(delay);
+                return ValueTask.CompletedTask;
+            });
+
+        await host.CleanupAsync(
+            CreateRunningJob(
+                    Path.Combine(_root, "unused-missing-profile-cleanup.pid"))
+                .ToSnapshot());
+
+        Assert.Equal(2, deletionAttempts);
+        Assert.Equal(2, probeAttempts);
+        Assert.Equal([TimeSpan.FromMilliseconds(50)], delays);
+    }
+
+    [Fact]
+    public async Task CleanupOfAlreadyRemovedProfileIsIdempotent()
+    {
+        var deletionAttempts = 0;
+        var probeAttempts = 0;
+        var delays = new List<TimeSpan>();
+        var host = CreateHost(
+            TimeSpan.FromSeconds(30),
+            "OpenLineOps.AgentCleanupRemovedProfileTests",
+            (_, _) =>
+            {
+                deletionAttempts++;
+                throw new Win32Exception(
+                    2,
+                    "Synthetic profile no longer exists.");
+            },
+            appContainerProfileArtifactsProbe: _ =>
+            {
+                probeAttempts++;
+                return new WindowsAppContainerProfileArtifactState(
+                    PackageRootExists: false,
+                    ProfileDirectoryExists: false,
+                    MappingExists: false,
+                    MappingChildrenExists: false,
+                    StorageExists: false,
+                    StorageChildrenExists: false);
+            },
+            retryDelay: (delay, _) =>
+            {
+                delays.Add(delay);
+                return ValueTask.CompletedTask;
+            });
+
+        var job = CreateRunningJob(
+            Path.Combine(_root, "unused-removed-profile-cleanup.pid"));
+        await host.CleanupAsync(job.ToSnapshot());
+        await host.CleanupAsync(job.ToSnapshot());
+
+        Assert.Equal(2, deletionAttempts);
+        Assert.Equal(2, probeAttempts);
+        Assert.Empty(delays);
     }
 
     [Fact]
@@ -535,6 +629,14 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
                 attempts++;
                 throw new Win32Exception(5, "Synthetic persistent profile failure.");
             },
+            appContainerProfileArtifactsProbe: static _ =>
+                new WindowsAppContainerProfileArtifactState(
+                    PackageRootExists: true,
+                    ProfileDirectoryExists: false,
+                    MappingExists: false,
+                    MappingChildrenExists: false,
+                    StorageExists: false,
+                    StorageChildrenExists: false),
             retryDelay: static (_, _) => ValueTask.CompletedTask);
 
         var exception = await Assert.ThrowsAsync<StationRuntimeIsolationCleanupException>(

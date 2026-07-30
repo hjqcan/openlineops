@@ -1542,9 +1542,19 @@ async function runConcurrentAndPassedScenario() {
       ? state : null;
   }, 'A at Station 2 while B executes at Station 1');
   const station1Operation = lineState.stations
-    .find(station => station.stationSystemId === fixture.station1).activeOperations[0];
+    .find(station => station.stationSystemId === fixture.station1)
+    .activeOperations
+    .find(operation => operation.productionRunId === unitB.runId);
   const station2Operation = lineState.stations
-    .find(station => station.stationSystemId === fixture.station2).activeOperations[0];
+    .find(station => station.stationSystemId === fixture.station2)
+    .activeOperations
+    .find(operation => operation.productionRunId === unitA.runId);
+  assert(
+    station1Operation?.executionStatus === 'Running',
+    `Station ${fixture.station1} did not expose run ${unitB.runId} as Running.`);
+  assert(
+    station2Operation?.executionStatus === 'Running',
+    `Station ${fixture.station2} did not expose run ${unitA.runId} as Running.`);
   assertLeaseEvidence(station1Operation);
   assertLeaseEvidence(station2Operation);
   assert(
@@ -1553,6 +1563,22 @@ async function runConcurrentAndPassedScenario() {
       ...station2Operation.resources.map(resource => resource.fencingToken)
     ].filter(value => value !== null)).size >= 2,
     'Concurrent operations did not expose independent fencing tokens.');
+  await Promise.all([
+    assertCanonicalSlotActiveRunScope({
+      operation: station1Operation,
+      expectedStationSystemId: fixture.station1,
+      expectedSlotId: fixture.slot1,
+      includedRunId: unitB.runId,
+      excludedRunId: unitA.runId
+    }),
+    assertCanonicalSlotActiveRunScope({
+      operation: station2Operation,
+      expectedStationSystemId: fixture.station2,
+      expectedSlotId: fixture.slot2,
+      includedRunId: unitA.runId,
+      excludedRunId: unitB.runId
+    })
+  ]);
 
   await openOperationsDashboard(unitB.runId);
   await harness.waitFor(
@@ -2189,12 +2215,89 @@ async function openOperationsDashboard(runId = null) {
       + `.some(option => option.value === ${JSON.stringify(fixture.lineId)})`);
   if (lineOption) await harness.setSelect('operations-filter-line', fixture.lineId);
   if (runId) {
+    const runResponse = await expectApi(
+      `/api/production-runs/${encodeURIComponent(runId)}`,
+      {},
+      200,
+      `read active run ${runId} before applying its Slot filter`);
+    const activeOperation = runResponse.body.operations.find(operation => (
+      operation.executionStatus === 'Running'))
+      ?? runResponse.body.operations.find(operation => operation.executionStatus === 'Pending');
+    const slotResourceId = activeOperation?.resources
+      ?.find(resource => resource.kind === 'Slot')
+      ?.resourceId;
+    assert(
+      typeof slotResourceId === 'string'
+        && slotResourceId.split('/').length === 3
+        && slotResourceId.startsWith(`${fixture.lineId}/`),
+      `Active run ${runId} did not expose one canonical Line/Station/Slot resource.`);
+    await harness.waitFor(
+      `Array.from(document.querySelectorAll('[data-testid="operations-filter-slot"] option'))`
+        + `.some(option => option.value === ${JSON.stringify(slotResourceId)})`,
+      30_000,
+      `canonical Slot option ${slotResourceId}`);
+    await harness.setSelect('operations-filter-slot', slotResourceId);
+    const encodedSlotResourceId = encodeCanonicalSlotResourceIdForQuery(slotResourceId);
+    const filteredRuns = await expectApi(
+      `/api/operations/active-runs?productionLineDefinitionId=${encodeURIComponent(fixture.lineId)}`
+        + `&slotResourceId=${encodedSlotResourceId}`,
+      {},
+      200,
+      `query active runs by canonical Slot ${slotResourceId}`);
+    assert(
+      filteredRuns.body.runs.some(run => run.productionRunId === runId),
+      `Canonical Slot query did not return its active run ${runId}.`);
+    await harness.waitFor(
+      `document.querySelector('[data-testid="operations-filter-slot"]')?.value === ${JSON.stringify(slotResourceId)}`
+        + ` && Boolean(document.querySelector('[data-testid=${JSON.stringify(`active-run-${runId}`)}]'))`,
+      30_000,
+      `active run ${runId} under its canonical Slot filter`);
+    await harness.setSelect('operations-filter-slot', '');
     await harness.waitFor(
       `Boolean(document.querySelector('[data-testid=${JSON.stringify(`active-run-${runId}`)}]'))`,
       30_000,
       `active run ${runId} in Operations`);
     await harness.click(`active-run-${runId}`);
   }
+}
+
+async function assertCanonicalSlotActiveRunScope({
+  operation,
+  expectedStationSystemId,
+  expectedSlotId,
+  includedRunId,
+  excludedRunId
+}) {
+  const slotResources = operation.resources.filter(resource => resource.kind === 'Slot');
+  assert(
+    slotResources.length === 1,
+    `Running Operation ${operation.operationRunId} did not expose exactly one Slot resource.`);
+  const slotResourceId = slotResources[0].resourceId;
+  assert(
+    slotResourceId === `${fixture.lineId}/${expectedStationSystemId}/${expectedSlotId}`,
+    `Running Operation ${operation.operationRunId} exposed unexpected Slot ${slotResourceId}.`);
+  const encodedSlotResourceId = encodeCanonicalSlotResourceIdForQuery(slotResourceId);
+  const filteredRuns = await expectApi(
+    `/api/operations/active-runs?productionLineDefinitionId=${encodeURIComponent(fixture.lineId)}`
+      + `&slotResourceId=${encodedSlotResourceId}`,
+    {},
+    200,
+    `query concurrent active runs by canonical Slot ${slotResourceId}`);
+  assert(
+    filteredRuns.body.runs.some(run => run.productionRunId === includedRunId),
+    `Canonical Slot ${slotResourceId} did not return current run ${includedRunId}.`);
+  assert(
+    filteredRuns.body.runs.every(run => run.productionRunId !== excludedRunId),
+    `Canonical Slot ${slotResourceId} returned cross-Station run ${excludedRunId}.`);
+}
+
+function encodeCanonicalSlotResourceIdForQuery(slotResourceId) {
+  const segments = slotResourceId.split('/');
+  assert(
+    segments.length === 3
+      && segments.every(segment => segment.length > 0 && segment.trim() === segment),
+    `Slot resource ${slotResourceId} is not one canonical Line/Station/Slot address.`);
+  return segments.map(segment => encodeURIComponent(segment)).join('/');
 }
 
 async function openTraceAndScreenshot(runId, name) {

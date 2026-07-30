@@ -325,14 +325,15 @@ public sealed class PostgreSqlProductionCoordinationStore :
 
     public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListRecoverableAsync(
         CancellationToken cancellationToken = default) =>
-        ListRunsAsync(null, null, null, cancellationToken);
+        ListRunsAsync(ProductionRunActiveQuery.All, cancellationToken);
 
-    public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
-        string? productionLineDefinitionId = null,
-        string? stationSystemId = null,
-        string? slotId = null,
-        CancellationToken cancellationToken = default) =>
-        ListRunsAsync(productionLineDefinitionId, stationSystemId, slotId, cancellationToken);
+    public async ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
+        ProductionRunActiveQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        var entries = await ListRunsAsync(query, cancellationToken).ConfigureAwait(false);
+        return ProductionRunActiveResultOrdering.Apply(entries);
+    }
 
     public async ValueTask<ProductionRunTerminalPage> ListTerminalAsync(
         ProductionRunTerminalPageRequest request,
@@ -1408,11 +1409,10 @@ public sealed class PostgreSqlProductionCoordinationStore :
     }
 
     private async ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListRunsAsync(
-        string? lineId,
-        string? stationSystemId,
-        string? slotId,
+        ProductionRunActiveQuery query,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(query);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
@@ -1424,25 +1424,13 @@ public sealed class PostgreSqlProductionCoordinationStore :
             ORDER BY last_transition_at_utc, run_id;
             """;
         command.Parameters.Add("line_id", NpgsqlDbType.Text).Value =
-            (object?)lineId ?? DBNull.Value;
+            (object?)query.ProductionLineDefinitionId ?? DBNull.Value;
         var entries = new List<ProductionRunPersistenceEntry>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
             var run = DeserializeRun(reader.GetString(0));
-            if (stationSystemId is not null
-                && run.OperationDefinitions.All(definition => !string.Equals(
-                    definition.StationSystemId,
-                    stationSystemId,
-                    StringComparison.Ordinal)))
-            {
-                continue;
-            }
-
-            if (slotId is not null && run.OperationDefinitions.All(definition =>
-                    definition.ResourceRequirements.All(resource =>
-                        resource.Kind != ResourceKind.Slot
-                        || !string.Equals(resource.ResourceId, slotId, StringComparison.Ordinal))))
+            if (!ProductionRunActiveQueryEvaluator.Matches(run, query))
             {
                 continue;
             }

@@ -134,9 +134,7 @@ public sealed class ProductionRunCoordinatorHostedServiceTests
         }
 
         public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
-            string? productionLineDefinitionId = null,
-            string? stationSystemId = null,
-            string? slotId = null,
+            ProductionRunActiveQuery query,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();

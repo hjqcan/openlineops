@@ -193,6 +193,7 @@ $readyPath = Join-Path $cleanupRoot "external-abort-ready-$externalAbortScope.js
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-agent-service-external-abort-cleanup.ps1 -AgentBundleRoot $agentRoot -SamplePluginRoot $samplePluginRoot -ApiBundleRoot $apiRoot -Scope $externalAbortScope -ManifestPath $cleanupManifest -ReadyPath $readyPath -Configuration Release -NoBuild -NoRestore
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-studio-two-agent-production-closure.ps1 -Configuration Release -NoBuild -NoRestore
 npm --prefix apps/desktop run test:production-command-policy
+npm --prefix apps/desktop run test:production-operations-filters
 npm --prefix apps/desktop run test:process-problem-location
 npm --prefix apps/desktop run test:draft-transition-guard
 npm --prefix apps/desktop run test:topology-draft-workspace

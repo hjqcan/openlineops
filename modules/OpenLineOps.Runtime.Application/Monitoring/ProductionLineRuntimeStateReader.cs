@@ -35,8 +35,9 @@ public sealed class ProductionLineRuntimeStateReader(
         presenceOptions.Validate();
         var generatedAtUtc = clock.UtcNow;
         var runTask = productionRuns.ListActiveAsync(
-            productionLineDefinitionId: productionLineDefinitionId,
-            cancellationToken: cancellationToken).AsTask();
+            new ProductionRunActiveQuery(
+                productionLineDefinitionId: productionLineDefinitionId),
+            cancellationToken).AsTask();
         var unitTask = materials.ListProductionUnitsAsync(cancellationToken).AsTask();
         var carrierTask = materials.ListCarriersAsync(cancellationToken).AsTask();
         var slotTask = materials.ListSlotsAsync(

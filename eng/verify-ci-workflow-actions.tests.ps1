@@ -47,6 +47,13 @@ $testRoot = Resolve-RepoPath (
 Assert-UnderRepoRoot $testRoot
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
+$productionOperationsFilterStep =
+    "      - name: Test production Operations filters`n" +
+    "        working-directory: apps/desktop`n" +
+    "        run: npm run test:production-operations-filters`n"
+$productionOperationsFilterFailure =
+    "exact non-optional production Operations filter step"
+
 $cases = @(
     [pscustomobject]@{
         Name = ".NET SDK pin"
@@ -491,6 +498,47 @@ $cases = @(
         Search = "npm run test:production-command-policy"
         Replacement = "npm run test:production-route-validation"
         ExpectedFailure = "operator commands are enabled only in domain-valid Production Run states"
+    },
+    [pscustomobject]@{
+        Name = "production Operations filter step deletion"
+        Search = $productionOperationsFilterStep
+        Replacement = ""
+        ExpectedFailure = $productionOperationsFilterFailure
+    },
+    [pscustomobject]@{
+        Name = "production Operations filter disabled condition"
+        Search = $productionOperationsFilterStep
+        Replacement =
+            "      - name: Test production Operations filters`n" +
+            "        if: false`n" +
+            "        working-directory: apps/desktop`n" +
+            "        run: npm run test:production-operations-filters`n"
+        ExpectedFailure = $productionOperationsFilterFailure
+    },
+    [pscustomobject]@{
+        Name = "production Operations filter continue on error"
+        Search = $productionOperationsFilterStep
+        Replacement =
+            "      - name: Test production Operations filters`n" +
+            "        continue-on-error: true`n" +
+            "        working-directory: apps/desktop`n" +
+            "        run: npm run test:production-operations-filters`n"
+        ExpectedFailure = $productionOperationsFilterFailure
+    },
+    [pscustomobject]@{
+        Name = "production Operations filter working directory"
+        Search = $productionOperationsFilterStep
+        Replacement =
+            "      - name: Test production Operations filters`n" +
+            "        working-directory: .`n" +
+            "        run: npm run test:production-operations-filters`n"
+        ExpectedFailure = $productionOperationsFilterFailure
+    },
+    [pscustomobject]@{
+        Name = "production Operations filter command"
+        Search = "npm run test:production-operations-filters"
+        Replacement = "npm run test:production-command-policy"
+        ExpectedFailure = $productionOperationsFilterFailure
     }
 )
 

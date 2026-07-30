@@ -15,18 +15,45 @@ public sealed class ProductionOperationsController(
     IProductionRunRepository repository,
     IProductionLineRuntimeStateReader lineStateReader) : ControllerBase
 {
+    private static readonly HashSet<string> ActiveRunQueryFields =
+        new(StringComparer.Ordinal)
+        {
+            "productionLineDefinitionId",
+            "stationSystemId",
+            "slotResourceId"
+        };
+
     [HttpGet(OpenLineOpsApiRoutes.OperationsActiveRuns)]
     [ProducesResponseType<ActiveProductionRunsResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<ActiveProductionRunsResponse>> GetActiveRunsAsync(
         [FromQuery] string? productionLineDefinitionId,
         [FromQuery] string? stationSystemId,
-        [FromQuery] string? slotId,
+        [FromQuery] string? slotResourceId,
         CancellationToken cancellationToken)
     {
-        var active = await repository.ListActiveAsync(
+        if (Request.Query.Keys.Any(key => !ActiveRunQueryFields.Contains(key))
+            || Request.Query.Any(parameter => parameter.Value.Count != 1))
+        {
+            return BadRequest(StrictQueryProblem());
+        }
+
+        ProductionRunActiveQuery query;
+        try
+        {
+            query = new ProductionRunActiveQuery(
                 productionLineDefinitionId,
                 stationSystemId,
-                slotId,
+                slotResourceId);
+        }
+        catch (ArgumentException exception)
+        {
+            ModelState.AddModelError(exception.ParamName ?? "query", exception.Message);
+            return ValidationProblem(ModelState);
+        }
+
+        var active = await repository.ListActiveAsync(
+                query,
                 cancellationToken)
             .ConfigureAwait(false);
         return Ok(new ActiveProductionRunsResponse(active
@@ -51,4 +78,11 @@ public sealed class ProductionOperationsController(
             .ConfigureAwait(false);
         return Ok(ProductionLineRuntimeStateResponseMapper.ToResponse(state));
     }
+
+    private static ProblemDetails StrictQueryProblem() => new()
+    {
+        Status = StatusCodes.Status400BadRequest,
+        Title = "Validation.StrictQuery",
+        Detail = "Active Production Run query contains an unknown or repeated field."
+    };
 }

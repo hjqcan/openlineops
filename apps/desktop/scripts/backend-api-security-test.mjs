@@ -84,6 +84,11 @@ test('backend API paths are canonical relative paths on one loopback origin', ()
   assert.equal(
     resolveCanonicalBackendApiUrl(base, '/api/platform?probe=true').href,
     'http://127.0.0.1:5135/api/platform?probe=true');
+  assert.equal(
+    resolveCanonicalBackendApiUrl(
+      base,
+      '/api/operations/active-runs?slotResourceId=line.main/station.a/slot.shared').href,
+    'http://127.0.0.1:5135/api/operations/active-runs?slotResourceId=line.main/station.a/slot.shared');
 
   for (const untrustedPath of [
     'https://attacker.invalid/api/platform',
@@ -94,6 +99,7 @@ test('backend API paths are canonical relative paths on one loopback origin', ()
     '/api/platform#fragment',
     '/api/platform\u0000suffix',
     '/api/platform/%2fescape',
+    '/api/operations/active-runs?slotResourceId=line.main%2Fstation.a%2Fslot.shared',
     '/api/a/../platform'
   ]) {
     assert.throws(
@@ -649,7 +655,9 @@ test('stalled real CDP upgrade is force-terminated with no live TCP handle', asy
 
 test('stalled real HTTP response cannot outlive the endpoint deadline', async () => {
   const sockets = new Set();
+  let acceptedConnectionCount = 0;
   const server = net.createServer(socket => {
+    acceptedConnectionCount += 1;
     sockets.add(socket);
     socket.resume();
     socket.once('close', () => sockets.delete(socket));
@@ -670,14 +678,15 @@ test('stalled real HTTP response cannot outlive the endpoint deadline', async ()
         'stalled test endpoint'),
       /Timed out waiting for stalled test endpoint/u);
     assert.ok(Date.now() - startedAt < 1_000);
-    const deadline = Date.now() + 1_000;
-    while (sockets.size > 0 && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    assert.equal(
-      sockets.size,
-      0,
-      'timed-out HTTP request retained an accepted TCP connection');
+    assert.ok(
+      acceptedConnectionCount > 0,
+      'the stalled HTTP test did not exercise one accepted TCP connection');
+    await waitForAcceptedConnectionsToClose(
+      server,
+      sockets,
+      8_000,
+      250,
+      () => acceptedConnectionCount);
   } finally {
     for (const socket of sockets) {
       socket.destroy();
@@ -687,6 +696,46 @@ test('stalled real HTTP response cannot outlive the endpoint deadline', async ()
     });
   }
 });
+
+async function waitForAcceptedConnectionsToClose(
+  server,
+  sockets,
+  timeoutMilliseconds,
+  stableZeroMilliseconds,
+  getAcceptedConnectionCount
+) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  let zeroObservedAt = null;
+  let serverConnectionCount = await getServerConnectionCount(server);
+  while (Date.now() < deadline) {
+    serverConnectionCount = await getServerConnectionCount(server);
+    if (sockets.size === 0 && serverConnectionCount === 0) {
+      zeroObservedAt ??= Date.now();
+      if (Date.now() - zeroObservedAt >= stableZeroMilliseconds) {
+        return;
+      }
+    } else {
+      zeroObservedAt = null;
+    }
+
+    await new Promise(resolve => setTimeout(
+      resolve,
+      Math.max(1, Math.min(20, deadline - Date.now()))));
+  }
+
+  serverConnectionCount = await getServerConnectionCount(server);
+  assert.fail(
+    'timed-out HTTP request did not release every accepted TCP connection '
+    + `within ${timeoutMilliseconds} ms `
+    + `(accepted=${getAcceptedConnectionCount()}, `
+    + `tracked=${sockets.size}, server=${serverConnectionCount})`);
+}
+
+function getServerConnectionCount(server) {
+  return new Promise((resolve, reject) => {
+    server.getConnections((error, count) => error ? reject(error) : resolve(count));
+  });
+}
 
 class FakeWebSocket extends EventTarget {
   constructor() {

@@ -2127,15 +2127,9 @@ public sealed class ProductionRunRunnerTests
             inner.ListRecoverableAsync(cancellationToken);
 
         public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
-            string? productionLineDefinitionId = null,
-            string? stationSystemId = null,
-            string? slotId = null,
+            ProductionRunActiveQuery query,
             CancellationToken cancellationToken = default) =>
-            inner.ListActiveAsync(
-                productionLineDefinitionId,
-                stationSystemId,
-                slotId,
-                cancellationToken);
+            inner.ListActiveAsync(query, cancellationToken);
 
         public ValueTask<ProductionRunTerminalPage> ListTerminalAsync(
             ProductionRunTerminalPageRequest request,

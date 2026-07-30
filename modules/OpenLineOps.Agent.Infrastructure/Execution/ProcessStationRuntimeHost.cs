@@ -609,25 +609,41 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         for (var attempt = 1; attempt <= maximumAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            bool? deletionReported = null;
             try
             {
-                var deletionReported = _deleteAppContainerProfile(
+                deletionReported = _deleteAppContainerProfile(
                     profileName,
                     _requireRestrictedExternalProgramHostIdentity
                         ? _restrictedServiceSid
                         : null);
+            }
+            catch (Exception exception) when (exception is IOException
+                                              or Win32Exception
+                                              or UnauthorizedAccessException)
+            {
+                lastError = exception;
+            }
+
+            try
+            {
                 var artifacts = _appContainerProfileArtifactsProbe(profileName);
                 if (!artifacts.AnyArtifactsExist)
                 {
                     return;
                 }
 
-                lastError = new InvalidOperationException(
-                    deletionReported
-                        ? $"AppContainer profile '{profileName}' retained lifecycle artifacts after deletion."
-                        : $"AppContainer profile '{profileName}' deletion reported no profile while lifecycle artifacts remain.");
+                if (deletionReported.HasValue)
+                {
+                    lastError = new InvalidOperationException(
+                        deletionReported.Value
+                            ? $"AppContainer profile '{profileName}' retained lifecycle artifacts after deletion."
+                            : $"AppContainer profile '{profileName}' deletion reported no profile while lifecycle artifacts remain.");
+                }
             }
-            catch (Win32Exception exception)
+            catch (Exception exception) when (exception is IOException
+                                              or Win32Exception
+                                              or UnauthorizedAccessException)
             {
                 lastError = exception;
             }

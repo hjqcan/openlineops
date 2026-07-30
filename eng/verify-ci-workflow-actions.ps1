@@ -54,6 +54,56 @@ function Test-StepCannotContinueOnError {
     }
 }
 
+function Test-ExactWorkflowStep {
+    param(
+        [Parameter(Mandatory = $true)][string] $Content,
+        [Parameter(Mandatory = $true)][string] $JobName,
+        [Parameter(Mandatory = $true)][string] $StepName,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedBodyLines,
+        [Parameter(Mandatory = $true)][string] $Message
+    )
+
+    $jobPattern = "(?ms)^ {2}" +
+        [Regex]::Escape($JobName) +
+        ":\s*\r?\n(?<body>.*?)(?=^ {2}[A-Za-z0-9_-]+:\s*(?:#.*)?\r?$|\z)"
+    $jobMatch = [Regex]::Match($Content, $jobPattern)
+    if (-not $jobMatch.Success) {
+        Add-Failure $Message
+        return
+    }
+
+    $stepHeaderPattern = "(?m)^ {6}- name:\s*" +
+        [Regex]::Escape($StepName) +
+        "\s*$"
+    $stepHeaders = [Regex]::Matches(
+        $jobMatch.Groups["body"].Value,
+        $stepHeaderPattern)
+    if ($stepHeaders.Count -ne 1) {
+        Add-Failure $Message
+        return
+    }
+
+    $stepPattern = "(?ms)^ {6}- name:\s*" +
+        [Regex]::Escape($StepName) +
+        "\s*\r?\n(?<body>.*?)(?=^ {6}- name:|\z)"
+    $stepMatch = [Regex]::Match(
+        $jobMatch.Groups["body"].Value,
+        $stepPattern)
+    if (-not $stepMatch.Success) {
+        Add-Failure $Message
+        return
+    }
+
+    $actualBody = $stepMatch.Groups["body"].Value.Replace("`r`n", "`n").TrimEnd()
+    $expectedBody = ($ExpectedBodyLines -join "`n").TrimEnd()
+    if (-not [string]::Equals(
+            $actualBody,
+            $expectedBody,
+            [System.StringComparison]::Ordinal)) {
+        Add-Failure $Message
+    }
+}
+
 $resolvedWorkflowPath = Resolve-RepoPath $WorkflowPath
 if (-not (Test-Path -LiteralPath $resolvedWorkflowPath -PathType Leaf)) {
     throw "WorkflowPath does not exist: $resolvedWorkflowPath"
@@ -376,6 +426,14 @@ Test-ContentContains `
     -Content $workflowContent `
     -Pattern "npm run test:production-command-policy" `
     -Message "Workflow must verify that operator commands are enabled only in domain-valid Production Run states."
+Test-ExactWorkflowStep `
+    -Content $workflowContent `
+    -JobName "verify" `
+    -StepName "Test production Operations filters" `
+    -ExpectedBodyLines @(
+        "        working-directory: apps/desktop",
+        "        run: npm run test:production-operations-filters") `
+    -Message "Workflow must run the exact non-optional production Operations filter step in the Verify job with working-directory apps/desktop."
 Test-ContentContains `
     -Content $workflowContent `
     -Pattern '(?ms)name:\s*Run packaged Studio two-Agent production closure\s*\r?\n\s*shell:\s*powershell\s*\r?\n\s*timeout-minutes:\s*35\s*\r?\n\s*env:.*?OPENLINEOPS_STUDIO_TWO_AGENT_SERVICE_SCOPE:\s*\$\{\{\s*env\.OPENLINEOPS_CI_STUDIO_SERVICE_SCOPE\s*\}\}.*?OPENLINEOPS_AGENT_SERVICE_CLEANUP_MANIFEST_PATH:\s*\$\{\{\s*env\.OPENLINEOPS_CI_STUDIO_CLEANUP_MANIFEST_PATH\s*\}\}.*?run:\s*\|.*?OPENLINEOPS_POSTGRES_CONNECTION_STRING.*?OPENLINEOPS_RABBITMQ_URI.*?verify-studio-two-agent-production-closure\.ps1[^\r\n]*-NoBuild[^\r\n]*-NoRestore' `

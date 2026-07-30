@@ -46,6 +46,10 @@ import {
   type ProductionRouteRuntimeMovement,
   type ProductionRouteRuntimeProjection
 } from './production-route-runtime-projection';
+import {
+  buildProductionOperationsSlotOptions,
+  stationMatchesProductionOperationsFilters
+} from './production-operations-filters';
 
 interface OperationsWorkbenchProps {
   activeRuns: ProductionRunReadModel[];
@@ -140,6 +144,9 @@ export function OperationsWorkbench({
     () => new Map([...lineRuns, ...visibleRuns].map(run => [run.productionRunId, run])),
     [lineRuns, visibleRuns]);
   const selectedRun = runById.get(selectedRunId) ?? null;
+  const slotOptions = useMemo(
+    () => buildProductionOperationsSlotOptions(lineState, filters.stationSystemId),
+    [filters.stationSystemId, lineState]);
   const stationOverviews = useMemo(() => {
     const runtimeStations = new Map(
       (runtimeView?.stations ?? []).map(station => [station.stationSystemId, station]));
@@ -149,10 +156,18 @@ export function OperationsWorkbench({
     ])
       .map(stationSystemId => runtimeStations.get(stationSystemId)
         ?? idleStationView(stationSystemId))
-      .filter(station => (
-        (!filters.stationSystemId || station.stationSystemId === filters.stationSystemId)
-        && (!filters.slotId || station.slots.some(slot => slot.slotId === filters.slotId))));
-  }, [deployedStationSystemIds, filters.slotId, filters.stationSystemId, runtimeView]);
+      .filter(station => stationMatchesProductionOperationsFilters(
+        lineState?.productionLineDefinitionId ?? selectedLineId,
+        station,
+        filters));
+  }, [
+    deployedStationSystemIds,
+    filters.slotResourceId,
+    filters.stationSystemId,
+    lineState?.productionLineDefinitionId,
+    runtimeView,
+    selectedLineId
+  ]);
   const lineIds = useMemo(
     () => uniqueSorted([
       selectedLineId,
@@ -167,11 +182,6 @@ export function OperationsWorkbench({
       ...(lineState?.stations.map(station => station.stationSystemId) ?? [])
     ]),
     [deployedStationSystemIds, lineState]);
-  const slotIds = useMemo(
-    () => uniqueSorted((lineState?.slots ?? [])
-      .filter(slot => !filters.stationSystemId || slot.stationSystemId === filters.stationSystemId)
-      .map(slot => slot.slotId)),
-    [filters.stationSystemId, lineState]);
   const pendingDefinition = pendingCommand
     ? commandDefinitions.find(definition => definition.command === pendingCommand) ?? null
     : null;
@@ -464,19 +474,23 @@ export function OperationsWorkbench({
         <label>
           <span>Slot</span>
           <select
-            value={filters.slotId}
-            onChange={event => onFilterChanged('slotId', event.target.value)}
+            value={filters.slotResourceId}
+            onChange={event => onFilterChanged('slotResourceId', event.target.value)}
             data-testid="operations-filter-slot"
           >
             <option value="">All slots</option>
-            {slotIds.map(slotId => <option key={slotId} value={slotId}>{slotId}</option>)}
+            {slotOptions.map(slot => (
+              <option key={slot.resourceId} value={slot.resourceId}>{slot.label}</option>
+            ))}
           </select>
         </label>
         <button
           type="button"
           className="button ghost"
           onClick={() => onFilterChanged('productionLineDefinitionId', '')}
-          disabled={!filters.productionLineDefinitionId && !filters.stationSystemId && !filters.slotId}
+          disabled={!filters.productionLineDefinitionId
+            && !filters.stationSystemId
+            && !filters.slotResourceId}
         >
           Clear
         </button>

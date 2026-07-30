@@ -739,9 +739,7 @@ public sealed class RunnerCommandTests
                 IReadOnlyCollection<ProductionRunPersistenceEntry>>([]);
 
         public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
-            string? productionLineDefinitionId = null,
-            string? stationSystemId = null,
-            string? slotId = null,
+            ProductionRunActiveQuery query,
             CancellationToken cancellationToken = default) => ValueTask.FromResult<
                 IReadOnlyCollection<ProductionRunPersistenceEntry>>([]);
 

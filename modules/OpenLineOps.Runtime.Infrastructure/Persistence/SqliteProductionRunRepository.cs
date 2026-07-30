@@ -314,11 +314,10 @@ public sealed class SqliteProductionRunRepository :
     }
 
     public async ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
-        string? productionLineDefinitionId = null,
-        string? stationSystemId = null,
-        string? slotId = null,
+        ProductionRunActiveQuery query,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(query);
         await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -327,8 +326,12 @@ public sealed class SqliteProductionRunRepository :
             SELECT document_json, revision
             FROM production_runs
             WHERE execution_status IN ('Pending', 'Running')
-            ORDER BY last_transition_at_utc, run_id;
+              AND ($line_id IS NULL OR production_line_definition_id = $line_id)
+            ORDER BY last_transition_at_utc DESC, run_id;
             """;
+        command.Parameters.AddWithValue(
+            "$line_id",
+            (object?)query.ProductionLineDefinitionId ?? DBNull.Value);
         var runs = new List<ProductionRunPersistenceEntry>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -336,30 +339,7 @@ public sealed class SqliteProductionRunRepository :
             var entry = new ProductionRunPersistenceEntry(
                 DeserializeRun(reader.GetString(0)),
                 reader.GetInt64(1));
-            if (productionLineDefinitionId is not null
-                && !string.Equals(
-                    entry.Run.ProductionLineDefinitionId,
-                    productionLineDefinitionId,
-                    StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            if (stationSystemId is not null
-                && entry.Run.OperationDefinitions.All(definition =>
-                    !string.Equals(
-                        definition.StationSystemId,
-                        stationSystemId,
-                        StringComparison.Ordinal)))
-            {
-                continue;
-            }
-
-            if (slotId is not null
-                && entry.Run.OperationDefinitions.All(definition =>
-                    definition.ResourceRequirements.All(requirement =>
-                        requirement.Kind != ResourceKind.Slot
-                        || !string.Equals(requirement.ResourceId, slotId, StringComparison.Ordinal))))
+            if (!ProductionRunActiveQueryEvaluator.Matches(entry.Run, query))
             {
                 continue;
             }
@@ -367,7 +347,7 @@ public sealed class SqliteProductionRunRepository :
             runs.Add(entry);
         }
 
-        return runs;
+        return ProductionRunActiveResultOrdering.Apply(runs);
     }
 
     public async ValueTask<ProductionRunTerminalPage> ListTerminalAsync(

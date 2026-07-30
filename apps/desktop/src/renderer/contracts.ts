@@ -993,7 +993,7 @@ export interface ProductionLineCarrierPositionStateResponse {
 export interface ProductionOperationsFilters {
   productionLineDefinitionId: string;
   stationSystemId: string;
-  slotId: string;
+  slotResourceId: string;
 }
 
 export interface ProductionRunCommandRequest {
