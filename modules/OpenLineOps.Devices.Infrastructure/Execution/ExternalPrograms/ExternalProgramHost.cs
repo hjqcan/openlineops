@@ -21,7 +21,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
     private readonly Func<IsolatedProcessStartRequest, IIsolatedProcess> _processLauncher;
     private readonly IImmutableContentProtector _contentProtector;
     private readonly ExternalProgramHostPolicyEnforcer _policyEnforcer;
-    private readonly Func<string, bool> _deleteAppContainerProfile;
+    private readonly Func<string, string?, bool> _deleteAppContainerProfile;
     private readonly Func<string, WindowsAppContainerProfileArtifactState>
         _appContainerProfileArtifactsProbe;
     private readonly Func<TimeSpan, CancellationToken, ValueTask> _cleanupRetryDelay;
@@ -37,7 +37,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         Func<IsolatedProcessStartRequest, IIsolatedProcess>? processLauncher,
         IImmutableContentProtector? contentProtector,
         ExternalProgramHostPolicyEnforcer? policyEnforcer,
-        Func<string, bool>? deleteAppContainerProfile = null,
+        Func<string, string?, bool>? deleteAppContainerProfile = null,
         Func<string, WindowsAppContainerProfileArtifactState>?
             appContainerProfileArtifactsProbe = null,
         Func<TimeSpan, CancellationToken, ValueTask>? cleanupRetryDelay = null,
@@ -51,7 +51,10 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         _contentProtector = contentProtector ?? new ImmutableContentProtector();
         _policyEnforcer = policyEnforcer ?? new ExternalProgramHostPolicyEnforcer(_options);
         _deleteAppContainerProfile = deleteAppContainerProfile
-                                     ?? WindowsAppContainerIdentity.DeleteProfile;
+                                     ?? (static (profileName, lifecycleManagerServiceSid) =>
+                                         WindowsAppContainerIdentity.DeleteProfile(
+                                             profileName,
+                                             lifecycleManagerServiceSid));
         _appContainerProfileArtifactsProbe = appContainerProfileArtifactsProbe
                                              ?? WindowsAppContainerIdentity.ProbeProfileArtifacts;
         _cleanupRetryDelay = cleanupRetryDelay ?? DelayCleanupRetryAsync;
@@ -281,6 +284,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                     {
                         profileCleanupError = await TryDeleteAppContainerProfileAsync(
                                 appContainerPolicy.ProfileName,
+                                appContainerPolicy.ProfileLifecycleManagerServiceSid,
                                 CancellationToken.None)
                             .ConfigureAwait(false);
                     }
@@ -1064,6 +1068,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
 
     private async ValueTask<string?> TryDeleteAppContainerProfileAsync(
         string profileName,
+        string? profileLifecycleManagerServiceSid,
         CancellationToken cancellationToken)
     {
         const int maximumAttempts = 24;
@@ -1074,7 +1079,9 @@ public sealed class ExternalProgramHost : IExternalProgramHost
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var deletionReported = _deleteAppContainerProfile(profileName);
+                var deletionReported = _deleteAppContainerProfile(
+                    profileName,
+                    profileLifecycleManagerServiceSid);
                 var artifacts = _appContainerProfileArtifactsProbe(profileName);
                 if (!artifacts.AnyArtifactsExist)
                 {

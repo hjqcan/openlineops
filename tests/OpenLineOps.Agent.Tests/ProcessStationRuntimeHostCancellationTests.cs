@@ -437,7 +437,7 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
         var host = CreateHost(
             TimeSpan.FromSeconds(30),
             "OpenLineOps.AgentCleanupRetryTests",
-            _ =>
+            (_, _) =>
             {
                 attempts++;
                 if (attempts < 3)
@@ -463,13 +463,74 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
     }
 
     [Fact]
+    public async Task CleanupPassesExactLifecycleManagerSidToProfileDeletion()
+    {
+        string? observedLifecycleManagerSid = null;
+        var host = CreateHost(
+            TimeSpan.FromSeconds(30),
+            "OpenLineOps.AgentManagedProfileCleanupTests",
+            (_, lifecycleManagerServiceSid) =>
+            {
+                observedLifecycleManagerSid = lifecycleManagerServiceSid;
+                return false;
+            },
+            appContainerProfileArtifactsProbe: static _ =>
+                new WindowsAppContainerProfileArtifactState(
+                    PackageRootExists: false,
+                    ProfileDirectoryExists: false,
+                    MappingExists: false,
+                    MappingChildrenExists: false,
+                    StorageExists: false,
+                    StorageChildrenExists: false),
+            restrictedServiceSid: RestrictedServiceSid,
+            requireRestrictedExternalProgramHostIdentity: true);
+
+        await host.CleanupAsync(
+            CreateRunningJob(
+                    Path.Combine(_root, "unused-managed-profile-cleanup.pid"))
+                .ToSnapshot());
+
+        Assert.Equal(RestrictedServiceSid, observedLifecycleManagerSid);
+    }
+
+    [Fact]
+    public async Task CleanupDoesNotPassConfiguredServiceSidOutsideRestrictedIdentityMode()
+    {
+        string? observedLifecycleManagerSid = RestrictedServiceSid;
+        var host = CreateHost(
+            TimeSpan.FromSeconds(30),
+            "OpenLineOps.AgentUnrestrictedProfileCleanupTests",
+            (_, lifecycleManagerServiceSid) =>
+            {
+                observedLifecycleManagerSid = lifecycleManagerServiceSid;
+                return false;
+            },
+            appContainerProfileArtifactsProbe: static _ =>
+                new WindowsAppContainerProfileArtifactState(
+                    PackageRootExists: false,
+                    ProfileDirectoryExists: false,
+                    MappingExists: false,
+                    MappingChildrenExists: false,
+                    StorageExists: false,
+                    StorageChildrenExists: false),
+            restrictedServiceSid: RestrictedServiceSid);
+
+        await host.CleanupAsync(
+            CreateRunningJob(
+                    Path.Combine(_root, "unused-unrestricted-profile-cleanup.pid"))
+                .ToSnapshot());
+
+        Assert.Null(observedLifecycleManagerSid);
+    }
+
+    [Fact]
     public async Task CleanupReportsPersistentAppContainerProfileDeletionFailure()
     {
         var attempts = 0;
         var host = CreateHost(
             TimeSpan.FromSeconds(30),
             "OpenLineOps.AgentCleanupFailureTests",
-            _ =>
+            (_, _) =>
             {
                 attempts++;
                 throw new Win32Exception(5, "Synthetic persistent profile failure.");
@@ -502,7 +563,7 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
         var host = CreateHost(
             TimeSpan.FromSeconds(30),
             "OpenLineOps.AgentCleanupArtifactTests",
-            _ =>
+            (_, _) =>
             {
                 deletionAttempts++;
                 return false;
@@ -595,7 +656,8 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
             var host = CreateHost(
                 TimeSpan.FromSeconds(30),
                 profileNamespace,
-                WindowsAppContainerIdentity.DeleteProfile,
+                static (profileName, _) =>
+                    WindowsAppContainerIdentity.DeleteProfile(profileName),
                 retryDelay: async (delay, cancellationToken) =>
                 {
                     launched.TerminateProcessTree();
@@ -623,10 +685,12 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
     private ProcessStationRuntimeHost CreateHost(
         TimeSpan timeout,
         string? appContainerProfileNamespace = null,
-        Func<string, bool>? deleteAppContainerProfile = null,
+        Func<string, string?, bool>? deleteAppContainerProfile = null,
         Func<string, WindowsAppContainerProfileArtifactState>?
             appContainerProfileArtifactsProbe = null,
-        Func<TimeSpan, CancellationToken, ValueTask>? retryDelay = null)
+        Func<TimeSpan, CancellationToken, ValueTask>? retryDelay = null,
+        string? restrictedServiceSid = null,
+        bool requireRestrictedExternalProgramHostIdentity = false)
     {
         Directory.CreateDirectory(_root);
         var helperAssembly = typeof(StationRuntimeTestHelperMarker).Assembly.Location;
@@ -639,6 +703,9 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
                 Path.Combine(_root, "work"),
                 Path.Combine(_root, "artifacts"),
                 timeout,
+                RestrictedServiceSid: restrictedServiceSid,
+                RequireRestrictedExternalProgramHostIdentity:
+                    requireRestrictedExternalProgramHostIdentity,
                 RequireExternalProgramAppContainerIsolation:
                     appContainerProfileNamespace is not null,
                 ExternalProgramAppContainerProfileNamespace:
@@ -648,7 +715,11 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
             processLauncher: null,
             clock: new FixedClock(Now),
             deleteAppContainerProfile:
-                deleteAppContainerProfile ?? WindowsAppContainerIdentity.DeleteProfile,
+                deleteAppContainerProfile
+                ?? (static (profileName, profileLifecycleManagerServiceSid) =>
+                    WindowsAppContainerIdentity.DeleteProfile(
+                        profileName,
+                        profileLifecycleManagerServiceSid)),
             appContainerProfileArtifactsProbe:
                 appContainerProfileArtifactsProbe
                 ?? WindowsAppContainerIdentity.ProbeProfileArtifacts,

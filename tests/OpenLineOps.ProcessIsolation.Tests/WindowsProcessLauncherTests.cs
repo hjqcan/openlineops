@@ -1034,6 +1034,232 @@ public sealed class WindowsProcessLauncherTests
                     registryRule.InheritanceFlags);
                 Assert.Equal(PropagationFlags.None, registryRule.PropagationFlags);
             }
+
+            WindowsAppContainerProfileLifecycleAccess.PrepareForDeletion(
+                profileName,
+                appContainerSid,
+                managerServiceSid);
+            var hostAccountIdentity =
+                new SecurityIdentifier(stationIdentity.HostAccountSid);
+            AssertDeletionPreparedDirectory(
+                profileDirectory.Parent?.FullName
+                ?? throw new InvalidDataException(
+                    "The AppContainer profile directory has no package root."),
+                hostAccountIdentity,
+                managerIdentity);
+            AssertDeletionPreparedDirectory(
+                profileDirectory.FullName,
+                hostAccountIdentity,
+                managerIdentity);
+            foreach (var keyPath in registryLeafPaths)
+            {
+                AssertDeletionPreparedRegistryKey(
+                    keyPath,
+                    hostAccountIdentity,
+                    managerIdentity);
+            }
+        }
+        finally
+        {
+            _ = WindowsAppContainerIdentity.DeleteProfile(
+                profileName,
+                managerServiceSid);
+        }
+
+        Assert.False(WindowsAppContainerIdentity.ProfileExists(profileName));
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void DeletionPreparationRestoresTheExactProfileTreeWithoutChangingSharedParents()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var profileName = "OpenLineOps.Tests.DeletePrep."
+                          + Guid.NewGuid().ToString("N");
+        var appContainerSid = WindowsAppContainerIdentity.EnsureProfile(profileName);
+        var hostAccountIdentity = WindowsIdentity.GetCurrent().User
+                                  ?? throw new InvalidOperationException(
+                                      "Current Windows identity has no user SID.");
+        var managerIdentity = new SecurityIdentifier("S-1-5-80-1-2-3-4-5");
+        var packageRoot = Directory.GetParent(
+                              WindowsAppContainerIdentity.GetProfileFolderPath(
+                                  appContainerSid))?.FullName
+                          ?? throw new InvalidDataException(
+                              "The AppContainer profile has no package root.");
+        var nestedDirectory = Path.Combine(packageRoot, "AC", "deletion-preparation");
+        var nestedFile = Path.Combine(nestedDirectory, "evidence.bin");
+        var mappingPath = WindowsAppContainerProfileLifecycleAccess.MappingKeyPath(
+            appContainerSid);
+        var storagePath = WindowsAppContainerProfileLifecycleAccess.StorageKeyPath(
+            profileName);
+        var nestedRegistryPath = storagePath + "\\Children\\deletion-preparation";
+        try
+        {
+            Directory.CreateDirectory(nestedDirectory);
+            File.WriteAllBytes(nestedFile, [1, 2, 3, 4]);
+            using (var nestedKey = Registry.CurrentUser.CreateSubKey(
+                       nestedRegistryPath,
+                       writable: true))
+            {
+                Assert.NotNull(nestedKey);
+                nestedKey!.SetValue("evidence", 1, RegistryValueKind.DWord);
+            }
+
+            var packagesParent = Directory.GetParent(packageRoot)?.FullName
+                                 ?? throw new InvalidDataException(
+                                     "The AppContainer package root has no shared parent.");
+            var packageParentSecurity = ReadDirectorySecurity(packagesParent);
+            var mappingParentSecurity = ReadRegistrySecurity(
+                WindowsAppContainerProfileLifecycleAccess.MappingRegistryPrefix);
+            var storageParentSecurity = ReadRegistrySecurity(
+                WindowsAppContainerProfileLifecycleAccess.StorageRegistryPrefix);
+
+            GrantDeletionManagerFileSystemAccess(
+                packageRoot,
+                managerIdentity);
+            foreach (var (path, description) in new[]
+                     {
+                         (mappingPath, "mapping"),
+                         (mappingPath + "\\Children", "mapping children"),
+                         (storagePath, "storage"),
+                         (storagePath + "\\Children", "storage children"),
+                         (nestedRegistryPath, "nested storage child")
+                     })
+            {
+                GrantDeletionManagerRegistryAccess(
+                    path,
+                    managerIdentity,
+                    description);
+            }
+
+            WindowsAppContainerProfileLifecycleAccess
+                .PrepareProfileArtifactsForDeletionForTesting(
+                    profileName,
+                    appContainerSid,
+                    managerIdentity,
+                    hostAccountIdentity);
+            WindowsAppContainerProfileLifecycleAccess
+                .PrepareProfileArtifactsForDeletionForTesting(
+                    profileName,
+                    appContainerSid,
+                    managerIdentity,
+                    hostAccountIdentity);
+
+            foreach (var path in new[]
+                     {
+                         packageRoot,
+                         Path.Combine(packageRoot, "AC"),
+                         nestedDirectory
+                     })
+            {
+                AssertDeletionPreparedDirectory(
+                    path,
+                    hostAccountIdentity,
+                    managerIdentity);
+            }
+
+            AssertDeletionPreparedFile(
+                nestedFile,
+                hostAccountIdentity,
+                managerIdentity);
+            foreach (var path in new[]
+                     {
+                         mappingPath,
+                         mappingPath + "\\Children",
+                         storagePath,
+                         storagePath + "\\Children",
+                         nestedRegistryPath
+                     })
+            {
+                AssertDeletionPreparedRegistryKey(
+                    path,
+                    hostAccountIdentity,
+                    managerIdentity);
+            }
+
+            Assert.Equal(packageParentSecurity, ReadDirectorySecurity(packagesParent));
+            Assert.Equal(
+                mappingParentSecurity,
+                ReadRegistrySecurity(
+                    WindowsAppContainerProfileLifecycleAccess.MappingRegistryPrefix));
+            Assert.Equal(
+                storageParentSecurity,
+                ReadRegistrySecurity(
+                    WindowsAppContainerProfileLifecycleAccess.StorageRegistryPrefix));
+        }
+        finally
+        {
+            _ = WindowsAppContainerIdentity.DeleteProfile(profileName);
+        }
+
+        Assert.False(WindowsAppContainerIdentity.ProfileExists(profileName));
+    }
+
+    [Fact]
+    [SupportedOSPlatform("windows")]
+    public void RestrictedDeletionRejectsAnUnprovenServiceBeforeProfileMutation()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string unprovenServiceSid = "S-1-5-80-1-2-3-4-5";
+        var profileName = "OpenLineOps.Tests.DeleteId."
+                          + Guid.NewGuid().ToString("N");
+        var appContainerSid = WindowsAppContainerIdentity.EnsureProfile(profileName);
+        try
+        {
+            var before = WindowsAppContainerIdentity.ProbeProfileArtifacts(profileName);
+            var profileDirectory =
+                WindowsAppContainerIdentity.GetProfileFolderPath(appContainerSid);
+            var packageRoot = Directory.GetParent(profileDirectory)?.FullName
+                              ?? throw new InvalidDataException(
+                                  "The AppContainer profile directory has no package root.");
+            var fileSystemSecurity = new Dictionary<string, byte[]>(
+                StringComparer.OrdinalIgnoreCase)
+            {
+                [packageRoot] = ReadDirectorySecurity(packageRoot),
+                [profileDirectory] = ReadDirectorySecurity(profileDirectory)
+            };
+            var registrySecurity = new[]
+                {
+                    WindowsAppContainerProfileLifecycleAccess.MappingKeyPath(
+                        appContainerSid),
+                    WindowsAppContainerProfileLifecycleAccess.MappingKeyPath(
+                        appContainerSid) + "\\Children",
+                    WindowsAppContainerProfileLifecycleAccess.StorageKeyPath(
+                        profileName),
+                    WindowsAppContainerProfileLifecycleAccess.StorageKeyPath(
+                        profileName) + "\\Children"
+                }
+                .ToDictionary(
+                    static path => path,
+                    ReadRegistrySecurity,
+                    StringComparer.OrdinalIgnoreCase);
+
+            var exception = Assert.Throws<InvalidOperationException>(
+                () => WindowsAppContainerIdentity.DeleteProfile(
+                    profileName,
+                    unprovenServiceSid));
+
+            Assert.Contains("Station", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(
+                before,
+                WindowsAppContainerIdentity.ProbeProfileArtifacts(profileName));
+            foreach (var (path, security) in fileSystemSecurity)
+            {
+                Assert.Equal(security, ReadDirectorySecurity(path));
+            }
+
+            foreach (var (path, security) in registrySecurity)
+            {
+                Assert.Equal(security, ReadRegistrySecurity(path));
+            }
         }
         finally
         {
@@ -1617,6 +1843,201 @@ public sealed class WindowsProcessLauncherTests
             detectEncodingFromByteOrderMarks: true,
             leaveOpen: true);
         return await reader.ReadToEndAsync(cancellationToken);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static byte[] ReadDirectorySecurity(string path) =>
+        new DirectoryInfo(path)
+            .GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access)
+            .GetSecurityDescriptorBinaryForm();
+
+    [SupportedOSPlatform("windows")]
+    private static byte[] ReadRegistrySecurity(string path)
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(
+            path,
+            RegistryKeyPermissionCheck.ReadSubTree,
+            RegistryRights.ReadPermissions)
+            ?? throw new InvalidDataException(
+                $"Expected registry key '{path}' is absent.");
+        return key.GetAccessControl(
+                AccessControlSections.Owner | AccessControlSections.Access)
+            .GetSecurityDescriptorBinaryForm();
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void GrantDeletionManagerFileSystemAccess(
+        string packageRoot,
+        SecurityIdentifier managerIdentity)
+    {
+        var paths = Directory
+            .EnumerateFileSystemEntries(
+                packageRoot,
+                "*",
+                SearchOption.AllDirectories)
+            .Prepend(packageRoot);
+        foreach (var path in paths)
+        {
+            FileSystemSecurity security;
+            InheritanceFlags inheritanceFlags;
+            if (Directory.Exists(path))
+            {
+                security = new DirectoryInfo(path).GetAccessControl(
+                    AccessControlSections.Access);
+                inheritanceFlags =
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+            }
+            else
+            {
+                security = new FileInfo(path).GetAccessControl(
+                    AccessControlSections.Access);
+                inheritanceFlags = InheritanceFlags.None;
+            }
+
+            security.PurgeAccessRules(managerIdentity);
+            security.AddAccessRule(new FileSystemAccessRule(
+                managerIdentity,
+                FileSystemRights.FullControl,
+                inheritanceFlags,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            if (security is DirectorySecurity directorySecurity)
+            {
+                new DirectoryInfo(path).SetAccessControl(directorySecurity);
+            }
+            else
+            {
+                new FileInfo(path).SetAccessControl((FileSecurity)security);
+            }
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void GrantDeletionManagerRegistryAccess(
+        string path,
+        SecurityIdentifier managerIdentity,
+        string description)
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(
+            path,
+            RegistryKeyPermissionCheck.ReadWriteSubTree,
+            RegistryRights.ReadPermissions | RegistryRights.ChangePermissions)
+            ?? throw new InvalidDataException(
+                $"Expected {description} registry key '{path}' is absent.");
+        var security = key.GetAccessControl(AccessControlSections.Access);
+        security.PurgeAccessRules(managerIdentity);
+        security.AddAccessRule(new RegistryAccessRule(
+            managerIdentity,
+            RegistryRights.FullControl,
+            InheritanceFlags.ContainerInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        key.SetAccessControl(security);
+        key.Flush();
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AssertDeletionPreparedDirectory(
+        string path,
+        SecurityIdentifier hostAccountIdentity,
+        SecurityIdentifier managerIdentity)
+    {
+        var security = new DirectoryInfo(path).GetAccessControl(
+            AccessControlSections.Owner | AccessControlSections.Access);
+        AssertDeletionPreparedFileSystemSecurity(
+            security,
+            hostAccountIdentity,
+            managerIdentity);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AssertDeletionPreparedFile(
+        string path,
+        SecurityIdentifier hostAccountIdentity,
+        SecurityIdentifier managerIdentity)
+    {
+        var security = new FileInfo(path).GetAccessControl(
+            AccessControlSections.Owner | AccessControlSections.Access);
+        AssertDeletionPreparedFileSystemSecurity(
+            security,
+            hostAccountIdentity,
+            managerIdentity);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AssertDeletionPreparedFileSystemSecurity(
+        FileSystemSecurity security,
+        SecurityIdentifier hostAccountIdentity,
+        SecurityIdentifier managerIdentity)
+    {
+        Assert.Equal(
+            hostAccountIdentity.Value,
+            Assert.IsType<SecurityIdentifier>(
+                security.GetOwner(typeof(SecurityIdentifier))).Value);
+        var managerRules = security
+            .GetAccessRules(
+                includeExplicit: true,
+                includeInherited: true,
+                typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .Where(rule =>
+                rule.IdentityReference is SecurityIdentifier identity
+                && string.Equals(
+                    identity.Value,
+                    managerIdentity.Value,
+                    StringComparison.Ordinal))
+            .ToArray();
+        Assert.DoesNotContain(
+            managerRules,
+            rule => rule.AccessControlType == AccessControlType.Deny
+                    && (rule.FileSystemRights & FileSystemRights.FullControl) != 0);
+        Assert.Contains(
+            managerRules,
+            rule => rule.AccessControlType == AccessControlType.Allow
+                    && (rule.FileSystemRights & FileSystemRights.FullControl)
+                    == FileSystemRights.FullControl);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AssertDeletionPreparedRegistryKey(
+        string path,
+        SecurityIdentifier hostAccountIdentity,
+        SecurityIdentifier managerIdentity)
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(
+            path,
+            RegistryKeyPermissionCheck.ReadSubTree,
+            RegistryRights.ReadPermissions)
+            ?? throw new InvalidDataException(
+                $"Expected registry key '{path}' is absent.");
+        var security = key.GetAccessControl(
+            AccessControlSections.Owner | AccessControlSections.Access);
+        Assert.Equal(
+            hostAccountIdentity.Value,
+            Assert.IsType<SecurityIdentifier>(
+                security.GetOwner(typeof(SecurityIdentifier))).Value);
+        var managerRules = security
+            .GetAccessRules(
+                includeExplicit: true,
+                includeInherited: true,
+                typeof(SecurityIdentifier))
+            .Cast<RegistryAccessRule>()
+            .Where(rule =>
+                rule.IdentityReference is SecurityIdentifier identity
+                && string.Equals(
+                    identity.Value,
+                    managerIdentity.Value,
+                    StringComparison.Ordinal))
+            .ToArray();
+        Assert.DoesNotContain(
+            managerRules,
+            rule => rule.AccessControlType == AccessControlType.Deny
+                    && (rule.RegistryRights & RegistryRights.FullControl) != 0);
+        Assert.Contains(
+            managerRules,
+            rule => rule.AccessControlType == AccessControlType.Allow
+                    && (rule.RegistryRights & RegistryRights.FullControl)
+                    == RegistryRights.FullControl);
     }
 
     private static bool TryGetStationServiceIdentity(

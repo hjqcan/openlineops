@@ -67,7 +67,12 @@ public static class WindowsAppContainerIdentity
         return capability.Value;
     }
 
-    public static bool DeleteProfile(string profileName)
+    public static bool DeleteProfile(string profileName) =>
+        DeleteProfile(profileName, profileLifecycleManagerServiceSid: null);
+
+    public static bool DeleteProfile(
+        string profileName,
+        string? profileLifecycleManagerServiceSid)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -76,6 +81,15 @@ public static class WindowsAppContainerIdentity
 
         WindowsAppContainerSecurityCapabilities.ValidateProfileName(profileName);
         using var operation = WindowsAppContainerProfileOperationLock.Enter(profileName);
+        if (profileLifecycleManagerServiceSid is not null)
+        {
+            var appContainerSid = DeriveProfileSid(profileName);
+            WindowsAppContainerProfileLifecycleAccess.PrepareForDeletion(
+                profileName,
+                appContainerSid,
+                profileLifecycleManagerServiceSid);
+        }
+
         return DeleteProfileCore(profileName);
     }
 
@@ -711,8 +725,12 @@ internal static class WindowsAppContainerProfileLifecycleAccess
 {
     private const int MaximumProfileEntries = 4_096;
     private const int MaximumProfileDepth = 32;
+    private const int MaximumRegistryKeyNameLength = 255;
     private const uint MaximumSecurityDescriptorLength = 65_536;
     private const uint ErrorSuccess = 0;
+    private const int ErrorFileNotFound = 2;
+    private const int ErrorMoreData = 234;
+    private const int ErrorNoMoreItems = 259;
     private const int ErrorSharingViolation = 32;
     private const int ErrorLockViolation = 33;
     private const uint ReadControl = 0x00020000;
@@ -728,6 +746,11 @@ internal static class WindowsAppContainerProfileLifecycleAccess
     private const uint OwnerSecurityInformation = 0x00000001;
     private const uint DaclSecurityInformation = 0x00000004;
     private const uint SeFileObject = 1;
+    private const uint SeRegistryKey = 4;
+    private const uint RegistryOptionOpenLink = 0x00000008;
+    private const uint RegistryLinkValueType = 6;
+    private const uint RegistryDeletionPreparationAccess =
+        ReadControl | WriteOwner | 0x00000001 | 0x00000008;
     private const string ServiceSidPrefix = "S-1-5-80-";
     private const string AppContainerSidPrefix = "S-1-15-2-";
     internal const string MappingRegistryPrefix =
@@ -797,6 +820,83 @@ internal static class WindowsAppContainerProfileLifecycleAccess
             managerIdentity,
             profileName,
             "storage children");
+    }
+
+    [SupportedOSPlatform("windows")]
+    public static void PrepareForDeletion(
+        string profileName,
+        string appContainerSid,
+        string managerServiceSid)
+    {
+        WindowsAppContainerSecurityCapabilities.ValidateProfileName(profileName);
+        var appContainerIdentity = ParseCanonicalAppContainerSid(appContainerSid);
+        var managerIdentity = ParseCanonicalManagerServiceSid(managerServiceSid);
+        var serviceIdentity = WindowsStationServiceIdentityReader.ReadRequired(
+            managerIdentity.Value);
+        if (!string.Equals(
+                serviceIdentity.ServiceSid,
+                managerIdentity.Value,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"AppContainer profile '{profileName}' lifecycle manager does not match the current restricted Station service.");
+        }
+
+        PrepareProfileArtifactsForDeletion(
+            profileName,
+            appContainerIdentity,
+            managerIdentity,
+            new SecurityIdentifier(serviceIdentity.HostAccountSid));
+    }
+
+    [SupportedOSPlatform("windows")]
+    internal static void PrepareProfileArtifactsForDeletionForTesting(
+        string profileName,
+        string appContainerSid,
+        SecurityIdentifier managerIdentity,
+        SecurityIdentifier hostAccountIdentity)
+    {
+        WindowsAppContainerSecurityCapabilities.ValidateProfileName(profileName);
+        ArgumentNullException.ThrowIfNull(managerIdentity);
+        ArgumentNullException.ThrowIfNull(hostAccountIdentity);
+        PrepareProfileArtifactsForDeletion(
+            profileName,
+            ParseCanonicalAppContainerSid(appContainerSid),
+            managerIdentity,
+            hostAccountIdentity);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void PrepareProfileArtifactsForDeletion(
+        string profileName,
+        SecurityIdentifier appContainerIdentity,
+        SecurityIdentifier managerIdentity,
+        SecurityIdentifier hostAccountIdentity)
+    {
+        var packageRoot = ResolveProfilePackageRoot(
+            profileName,
+            appContainerIdentity.Value);
+        if (Directory.Exists(packageRoot))
+        {
+            RestoreProfileTreeOwnerForDeletion(
+                packageRoot,
+                managerIdentity,
+                hostAccountIdentity,
+                profileName);
+        }
+
+        RestoreRegistryTreeOwnerForDeletion(
+            MappingKeyPath(appContainerIdentity.Value),
+            managerIdentity,
+            hostAccountIdentity,
+            profileName,
+            "mapping");
+        RestoreRegistryTreeOwnerForDeletion(
+            StorageKeyPath(profileName),
+            managerIdentity,
+            hostAccountIdentity,
+            profileName,
+            "storage");
     }
 
     [SupportedOSPlatform("windows")]
@@ -976,6 +1076,54 @@ internal static class WindowsAppContainerProfileLifecycleAccess
                 }
 
                 SetEntryOwner(ownershipEntry, managerIdentity, profileName);
+                VerifyStableEntry(ownershipEntry, profileName);
+            }
+
+            VerifyStableProfileTree(entries, profileName);
+        }
+        finally
+        {
+            for (var index = entries.Count - 1; index >= 0; index--)
+            {
+                entries[index].Dispose();
+            }
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void RestoreProfileTreeOwnerForDeletion(
+        string packageRoot,
+        SecurityIdentifier managerIdentity,
+        SecurityIdentifier hostAccountIdentity,
+        string profileName)
+    {
+        var entries = OpenAndValidateProfileTree(packageRoot, profileName);
+        try
+        {
+            VerifyStableProfileTree(entries, profileName);
+            foreach (var entry in entries
+                         .OrderByDescending(static candidate => candidate.Depth))
+            {
+                using var ownershipEntry = OpenStableEntry(
+                    entry.Path,
+                    entry.Depth,
+                    profileName,
+                    OwnershipFileAccess);
+                if (ownershipEntry.Snapshot != entry.Snapshot)
+                {
+                    throw new InvalidDataException(
+                        $"AppContainer profile '{profileName}' entry changed before deletion ownership preparation.");
+                }
+
+                VerifyEntryManagerControlForDeletion(
+                    ownershipEntry,
+                    managerIdentity,
+                    profileName);
+                SetEntryDeletionOwner(
+                    ownershipEntry,
+                    managerIdentity,
+                    hostAccountIdentity,
+                    profileName);
                 VerifyStableEntry(ownershipEntry, profileName);
             }
 
@@ -1320,6 +1468,39 @@ internal static class WindowsAppContainerProfileLifecycleAccess
     }
 
     [SupportedOSPlatform("windows")]
+    private static void SetEntryDeletionOwner(
+        StableProfileEntry entry,
+        SecurityIdentifier managerIdentity,
+        SecurityIdentifier hostAccountIdentity,
+        string profileName)
+    {
+        var security = ReadEntrySecurity(entry, profileName);
+        security.SetOwner(hostAccountIdentity);
+        WriteEntrySecurity(
+            entry,
+            security,
+            OwnerSecurityInformation,
+            profileName);
+
+        var prepared = ReadEntrySecurity(entry, profileName);
+        if (prepared.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner
+            || !string.Equals(
+                owner.Value,
+                hostAccountIdentity.Value,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"AppContainer profile '{profileName}' entry owner was not restored to its current host account.");
+        }
+
+        VerifyManagerFileSystemControl(
+            prepared,
+            managerIdentity,
+            profileName,
+            "entry");
+    }
+
+    [SupportedOSPlatform("windows")]
     private static FileSystemSecurity ReadEntrySecurity(
         StableProfileEntry entry,
         string profileName)
@@ -1471,6 +1652,52 @@ internal static class WindowsAppContainerProfileLifecycleAccess
     }
 
     [SupportedOSPlatform("windows")]
+    private static void VerifyEntryManagerControlForDeletion(
+        StableProfileEntry entry,
+        SecurityIdentifier managerIdentity,
+        string profileName)
+    {
+        VerifyManagerFileSystemControl(
+            ReadEntrySecurity(entry, profileName),
+            managerIdentity,
+            profileName,
+            "entry");
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyManagerFileSystemControl(
+        FileSystemSecurity security,
+        SecurityIdentifier managerIdentity,
+        string profileName,
+        string description)
+    {
+        var rules = security
+            .GetAccessRules(
+                includeExplicit: true,
+                includeInherited: true,
+                typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .Where(rule =>
+                rule.IdentityReference is SecurityIdentifier identity
+                && string.Equals(
+                    identity.Value,
+                    managerIdentity.Value,
+                    StringComparison.Ordinal))
+            .ToArray();
+        if (rules.Any(rule =>
+                rule.AccessControlType == AccessControlType.Deny
+                && (rule.FileSystemRights & FileSystemRights.FullControl) != 0)
+            || !rules.Any(rule =>
+                rule.AccessControlType == AccessControlType.Allow
+                && (rule.FileSystemRights & FileSystemRights.FullControl)
+                == FileSystemRights.FullControl))
+        {
+            throw new InvalidDataException(
+                $"AppContainer profile '{profileName}' {description} no longer grants its exact lifecycle manager FullControl.");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
     private static StableFileSnapshot ReadStableSnapshot(SafeFileHandle handle)
     {
         if (!GetFileInformationByHandle(handle, out var information))
@@ -1556,6 +1783,502 @@ internal static class WindowsAppContainerProfileLifecycleAccess
         return path.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)
             ? path[4..]
             : path;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void RestoreRegistryTreeOwnerForDeletion(
+        string keyPath,
+        SecurityIdentifier managerIdentity,
+        SecurityIdentifier hostAccountIdentity,
+        string profileName,
+        string description)
+    {
+        var entries = OpenAndValidateRegistryTree(
+            keyPath,
+            profileName,
+            description);
+        try
+        {
+            foreach (var entry in entries
+                         .OrderByDescending(static candidate => candidate.Depth))
+            {
+                VerifyStableRegistryEntry(entry, profileName, description);
+                using var currentPathEntry = OpenVerifiedCurrentRegistryEntry(
+                    keyPath,
+                    entry,
+                    profileName,
+                    description);
+                var security = currentPathEntry.GetAccessControl(
+                    AccessControlSections.Owner | AccessControlSections.Access);
+                VerifyManagerRegistryControl(
+                    security,
+                    managerIdentity,
+                    profileName,
+                    entry.Path);
+                WriteRegistryOwner(
+                    currentPathEntry.Handle,
+                    security,
+                    hostAccountIdentity,
+                    profileName,
+                    entry.Path);
+
+                VerifyRegistryDeletionOwner(
+                    currentPathEntry,
+                    managerIdentity,
+                    hostAccountIdentity,
+                    profileName,
+                    entry.Path);
+            }
+
+            foreach (var entry in entries)
+            {
+                VerifyStableRegistryEntry(entry, profileName, description);
+                using var currentPathEntry = OpenVerifiedCurrentRegistryEntry(
+                    keyPath,
+                    entry,
+                    profileName,
+                    description);
+                VerifyRegistryDeletionOwner(
+                    currentPathEntry,
+                    managerIdentity,
+                    hostAccountIdentity,
+                    profileName,
+                    entry.Path);
+            }
+        }
+        finally
+        {
+            for (var index = entries.Count - 1; index >= 0; index--)
+            {
+                entries[index].Dispose();
+            }
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static List<StableRegistryEntry> OpenAndValidateRegistryTree(
+        string keyPath,
+        string profileName,
+        string description)
+    {
+        var root = OpenRegistryKeyWithoutFollowingLinks(
+            Registry.CurrentUser.Handle,
+            keyPath,
+            allowMissing: true,
+            profileName);
+        if (root is null)
+        {
+            return [];
+        }
+
+        var entries = new List<StableRegistryEntry>();
+        try
+        {
+            entries.Add(new StableRegistryEntry(keyPath, depth: 0, root));
+            for (var entryIndex = 0; entryIndex < entries.Count; entryIndex++)
+            {
+                var entry = entries[entryIndex];
+                RejectRegistryLink(entry.Key, profileName, entry.Path);
+                if (entry.Depth >= MaximumProfileDepth)
+                {
+                    var childrenAtLimit = EnumerateRegistryChildNames(
+                        entry.Key,
+                        profileName,
+                        entry.Path);
+                    if (childrenAtLimit.Length > 0)
+                    {
+                        throw new InvalidDataException(
+                            $"AppContainer profile '{profileName}' {description} registry tree exceeds the bounded lifecycle depth.");
+                    }
+
+                    entry.SetChildren([]);
+                    continue;
+                }
+
+                var children = EnumerateRegistryChildNames(
+                    entry.Key,
+                    profileName,
+                    entry.Path);
+                entry.SetChildren(children);
+                foreach (var childName in children)
+                {
+                    if (entries.Count >= MaximumProfileEntries)
+                    {
+                        throw new InvalidDataException(
+                            $"AppContainer profile '{profileName}' {description} registry tree exceeds the bounded lifecycle entry count.");
+                    }
+
+                    var childPath = entry.Path + "\\" + childName;
+                    var child = OpenRegistryKeyWithoutFollowingLinks(
+                        entry.Key.Handle,
+                        childName,
+                        allowMissing: false,
+                        profileName)
+                        ?? throw new InvalidDataException(
+                            $"AppContainer profile '{profileName}' registry key '{childPath}' disappeared.");
+                    entries.Add(new StableRegistryEntry(
+                        childPath,
+                        checked(entry.Depth + 1),
+                        child));
+                }
+            }
+
+            return entries;
+        }
+        catch
+        {
+            for (var index = entries.Count - 1; index >= 0; index--)
+            {
+                entries[index].Dispose();
+            }
+
+            throw;
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static RegistryKey? OpenRegistryKeyWithoutFollowingLinks(
+        SafeRegistryHandle parent,
+        string keyPath,
+        bool allowMissing,
+        string profileName)
+    {
+        var result = RegOpenKeyEx(
+            parent,
+            keyPath,
+            RegistryOptionOpenLink,
+            RegistryDeletionPreparationAccess,
+            out var handle);
+        if (result == ErrorFileNotFound && allowMissing)
+        {
+            handle?.Dispose();
+            return null;
+        }
+
+        if (result != ErrorSuccess || handle is null || handle.IsInvalid)
+        {
+            handle?.Dispose();
+            throw new Win32Exception(
+                result,
+                $"Could not open AppContainer profile '{profileName}' registry key '{keyPath}' without following links.");
+        }
+
+        return RegistryKey.FromHandle(handle, RegistryView.Default);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static string[] EnumerateRegistryChildNames(
+        RegistryKey key,
+        string profileName,
+        string keyPath)
+    {
+        var names = new List<string>();
+        for (var index = 0u; ; index++)
+        {
+            var name = new char[MaximumRegistryKeyNameLength + 1];
+            var nameLength = checked((uint)name.Length);
+            var result = RegEnumKeyEx(
+                key.Handle,
+                index,
+                name,
+                ref nameLength,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero);
+            if (result == ErrorNoMoreItems)
+            {
+                break;
+            }
+
+            if (result == ErrorMoreData)
+            {
+                throw new InvalidDataException(
+                    $"AppContainer profile '{profileName}' registry key '{keyPath}' contains an overlong child name.");
+            }
+
+            if (result != ErrorSuccess)
+            {
+                throw new Win32Exception(
+                    result,
+                    $"Could not enumerate AppContainer profile '{profileName}' registry key '{keyPath}'.");
+            }
+
+            var childName = new string(name, 0, checked((int)nameLength));
+            if (childName.Length == 0
+                || childName.Length > MaximumRegistryKeyNameLength
+                || childName.Contains('\\', StringComparison.Ordinal)
+                || childName.Contains('\0', StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"AppContainer profile '{profileName}' registry key '{keyPath}' contains a non-canonical child name.");
+            }
+
+            names.Add(childName);
+        }
+
+        return names
+            .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(static name => name, StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void RejectRegistryLink(
+        RegistryKey key,
+        string profileName,
+        string keyPath)
+    {
+        uint valueType;
+        uint valueLength = 0;
+        var result = RegQueryValueEx(
+            key.Handle,
+            "SymbolicLinkValue",
+            IntPtr.Zero,
+            out valueType,
+            IntPtr.Zero,
+            ref valueLength);
+        if (result == ErrorFileNotFound)
+        {
+            return;
+        }
+
+        if (result is not (0 or ErrorMoreData))
+        {
+            throw new Win32Exception(
+                result,
+                $"Could not inspect AppContainer profile '{profileName}' registry key '{keyPath}' link state.");
+        }
+
+        if (valueType == RegistryLinkValueType)
+        {
+            throw new InvalidDataException(
+                $"AppContainer profile '{profileName}' registry key '{keyPath}' cannot be a symbolic link.");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyStableRegistryEntry(
+        StableRegistryEntry entry,
+        string profileName,
+        string description)
+    {
+        VerifyRegistryPathEntry(
+            entry.Key,
+            entry,
+            profileName,
+            description);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static RegistryKey OpenVerifiedCurrentRegistryEntry(
+        string rootPath,
+        StableRegistryEntry entry,
+        string profileName,
+        string description)
+    {
+        var rootPrefix = rootPath + "\\";
+        string[] relativeComponents;
+        if (string.Equals(entry.Path, rootPath, StringComparison.OrdinalIgnoreCase))
+        {
+            relativeComponents = [];
+        }
+        else if (entry.Path.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            relativeComponents = entry.Path[rootPrefix.Length..]
+                .Split('\\', StringSplitOptions.None);
+        }
+        else
+        {
+            throw new InvalidDataException(
+                $"AppContainer profile '{profileName}' registry key '{entry.Path}' is outside its exact {description} root.");
+        }
+
+        if (relativeComponents.Length != entry.Depth
+            || relativeComponents.Any(static component =>
+                component.Length == 0
+                || component.Contains('\\', StringComparison.Ordinal)
+                || component.Contains('\0', StringComparison.Ordinal)))
+        {
+            throw new InvalidDataException(
+                $"AppContainer profile '{profileName}' registry key '{entry.Path}' has a non-canonical {description} path.");
+        }
+
+        var current = OpenRegistryKeyWithoutFollowingLinks(
+            Registry.CurrentUser.Handle,
+            rootPath,
+            allowMissing: false,
+            profileName)
+            ?? throw new InvalidDataException(
+                $"AppContainer profile '{profileName}' registry root '{rootPath}' disappeared.");
+        var currentPath = rootPath;
+        try
+        {
+            RejectRegistryLink(current, profileName, currentPath);
+            foreach (var component in relativeComponents)
+            {
+                var childPath = currentPath + "\\" + component;
+                var child = OpenRegistryKeyWithoutFollowingLinks(
+                    current.Handle,
+                    component,
+                    allowMissing: false,
+                    profileName)
+                    ?? throw new InvalidDataException(
+                        $"AppContainer profile '{profileName}' registry key '{childPath}' disappeared.");
+                try
+                {
+                    RejectRegistryLink(child, profileName, childPath);
+                }
+                catch
+                {
+                    child.Dispose();
+                    throw;
+                }
+
+                current.Dispose();
+                current = child;
+                currentPath = childPath;
+            }
+
+            VerifyRegistryPathEntry(
+                current,
+                entry,
+                profileName,
+                description);
+            return current;
+        }
+        catch
+        {
+            current.Dispose();
+            throw;
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyRegistryPathEntry(
+        RegistryKey key,
+        StableRegistryEntry entry,
+        string profileName,
+        string description)
+    {
+        RejectRegistryLink(key, profileName, entry.Path);
+        var currentChildren = EnumerateRegistryChildNames(
+            key,
+            profileName,
+            entry.Path);
+        if (!currentChildren.SequenceEqual(
+                entry.Children,
+                StringComparer.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"AppContainer profile '{profileName}' {description} registry tree changed during deletion ownership preparation.");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyRegistryDeletionOwner(
+        RegistryKey key,
+        SecurityIdentifier managerIdentity,
+        SecurityIdentifier hostAccountIdentity,
+        string profileName,
+        string keyPath)
+    {
+        var prepared = key.GetAccessControl(
+            AccessControlSections.Owner | AccessControlSections.Access);
+        if (prepared.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner
+            || !string.Equals(
+                owner.Value,
+                hostAccountIdentity.Value,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"AppContainer profile '{profileName}' registry key '{keyPath}' owner was not restored to its current host account.");
+        }
+
+        VerifyManagerRegistryControl(
+            prepared,
+            managerIdentity,
+            profileName,
+            keyPath);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void VerifyManagerRegistryControl(
+        RegistrySecurity security,
+        SecurityIdentifier managerIdentity,
+        string profileName,
+        string keyPath)
+    {
+        var rules = security
+            .GetAccessRules(
+                includeExplicit: true,
+                includeInherited: true,
+                typeof(SecurityIdentifier))
+            .Cast<RegistryAccessRule>()
+            .Where(rule =>
+                rule.IdentityReference is SecurityIdentifier identity
+                && string.Equals(
+                    identity.Value,
+                    managerIdentity.Value,
+                    StringComparison.Ordinal))
+            .ToArray();
+        if (rules.Any(rule =>
+                rule.AccessControlType == AccessControlType.Deny
+                && (rule.RegistryRights & RegistryRights.FullControl) != 0)
+            || !rules.Any(rule =>
+                rule.AccessControlType == AccessControlType.Allow
+                && (rule.RegistryRights & RegistryRights.FullControl)
+                == RegistryRights.FullControl))
+        {
+            throw new InvalidDataException(
+                $"AppContainer profile '{profileName}' registry key '{keyPath}' no longer grants its exact lifecycle manager FullControl.");
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void WriteRegistryOwner(
+        SafeRegistryHandle key,
+        RegistrySecurity security,
+        SecurityIdentifier hostAccountIdentity,
+        string profileName,
+        string keyPath)
+    {
+        security.SetOwner(hostAccountIdentity);
+        var descriptor = security.GetSecurityDescriptorBinaryForm();
+        var pin = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
+        try
+        {
+            var pointer = pin.AddrOfPinnedObject();
+            if (!GetSecurityDescriptorOwner(
+                    pointer,
+                    out var owner,
+                    out _)
+                || owner == IntPtr.Zero)
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    $"Could not read AppContainer profile '{profileName}' registry key '{keyPath}' deletion owner.");
+            }
+
+            var result = SetRegistrySecurityInfo(
+                key,
+                SeRegistryKey,
+                OwnerSecurityInformation,
+                owner,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero);
+            if (result != ErrorSuccess)
+            {
+                throw new Win32Exception(
+                    checked((int)result),
+                    $"Could not restore AppContainer profile '{profileName}' registry key '{keyPath}' owner.");
+            }
+        }
+        finally
+        {
+            pin.Free();
+        }
     }
 
     [SupportedOSPlatform("windows")]
@@ -1690,6 +2413,40 @@ internal static class WindowsAppContainerProfileLifecycleAccess
         }
     }
 
+    [SupportedOSPlatform("windows")]
+    private sealed class StableRegistryEntry : IDisposable
+    {
+        private string[] _children = [];
+
+        public StableRegistryEntry(
+            string path,
+            int depth,
+            RegistryKey key)
+        {
+            Path = path;
+            Depth = depth;
+            Key = key;
+        }
+
+        public string Path { get; }
+
+        public int Depth { get; }
+
+        public RegistryKey Key { get; }
+
+        public IReadOnlyCollection<string> Children => _children;
+
+        public void SetChildren(string[] children)
+        {
+            _children = children;
+        }
+
+        public void Dispose()
+        {
+            Key.Dispose();
+        }
+    }
+
     private readonly record struct StableFileIdentity(
         ulong VolumeSerialNumber,
         ulong FileIdLow,
@@ -1784,6 +2541,44 @@ internal static class WindowsAppContainerProfileLifecycleAccess
         IntPtr group,
         IntPtr dacl,
         IntPtr sacl);
+
+    [DllImport("advapi32.dll", EntryPoint = "SetSecurityInfo", SetLastError = true)]
+    private static extern uint SetRegistrySecurityInfo(
+        SafeRegistryHandle handle,
+        uint objectType,
+        uint securityInformation,
+        IntPtr owner,
+        IntPtr group,
+        IntPtr dacl,
+        IntPtr sacl);
+
+    [DllImport("advapi32.dll", EntryPoint = "RegOpenKeyExW", CharSet = CharSet.Unicode)]
+    private static extern int RegOpenKeyEx(
+        SafeRegistryHandle key,
+        string subKey,
+        uint options,
+        uint desiredAccess,
+        out SafeRegistryHandle result);
+
+    [DllImport("advapi32.dll", EntryPoint = "RegEnumKeyExW", CharSet = CharSet.Unicode)]
+    private static extern int RegEnumKeyEx(
+        SafeRegistryHandle key,
+        uint index,
+        [Out] char[] name,
+        ref uint nameLength,
+        IntPtr reserved,
+        IntPtr keyClass,
+        IntPtr keyClassLength,
+        IntPtr lastWriteTime);
+
+    [DllImport("advapi32.dll", EntryPoint = "RegQueryValueExW", CharSet = CharSet.Unicode)]
+    private static extern int RegQueryValueEx(
+        SafeRegistryHandle key,
+        string valueName,
+        IntPtr reserved,
+        out uint valueType,
+        IntPtr data,
+        ref uint dataLength);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern uint GetSecurityDescriptorLength(IntPtr securityDescriptor);

@@ -562,6 +562,7 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
         var process = new FailingCleanupIsolatedProcess();
         var profileDeletionAttempts = 0;
         string? invocationProfileName = null;
+        string? invocationLifecycleManagerServiceSid = "unexpected";
         try
         {
             var result = await ProjectReleaseExternalProgramCommandExecutor.ExecuteAsync(
@@ -571,9 +572,11 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
                 AllowFences,
                 CreateHost(
                     processLauncher: _ => process,
-                    deleteAppContainerProfile: profileName =>
+                    deleteAppContainerProfile: (profileName, lifecycleManagerServiceSid) =>
                     {
                         invocationProfileName = profileName;
+                        invocationLifecycleManagerServiceSid =
+                            lifecycleManagerServiceSid;
                         profileDeletionAttempts++;
                         if (profileDeletionAttempts < 3)
                         {
@@ -603,6 +606,7 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
             Assert.True(process.Disposed);
             Assert.Equal(3, profileDeletionAttempts);
             Assert.NotNull(invocationProfileName);
+            Assert.Null(invocationLifecycleManagerServiceSid);
             Assert.False(WindowsAppContainerIdentity.ProfileExists(invocationProfileName));
             Assert.Empty(Directory.EnumerateFileSystemEntries(
                 Path.Combine(_hostRoot, "workspaces")));
@@ -642,7 +646,7 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
                 CreateHost(
                     processLauncher: _ => throw new FormatException(
                         "synthetic unexpected process launch failure"),
-                    deleteAppContainerProfile: profileName =>
+                    deleteAppContainerProfile: (profileName, _) =>
                     {
                         invocationProfileName = profileName;
                         throw new FormatException(
@@ -705,7 +709,7 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
                 CreateHost(
                     processLauncher: _ => throw new FormatException(
                         "synthetic launch failure"),
-                    deleteAppContainerProfile: profileName =>
+                    deleteAppContainerProfile: (profileName, _) =>
                     {
                         invocationProfileName = profileName;
                         deletionAttempts++;
@@ -954,7 +958,7 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
     private ExternalProgramHost CreateHost(
         int maximumStandardOutputBytes = 4 * 1024 * 1024,
         Func<IsolatedProcessStartRequest, IIsolatedProcess>? processLauncher = null,
-        Func<string, bool>? deleteAppContainerProfile = null,
+        Func<string, string?, bool>? deleteAppContainerProfile = null,
         Func<string, WindowsAppContainerProfileArtifactState>?
             appContainerProfileArtifactsProbe = null,
         Func<TimeSpan, CancellationToken, ValueTask>? cleanupRetryDelay = null,

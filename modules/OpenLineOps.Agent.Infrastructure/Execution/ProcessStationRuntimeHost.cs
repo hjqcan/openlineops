@@ -59,7 +59,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
     private readonly string _hostPythonRuntimeDllPath;
     private readonly StationRuntimePythonScriptSandboxOptions _pythonScriptSandbox;
     private readonly IStationResourceFenceValidator _resourceFenceValidator;
-    private readonly Func<string, bool> _deleteAppContainerProfile;
+    private readonly Func<string, string?, bool> _deleteAppContainerProfile;
     private readonly Func<string, WindowsAppContainerProfileArtifactState>
         _appContainerProfileArtifactsProbe;
     private readonly Func<TimeSpan, CancellationToken, ValueTask> _retryDelay;
@@ -74,7 +74,10 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             resourceFenceValidator,
             processLauncher,
             clock,
-            WindowsAppContainerIdentity.DeleteProfile,
+            static (profileName, profileLifecycleManagerServiceSid) =>
+                WindowsAppContainerIdentity.DeleteProfile(
+                    profileName,
+                    profileLifecycleManagerServiceSid),
             WindowsAppContainerIdentity.ProbeProfileArtifacts,
             static (delay, cancellationToken) =>
                 new ValueTask(Task.Delay(delay, cancellationToken)))
@@ -86,7 +89,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         IStationResourceFenceValidator resourceFenceValidator,
         IsolatedProcessLauncher? processLauncher,
         IClock? clock,
-        Func<string, bool> deleteAppContainerProfile,
+        Func<string, string?, bool> deleteAppContainerProfile,
         Func<string, WindowsAppContainerProfileArtifactState>
             appContainerProfileArtifactsProbe,
         Func<TimeSpan, CancellationToken, ValueTask> retryDelay)
@@ -549,8 +552,10 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             }
             catch (Exception exception) when (exception is IOException
                                               or Win32Exception
+                                              or UnauthorizedAccessException
                                               or ArgumentException
-                                              or InvalidOperationException)
+                                              or InvalidOperationException
+                                              or System.Security.SecurityException)
             {
                 failures.Add(CreateIsolationCleanupFailure(
                     "app-container-profile",
@@ -606,7 +611,11 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var deletionReported = _deleteAppContainerProfile(profileName);
+                var deletionReported = _deleteAppContainerProfile(
+                    profileName,
+                    _requireRestrictedExternalProgramHostIdentity
+                        ? _restrictedServiceSid
+                        : null);
                 var artifacts = _appContainerProfileArtifactsProbe(profileName);
                 if (!artifacts.AnyArtifactsExist)
                 {
