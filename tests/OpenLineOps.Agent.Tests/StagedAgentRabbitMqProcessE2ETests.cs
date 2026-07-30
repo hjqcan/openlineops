@@ -71,6 +71,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
         RespectRequiredConstructorParameters = true
     };
+    private static readonly TimeSpan AgentRuntimeTimeout = TimeSpan.FromSeconds(30);
     private const string AgentBundleRootVariable = "OPENLINEOPS_STAGED_AGENT_BUNDLE_ROOT";
     private const string SamplePluginRootVariable = "OPENLINEOPS_STAGED_SAMPLE_PLUGIN_ROOT";
     private const string ApiBundleRootVariable = "OPENLINEOPS_STAGED_API_BUNDLE_ROOT";
@@ -522,21 +523,29 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
             await coordinator.PublishAsync(leaseChange);
             await coordinator.PublishAsync(request);
-            await WaitUntilAsync(
-                async () => (await coordinationStore.ListEventsAsync(request.JobId))
-                    .Any(item => item.Kind == nameof(StationJobAccepted)),
+            stationStore = new SqliteStationJobStore(
+                $"Data Source={sqlitePath};Pooling=False");
+            await WaitForStationJobProgressPhaseAsync(
+                stationStore,
+                request.IdempotencyKey,
+                "starting-runtime",
                 agent,
-                TimeSpan.FromSeconds(30),
-                "Coordinator did not receive StationJobAccepted before the broker outage.");
+                AgentRuntimeTimeout);
             var appContainerProfileLifecycle =
                 await WaitForRestrictedServiceAppContainerProfileLifecycleAsync(
                     externalProgramProfileName,
                     agentIdentity.Sid,
+                    stationStore,
+                    request.IdempotencyKey,
                     agent,
-                    TimeSpan.FromSeconds(10));
+                    AgentRuntimeTimeout);
+            await WaitUntilAsync(
+                async () => (await coordinationStore.ListEventsAsync(request.JobId))
+                    .Any(item => item.Kind == nameof(StationJobAccepted)),
+                agent,
+                AgentRuntimeTimeout,
+                "Coordinator did not persist StationJobAccepted before the broker outage.");
 
-            stationStore = new SqliteStationJobStore(
-                $"Data Source={sqlitePath};Pooling=False");
             brokerOutage = RabbitMqWindowsServiceOutage.CreateRequired(
                 prerequisites.BrokerUri);
             await brokerOutage.StopAsync(TimeSpan.FromSeconds(45));
@@ -2573,7 +2582,9 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         Set("CoordinatorBaseUri", coordinatorBaseUri.AbsoluteUri);
         Set("ArtifactUploadBearerToken", artifactUploadBearerToken);
         Set("ArtifactUploadTimeout", "00:01:00");
-        Set("RuntimeTimeout", "00:00:30");
+        Set(
+            "RuntimeTimeout",
+            AgentRuntimeTimeout.ToString("c", CultureInfo.InvariantCulture));
         Set("MaximumRuntimeOutputBytes", (2 * 1024 * 1024).ToString(CultureInfo.InvariantCulture));
         Set("ExternalProgramAppContainerProfileNamespace", $"OpenLineOps.StagedRmq.{suffix}");
         Set("SafetyExecutablePath", safetyExecutable);
@@ -2785,6 +2796,84 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         return phase.GetString()!;
     }
 
+    [SupportedOSPlatform("windows")]
+    private static async Task WaitForStationJobProgressPhaseAsync(
+        SqliteStationJobStore stationStore,
+        string idempotencyKey,
+        string phase,
+        WindowsAgentProcess agent,
+        TimeSpan timeout)
+    {
+        var elapsed = Stopwatch.StartNew();
+        StationJobSnapshot? lastJob = null;
+        var attempts = 0;
+        while (elapsed.Elapsed < timeout)
+        {
+            if (agent.HasExited)
+            {
+                throw new InvalidOperationException(
+                    $"The staged Agent exited before Station Job progress phase '{phase}' "
+                    + $"could be observed (exit code {agent.ExitCode}).");
+            }
+
+            attempts++;
+            var persisted = await stationStore.GetByIdempotencyKeyAsync(
+                idempotencyKey);
+            lastJob = persisted?.Job;
+            ThrowIfStationJobTerminatedBeforeLifecycle(
+                lastJob,
+                $"progress phase '{phase}'");
+            if (lastJob is
+                {
+                    Status: StationJobStatus.Running,
+                    ProgressPhase: not null
+                }
+                && string.Equals(
+                    lastJob.ProgressPhase,
+                    phase,
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            await Task.Delay(50);
+        }
+
+        throw new TimeoutException(
+            $"Station Job did not persist progress phase '{phase}' within "
+            + $"{timeout}. Attempts: {attempts}. Last state: "
+            + DescribeStationJobState(lastJob));
+    }
+
+    private static void ThrowIfStationJobTerminatedBeforeLifecycle(
+        StationJobSnapshot? job,
+        string boundary)
+    {
+        if (job?.Status is not (
+                StationJobStatus.Completed
+                or StationJobStatus.Failed
+                or StationJobStatus.TimedOut
+                or StationJobStatus.Canceled
+                or StationJobStatus.Rejected
+                or StationJobStatus.RecoveryRequired))
+        {
+            return;
+        }
+
+        throw new InvalidDataException(
+            $"Station Job reached terminal status {job.Status} before {boundary}. "
+            + $"FailureCode={job.FailureCode ?? "none"}; "
+            + $"FailureReason={job.FailureReason ?? "none"}; "
+            + $"ProgressPhase={job.ProgressPhase ?? "none"}.");
+    }
+
+    private static string DescribeStationJobState(StationJobSnapshot? job) =>
+        job is null
+            ? "missing"
+            : $"Status={job.Status}; ProgressPhase={job.ProgressPhase ?? "none"}; "
+              + $"FailureCode={job.FailureCode ?? "none"}; "
+              + $"FailureReason={job.FailureReason ?? "none"}";
+
     private static async ValueTask<ProductionLineStationState> ReadPresenceStationAsync(
         ProductionLineRuntimeStateReader reader)
     {
@@ -2849,6 +2938,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         WaitForRestrictedServiceAppContainerProfileLifecycleAsync(
             string profileName,
             string managerServiceSid,
+            SqliteStationJobStore stationStore,
+            string idempotencyKey,
             WindowsAgentProcess agent,
             TimeSpan timeout)
     {
@@ -2872,6 +2963,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         ];
         var elapsed = Stopwatch.StartNew();
         Exception? lastFailure = null;
+        StationJobSnapshot? lastJob = null;
+        var attempts = 0;
         while (elapsed.Elapsed < timeout)
         {
             if (agent.HasExited)
@@ -2881,6 +2974,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
                     + $"could be inspected (exit code {agent.ExitCode}).");
             }
 
+            attempts++;
+            var persisted = await stationStore.GetByIdempotencyKeyAsync(
+                idempotencyKey);
+            lastJob = persisted?.Job;
+            ThrowIfStationJobTerminatedBeforeLifecycle(
+                lastJob,
+                $"AppContainer profile '{profileName}' lifecycle inspection");
             try
             {
                 VerifyAppContainerProfileDirectoryLifecycleAccess(
@@ -2919,6 +3019,8 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
         throw new TimeoutException(
             $"The restricted-service AppContainer profile '{profileName}' did not expose "
             + "its exact directory and four-registry-leaf lifecycle ACLs within the gate bound. "
+            + $"Resolved package root: '{packageRoot}'. Attempts: {attempts}. "
+            + $"Last Station Job state: {DescribeStationJobState(lastJob)}. "
             + $"Last inspection failure: {lastFailure?.Message ?? "profile was absent"}",
             lastFailure);
     }
