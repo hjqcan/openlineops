@@ -42,7 +42,7 @@ public sealed class PluginRuntimeCommandExecutor : IRuntimeCommandExecutor
                 $"Immutable release does not contain exactly one locked plugin command for capability '{context.TargetCapability.Value}' and command '{context.CommandName}'.");
         }
 
-        var packageIdentity = new PluginPackageRuntimeIdentity(
+        var runtimeIdentity = new PluginPackageRuntimeIdentity(
             releaseCommand.PluginId,
             releaseCommand.PackageVersion,
             releaseCommand.PackageContentSha256,
@@ -51,11 +51,16 @@ public sealed class PluginRuntimeCommandExecutor : IRuntimeCommandExecutor
             releaseCommand.ContractVersion,
             releaseCommand.RuntimeIdentifier,
             releaseCommand.AbiVersion);
-        if (!packageIdentity.IsComplete)
+        if (!runtimeIdentity.IsComplete)
         {
             return RuntimeCommandExecutionResult.Rejected(
-                $"Immutable release plugin package identity for '{releaseCommand.PluginId}' is incomplete.");
+                "Plugin process execution was rejected because the immutable frozen package identity is incomplete.");
         }
+
+        var packageIdentity = new PluginPackageExecutionIdentity(
+            context.ProjectId,
+            context.ApplicationId,
+            runtimeIdentity);
 
         var invocationResult = await _commandInvoker
             .ExecuteAsync(

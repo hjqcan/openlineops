@@ -39,9 +39,22 @@ public static class EngineeringConfigurationMapper
             recipe.Status.ToString(),
             recipe.CreatedAtUtc,
             recipe.PublishedAtUtc,
+            recipe.ValidatedAtUtc,
+            recipe.ApprovedAtUtc,
+            recipe.ApprovedBy,
+            recipe.ReleasedAtUtc,
+            recipe.RetiredAtUtc,
             recipe.Parameters
                 .OrderBy(parameter => parameter.Key, StringComparer.Ordinal)
-                .Select(parameter => new RecipeParameterDetails(parameter.Key, parameter.Value))
+                .Select(parameter => new RecipeParameterDetails(
+                    parameter.Key,
+                    parameter.Value,
+                    parameter.Type.ToString(),
+                    parameter.Unit,
+                    parameter.Minimum,
+                    parameter.Maximum,
+                    parameter.AllowedValues,
+                    parameter.Required))
                 .ToArray());
     }
 

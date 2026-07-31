@@ -12,12 +12,23 @@ public sealed class AgentStationSafetyController(
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (request.RequestedAtUtc == default || request.RequestedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentException(
+                "Station Safe Stop request timestamp must be non-default UTC.",
+                nameof(request));
+        }
+
         var stations = request.Run.Operations
-            .Where(operation => !IsTerminal(operation.ExecutionStatus))
+            .Where(operation => operation.StartedAtUtc is { } startedAtUtc
+                && startedAtUtc <= request.RequestedAtUtc
+                && (operation.CompletedAtUtc is null
+                    || operation.CompletedAtUtc >= request.RequestedAtUtc))
             .GroupBy(
                 operation => operation.Definition.StationSystemId,
                 StringComparer.Ordinal)
             .ToArray();
+        var acknowledgedAtUtc = request.RequestedAtUtc;
         foreach (var station in stations)
         {
             var route = await deploymentResolver.ResolveAsync(
@@ -39,11 +50,12 @@ public sealed class AgentStationSafetyController(
 
             var operationRunId = station
                 .OrderByDescending(static operation => operation.Attempt)
+                .ThenBy(static operation => operation.OperationRunId, StringComparer.Ordinal)
                 .Select(static operation => operation.OperationRunId)
                 .FirstOrDefault();
-            var idempotencyKey = $"{request.Run.RunId.Value:D}/safe-stop/{station.Key}";
+            var idempotencyKey = $"{request.Run.RunId.Value:D}/safe-stop/{station.Key}/{operationRunId}";
             var message = new StationSafeStopRequested(
-                Guid.NewGuid(),
+                StationJobIdentity.CreateSafetyMessageId(idempotencyKey),
                 idempotencyKey,
                 route.AgentId,
                 route.StationId,
@@ -52,7 +64,7 @@ public sealed class AgentStationSafetyController(
                 operationRunId,
                 request.ActorId,
                 request.Reason,
-                DateTimeOffset.UtcNow);
+                request.RequestedAtUtc);
             var acknowledgement = await gateway.RequestSafeStopAsync(message, cancellationToken)
                 .ConfigureAwait(false);
             if (acknowledgement.RequestMessageId != message.MessageId
@@ -80,15 +92,13 @@ public sealed class AgentStationSafetyController(
                     acknowledgement.FailureCode ?? "Runtime.SafeStopRejected",
                     acknowledgement.FailureReason ?? "Station Agent rejected Safe Stop.");
             }
+
+            if (acknowledgement.AcknowledgedAtUtc > acknowledgedAtUtc)
+            {
+                acknowledgedAtUtc = acknowledgement.AcknowledgedAtUtc;
+            }
         }
 
-        return StationSafetyResult.Success();
+        return StationSafetyResult.Success(acknowledgedAtUtc);
     }
-
-    private static bool IsTerminal(OpenLineOps.Runtime.Contracts.ExecutionStatus status) => status is
-        OpenLineOps.Runtime.Contracts.ExecutionStatus.Completed
-        or OpenLineOps.Runtime.Contracts.ExecutionStatus.Failed
-        or OpenLineOps.Runtime.Contracts.ExecutionStatus.TimedOut
-        or OpenLineOps.Runtime.Contracts.ExecutionStatus.Canceled
-        or OpenLineOps.Runtime.Contracts.ExecutionStatus.Rejected;
 }

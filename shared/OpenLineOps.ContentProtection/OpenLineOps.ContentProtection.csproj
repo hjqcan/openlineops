@@ -6,4 +6,8 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\OpenLineOps.WindowsSecurity\OpenLineOps.WindowsSecurity.csproj" />
+  </ItemGroup>
+
 </Project>

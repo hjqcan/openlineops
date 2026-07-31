@@ -1,0 +1,63 @@
+{
+  "id": "openlineops.builtin.device-sessions",
+  "name": "Industrial Device Sessions",
+  "version": "0.1.0",
+  "kind": "DeviceDriver",
+  "entryAssembly": "OpenLineOps.BuiltinPlugins.DeviceSessions.dll",
+  "entryType": "OpenLineOps.BuiltinPlugins.DeviceSessions.IndustrialDeviceSessionPlugin",
+  "contractVersion": "1.0.0",
+  "minimumPlatformVersion": "1.0.0",
+  "capabilities": [
+    "device.scpi-tcp",
+    "device.modbus-tcp",
+    "device.tcp-line-scanner",
+    "device.record-replay"
+  ],
+  "deviceCommands": [
+    {
+      "id": "device.sessions:query",
+      "capability": "device.scpi-tcp",
+      "commandName": "Query",
+      "inputSchema": "application/json",
+      "outputSchema": "application/json",
+      "timeoutMilliseconds": 30000,
+      "maxRetries": 0
+    },
+    {
+      "id": "device.sessions:write",
+      "capability": "device.scpi-tcp",
+      "commandName": "Write",
+      "inputSchema": "application/json",
+      "outputSchema": "application/json",
+      "timeoutMilliseconds": 30000,
+      "maxRetries": 0
+    },
+    {
+      "id": "device.sessions:modbus-write",
+      "capability": "device.modbus-tcp",
+      "commandName": "Write",
+      "inputSchema": "application/json",
+      "outputSchema": "application/json",
+      "timeoutMilliseconds": 30000,
+      "maxRetries": 0
+    },
+    {
+      "id": "device.sessions:modbus-reconnect",
+      "capability": "device.modbus-tcp",
+      "commandName": "Reconnect",
+      "inputSchema": "application/json",
+      "outputSchema": "application/json",
+      "timeoutMilliseconds": 10000,
+      "maxRetries": 0
+    },
+    {
+      "id": "device.sessions:reconnect",
+      "capability": "device.tcp-line-scanner",
+      "commandName": "Reconnect",
+      "inputSchema": "application/json",
+      "outputSchema": "application/json",
+      "timeoutMilliseconds": 10000,
+      "maxRetries": 0
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Application.Scripting;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Infrastructure.Scripting;
@@ -35,6 +36,7 @@ public sealed class ProcessIsolatedPythonScriptRuntimeScriptExecutorTests
                     'value': production_unit_identity_value
                 },
                 'release': [project_id, application_id, project_snapshot_id],
+                'production_inputs': production_inputs,
                 'action': action_id,
                 'target': [target_kind, target_id, target_capability],
                 'command': command_name
@@ -57,6 +59,9 @@ public sealed class ProcessIsolatedPythonScriptRuntimeScriptExecutorTests
         Assert.Contains("\"input_key\":\"serialNumber\"", result.Payload, StringComparison.Ordinal);
         Assert.Contains("\"value\":\"UNIT-001\"", result.Payload, StringComparison.Ordinal);
         Assert.Contains("\"release\":[\"project.main\",\"application.main\",\"snapshot.release\"]", result.Payload, StringComparison.Ordinal);
+        Assert.Contains("\"fixture.count\":2", result.Payload, StringComparison.Ordinal);
+        Assert.Contains("\"fixture.enabled\":true", result.Payload, StringComparison.Ordinal);
+        Assert.Contains("\"fixture.offset\":1.25", result.Payload, StringComparison.Ordinal);
         Assert.Contains("\"action\":\"node-normalize:action:1\"", result.Payload, StringComparison.Ordinal);
         Assert.Contains("\"target\":[\"Capability\",\"process.python-script\",\"process.python-script\"]", result.Payload, StringComparison.Ordinal);
         Assert.Contains("\"command\":\"PythonScript.Execute\"", result.Payload, StringComparison.Ordinal);
@@ -137,6 +142,12 @@ public sealed class ProcessIsolatedPythonScriptRuntimeScriptExecutorTests
             "project.main",
             "application.main",
             "snapshot.release",
+            new Dictionary<string, ProductionContextValue>
+            {
+                ["fixture.count"] = new(ProductionContextValueKind.WholeNumber, "2"),
+                ["fixture.enabled"] = new(ProductionContextValueKind.Boolean, "true"),
+                ["fixture.offset"] = new(ProductionContextValueKind.FixedPoint, "1.25")
+            },
             RuntimeTestReleaseIdentity.ResourceFences());
     }
 }

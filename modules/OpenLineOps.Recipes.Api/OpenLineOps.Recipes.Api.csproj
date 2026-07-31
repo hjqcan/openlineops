@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../shared/OpenLineOps.Api.Abstractions/OpenLineOps.Api.Abstractions.csproj" />
+    <ProjectReference Include="../../shared/OpenLineOps.Application.Abstractions/OpenLineOps.Application.Abstractions.csproj" />
+    <ProjectReference Include="../OpenLineOps.Engineering.Application/OpenLineOps.Engineering.Application.csproj" />
+    <ProjectReference Include="../OpenLineOps.Recipes.Application/OpenLineOps.Recipes.Application.csproj" />
+    <ProjectReference Include="../OpenLineOps.Recipes.Domain/OpenLineOps.Recipes.Domain.csproj" />
+    <ProjectReference Include="../OpenLineOps.Recipes.Infrastructure/OpenLineOps.Recipes.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

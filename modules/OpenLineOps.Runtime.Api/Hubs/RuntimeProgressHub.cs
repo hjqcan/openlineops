@@ -1,7 +1,10 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
+using OpenLineOps.Api.Abstractions;
 
 namespace OpenLineOps.Runtime.Api.Hubs;
 
+[Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 public sealed class RuntimeProgressHub : Hub<IRuntimeProgressClient>
 {
     public Task JoinStationSystemGroup(

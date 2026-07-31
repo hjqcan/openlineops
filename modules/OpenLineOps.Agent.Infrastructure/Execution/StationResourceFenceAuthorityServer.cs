@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Domain.StationJobs;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.StationRuntime.Contracts;
 
 namespace OpenLineOps.Agent.Infrastructure.Execution;
@@ -12,39 +13,70 @@ public sealed class StationResourceFenceAuthorityServer
     private readonly StationJobSnapshot _job;
     private readonly IStationResourceFenceValidator _validator;
     private readonly string _accessToken;
+    private readonly string _authorizedPrincipalSid;
+    private readonly TimeSpan _requestFrameTimeout;
 
     public StationResourceFenceAuthorityServer(
         StationJobSnapshot job,
-        IStationResourceFenceValidator validator)
+        IStationResourceFenceValidator validator,
+        string authorizedPrincipalSid,
+        TimeSpan requestFrameTimeout = default)
     {
         _job = job ?? throw new ArgumentNullException(nameof(job));
         _validator = validator ?? throw new ArgumentNullException(nameof(validator));
+        _authorizedPrincipalSid = string.IsNullOrWhiteSpace(authorizedPrincipalSid)
+            ? throw new ArgumentException(
+                "Resource fence authority principal SID is required.",
+                nameof(authorizedPrincipalSid))
+            : authorizedPrincipalSid;
+        _requestFrameTimeout = requestFrameTimeout == default
+            ? TimeSpan.FromSeconds(5)
+            : requestFrameTimeout > TimeSpan.Zero
+              && requestFrameTimeout <= TimeSpan.FromMinutes(1)
+                ? requestFrameTimeout
+                : throw new ArgumentOutOfRangeException(
+                    nameof(requestFrameTimeout),
+                    "Resource fence request timeout must be within 1 tick and 1 minute.");
         _accessToken = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
         Descriptor = new StationResourceFenceAuthorityDescriptor(
             $"openlineops-fence-{job.JobId.Value:N}-{Guid.NewGuid():N}",
-            _accessToken);
+            _accessToken,
+            _authorizedPrincipalSid);
     }
 
     public StationResourceFenceAuthorityDescriptor Descriptor { get; }
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Resource fence authority requires a Windows identity-bound named pipe.");
+        }
+
+        await using var pipe = WindowsIdentityBoundNamedPipe.CreateServer(
+            Descriptor.PipeName,
+            _authorizedPrincipalSid,
+            maximumServerInstances: 1,
+            inputBufferSize: 1024 * 1024 + sizeof(int),
+            outputBufferSize: 1024 * 1024 + sizeof(int));
         while (!cancellationToken.IsCancellationRequested)
         {
-            await using var pipe = new NamedPipeServerStream(
-                Descriptor.PipeName,
-                PipeDirection.InOut,
-                1,
-                PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
             try
             {
                 await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
-                await HandleAsync(pipe, cancellationToken).ConfigureAwait(false);
+                using var requestDeadline =
+                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                requestDeadline.CancelAfter(_requestFrameTimeout);
+                await HandleAsync(pipe, requestDeadline.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 return;
+            }
+            catch (OperationCanceledException)
+            {
+                // A connected caller did not finish one bounded fence request.
             }
             catch (Exception exception) when (exception is IOException
                                                or InvalidDataException
@@ -53,6 +85,13 @@ public sealed class StationResourceFenceAuthorityServer
                 if (pipe.IsConnected)
                 {
                     await TryWriteRejectionAsync(pipe, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                if (pipe.IsConnected)
+                {
+                    pipe.Disconnect();
                 }
             }
         }
@@ -94,6 +133,8 @@ public sealed class StationResourceFenceAuthorityServer
 
         StationOperationDocumentJson.Validate(response);
         await StationResourceFenceAuthorityWire.WriteAsync(pipe, response, cancellationToken)
+            .ConfigureAwait(false);
+        await StationResourceFenceAuthorityWire.ReadResponseReceiptAsync(pipe, cancellationToken)
             .ConfigureAwait(false);
     }
 

@@ -1,6 +1,8 @@
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using OpenLineOps.BuiltinPlugins.DeviceSessions;
 using OpenLineOps.ReleaseManifest;
 
 namespace OpenLineOps.ReleaseManifest.Tests;
@@ -160,6 +162,78 @@ public sealed class ReleaseManifestGeneratorTests : IDisposable
             document.Artifacts,
             artifact => Assert.Equal("agent", artifact.Kind),
             artifact => Assert.Equal("runner", artifact.Kind));
+    }
+
+    [Fact]
+    public void GenerateAndVerifyKeepSampleAndDeviceSessionsPluginKindsIndependent()
+    {
+        var artifacts = Path.Combine(_directory, "plugin-kinds");
+        Directory.CreateDirectory(Path.Combine(artifacts, "sample-plugin"));
+        Directory.CreateDirectory(Path.Combine(artifacts, "device-sessions-plugin"));
+        File.WriteAllText(
+            Path.Combine(artifacts, "sample-plugin", "sample.zip"),
+            "sample package");
+        var connectorPath = Path.Combine(
+            artifacts,
+            "device-sessions-plugin",
+            "device-sessions.zip");
+        WriteDeviceSessionsPluginArchive(connectorPath);
+        var manifestPath = Path.Combine(artifacts, "release-manifest.json");
+        var checksumsPath = Path.Combine(artifacts, "checksums.sha256");
+
+        var document = ReleaseManifestGenerator.Generate(new ReleaseManifestOptions(
+            Version: "0.1.0",
+            ArtifactsDirectory: artifacts,
+            ManifestPath: manifestPath,
+            ChecksumsPath: checksumsPath,
+            NotesPath: null,
+            Commit: null,
+            GeneratedAtUtc: new DateTimeOffset(2026, 7, 31, 12, 0, 0, TimeSpan.Zero),
+            RequiredArtifactKinds: ["sample-plugin", "device-sessions-plugin"]));
+        var result = ReleaseManifestVerifier.Verify(new ReleaseManifestVerificationOptions(
+            ArtifactsDirectory: artifacts,
+            ManifestPath: manifestPath,
+            ChecksumsPath: checksumsPath,
+            RequiredArtifactKinds: ["sample-plugin", "device-sessions-plugin"]));
+
+        Assert.Equal(2, result.ArtifactCount);
+        Assert.Contains(document.Artifacts, artifact =>
+            artifact.Kind == ReleaseArtifactKinds.SamplePlugin);
+        Assert.Contains(document.Artifacts, artifact =>
+            artifact.Kind == ReleaseArtifactKinds.DeviceSessionsPlugin);
+
+        File.WriteAllText(connectorPath, "tampered device sessions package");
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            ReleaseManifestVerifier.Verify(new ReleaseManifestVerificationOptions(
+                ArtifactsDirectory: artifacts,
+                ManifestPath: manifestPath,
+                ChecksumsPath: checksumsPath,
+                RequiredArtifactKinds: ["sample-plugin", "device-sessions-plugin"])));
+        Assert.Contains("device-sessions-plugin", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("mismatch", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GenerateRejectsAdditionalExecutableInDeviceSessionsPluginArchive()
+    {
+        var artifacts = Path.Combine(_directory, "plugin-unsupported-executable");
+        var artifactDirectory = Path.Combine(artifacts, "device-sessions-plugin");
+        Directory.CreateDirectory(artifactDirectory);
+        var connectorPath = Path.Combine(artifactDirectory, "device-sessions.zip");
+        WriteDeviceSessionsPluginArchive(connectorPath, includeUnsupportedExecutable: true);
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            ReleaseManifestGenerator.Generate(new ReleaseManifestOptions(
+                Version: "0.1.0",
+                ArtifactsDirectory: artifacts,
+                ManifestPath: Path.Combine(artifacts, "release-manifest.json"),
+                ChecksumsPath: Path.Combine(artifacts, "checksums.sha256"),
+                NotesPath: null,
+                Commit: null,
+                GeneratedAtUtc: new DateTimeOffset(2026, 7, 31, 12, 0, 0, TimeSpan.Zero),
+                RequiredArtifactKinds: ["device-sessions-plugin"])));
+
+        Assert.Contains("additional executable", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -573,6 +647,7 @@ public sealed class ReleaseManifestGeneratorTests : IDisposable
     [InlineData("electron")]
     [InlineData("pluginhost")]
     [InlineData("sample-plugins")]
+    [InlineData("device-session-plugin")]
     [InlineData("API")]
     public void GenerateRejectsNonCanonicalTopLevelArtifactDirectories(string directoryName)
     {
@@ -618,6 +693,7 @@ public sealed class ReleaseManifestGeneratorTests : IDisposable
     [Theory]
     [InlineData("pluginhost")]
     [InlineData("electron")]
+    [InlineData("device-session-plugin")]
     [InlineData("API")]
     [InlineData(" api")]
     [InlineData("")]
@@ -663,5 +739,36 @@ public sealed class ReleaseManifestGeneratorTests : IDisposable
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(content));
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static void WriteDeviceSessionsPluginArchive(
+        string path,
+        bool includeUnsupportedExecutable = false)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+        var manifest = archive.CreateEntry("manifest.json");
+        var assemblyPath = typeof(IndustrialDeviceSessionPlugin).Assembly.Location;
+        using (var source = File.OpenRead(Path.Combine(
+                   Path.GetDirectoryName(assemblyPath)!,
+                   "manifest.json")))
+        using (var target = manifest.Open())
+        {
+            source.CopyTo(target);
+        }
+
+        var assembly = archive.CreateEntry("OpenLineOps.BuiltinPlugins.DeviceSessions.dll");
+        using (var source = File.OpenRead(assemblyPath))
+        using (var target = assembly.Open())
+        {
+            source.CopyTo(target);
+        }
+
+        if (includeUnsupportedExecutable)
+        {
+            var executable = archive.CreateEntry("helper.exe");
+            using var writer = new StreamWriter(executable.Open());
+            writer.Write("unsupported");
+        }
     }
 }

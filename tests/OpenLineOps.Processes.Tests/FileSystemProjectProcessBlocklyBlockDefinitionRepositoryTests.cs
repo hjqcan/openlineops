@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
@@ -31,8 +32,8 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             blockType,
             "Fixture",
             "Application A Fixture Action",
-            BlockJson(blockType, "application A fixture action v1"),
-            "test.fixture.application-a.v1",
+            BlockJson(blockType, "application A fixture action initial"),
+            "test.fixture.application-a.initial",
             FirstRecordedAtUtc);
         var applicationASecond = await SaveNewVersionAsync(
             writer,
@@ -50,7 +51,7 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             "Fixture",
             "Application B Fixture Action",
             BlockJson(blockType, "application B fixture action"),
-            "test.fixture.application-b.v1",
+            "test.fixture.application-b.initial",
             SecondRecordedAtUtc);
 
         Assert.Equal(1, applicationAFirst.Version);
@@ -214,6 +215,52 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
         Assert.StartsWith("block-user-custom-fixture-action--", blockDirectory.Name);
     }
 
+    [Theory]
+    [InlineData("blocks")]
+    [InlineData("custom")]
+    public async Task SaveRejectsCustomBlockDirectoryReparsePointWithoutWritingOutsideApplication(
+        string resourceDirectoryName)
+    {
+        const string blockType = "user_reparse_guard";
+        var scope = Scope($"application.reparse-{resourceDirectoryName}", _projectDirectory);
+        Directory.CreateDirectory(scope.ApplicationRootPath);
+        var blocksDirectory = Path.Combine(scope.ApplicationRootPath, "blocks");
+        if (resourceDirectoryName == "custom")
+        {
+            Directory.CreateDirectory(blocksDirectory);
+        }
+
+        var outsideDirectory = Path.Combine(_projectDirectory, $"outside-{resourceDirectoryName}");
+        Directory.CreateDirectory(outsideDirectory);
+        var sentinelPath = Path.Combine(outsideDirectory, "sentinel.txt");
+        await File.WriteAllTextAsync(sentinelPath, "unchanged");
+        var resourceDirectory = resourceDirectoryName == "blocks"
+            ? blocksDirectory
+            : Path.Combine(blocksDirectory, "custom");
+        CreateDirectoryReparsePoint(resourceDirectory, outsideDirectory);
+
+        try
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                await SaveNewVersionAsync(
+                    new FileSystemProjectProcessBlocklyBlockDefinitionRepository(),
+                    scope,
+                    blockType,
+                    "Fixture",
+                    "Reparse Guard",
+                    BlockJson(blockType, "reparse guard"),
+                    "test.fixture.reparse",
+                    FirstRecordedAtUtc));
+
+            Assert.Equal("unchanged", await File.ReadAllTextAsync(sentinelPath));
+            Assert.Equal([sentinelPath], Directory.GetFiles(outsideDirectory));
+        }
+        finally
+        {
+            Directory.Delete(resourceDirectory);
+        }
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_projectDirectory))
@@ -261,14 +308,14 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             {
                 Assert.Equal(1, block.Version);
                 Assert.Equal("Application A Fixture Action", block.DisplayName);
-                AssertCanonicalContract(block, "test.fixture.application-a.v1");
+                AssertCanonicalContract(block, "test.fixture.application-a.initial");
             });
 
         Assert.NotNull(latestB);
         Assert.Equal(1, latestB.Version);
         Assert.Equal("Application B Fixture Action", latestB.DisplayName);
         Assert.Equal(BlockJson(blockType, "application B fixture action"), latestB.BlocklyJson);
-        AssertCanonicalContract(latestB, "test.fixture.application-b.v1");
+        AssertCanonicalContract(latestB, "test.fixture.application-b.initial");
         Assert.Equal(SecondRecordedAtUtc, latestB.CreatedAtUtc);
         Assert.Equal(SecondRecordedAtUtc, latestB.UpdatedAtUtc);
         Assert.Single(listedB);
@@ -278,7 +325,7 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
             block =>
             {
                 Assert.Equal(1, block.Version);
-                AssertCanonicalContract(block, "test.fixture.application-b.v1");
+                AssertCanonicalContract(block, "test.fixture.application-b.initial");
             });
     }
 
@@ -346,6 +393,40 @@ public sealed class FileSystemProjectProcessBlocklyBlockDefinitionRepositoryTest
     private static string BlockJson(string blockType, string message)
     {
         return $$"""{"type":"{{blockType}}","message0":"{{message}}","previousStatement":null,"nextStatement":null}""";
+    }
+
+    private static void CreateDirectoryReparsePoint(string path, string targetPath)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Directory.CreateSymbolicLink(path, targetPath);
+            return;
+        }
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            ArgumentList =
+            {
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                path,
+                targetPath
+            }
+        }) ?? throw new InvalidOperationException("Failed to start the Windows junction command.");
+
+        process.WaitForExit();
+        var standardOutput = process.StandardOutput.ReadToEnd();
+        var standardError = process.StandardError.ReadToEnd();
+        Assert.True(
+            process.ExitCode == 0,
+            $"Failed to create test junction. stdout: {standardOutput} stderr: {standardError}");
     }
 
     private static string FindBlockDocumentPath(string projectDirectory, string blockType)

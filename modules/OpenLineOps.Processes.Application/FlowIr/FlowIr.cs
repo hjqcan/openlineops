@@ -52,12 +52,29 @@ public sealed record FlowIrAction(
     string? InputPayload,
     FlowIrExecutionPolicy Execution,
     FlowIrPythonScript? PythonScript,
-    FlowIrSourceTrace Source);
+    FlowIrSourceTrace Source,
+    FlowIrOperationalPolicy? OperationalPolicy = null);
 
 public sealed record FlowIrExecutionPolicy(
     long TimeoutMilliseconds,
     int RetryLimit,
     FlowIrCancellationMode CancellationMode);
+
+public sealed record FlowIrOperationalPolicy(
+    FlowIrIdempotencyClass IdempotencyClass,
+    FlowIrRecoveryPolicy RecoveryPolicy,
+    FlowIrFailurePolicy FailurePolicy,
+    ImmutableArray<FlowIrResourceLock> ResourceLocks,
+    ImmutableArray<FlowIrEvidenceRequirement> EvidenceRequirements,
+    ImmutableArray<FlowIrStationMode> AllowedStationModes);
+
+public sealed record FlowIrResourceLock(
+    string ResourceId,
+    FlowIrResourceLockMode Mode);
+
+public sealed record FlowIrEvidenceRequirement(
+    string EvidenceKind,
+    int MinimumCount);
 
 public sealed record FlowIrTargetReference(
     FlowIrTargetReferenceKind Kind,
@@ -121,6 +138,47 @@ public enum FlowIrTargetReferenceKind
 public enum FlowIrCancellationMode
 {
     Cooperative = 1
+}
+
+public enum FlowIrIdempotencyClass
+{
+    Idempotent = 0,
+    Conditional = 1,
+    NonIdempotent = 2
+}
+
+public enum FlowIrRecoveryPolicy
+{
+    AutomaticReplay = 0,
+    ResumeFromCheckpoint = 1,
+    ManualAuthorization = 2,
+    NeverReplay = 3
+}
+
+public enum FlowIrFailurePolicy
+{
+    Continue = 0,
+    Skip = 1,
+    Retry = 2,
+    Rework = 3,
+    ManualDisposition = 4,
+    Hold = 5,
+    Terminate = 6
+}
+
+public enum FlowIrResourceLockMode
+{
+    Shared = 0,
+    Exclusive = 1
+}
+
+public enum FlowIrStationMode
+{
+    Automatic = 0,
+    Manual = 1,
+    Setup = 2,
+    Maintenance = 3,
+    Simulation = 4
 }
 
 public enum FlowIrLoopPolicy

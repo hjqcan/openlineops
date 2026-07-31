@@ -18,9 +18,14 @@ public sealed class ExternalProgramHost : IExternalProgramHost
     private readonly ExternalProgramHostOptions _options;
     private readonly string _workspaceRootPath;
     private readonly string _evidenceRootPath;
-    private readonly IsolatedProcessLauncher _processLauncher;
+    private readonly Func<IsolatedProcessStartRequest, IIsolatedProcess> _processLauncher;
     private readonly IImmutableContentProtector _contentProtector;
     private readonly ExternalProgramHostPolicyEnforcer _policyEnforcer;
+    private readonly Func<string, string?, bool> _deleteAppContainerProfile;
+    private readonly Func<string, WindowsAppContainerProfileArtifactState>
+        _appContainerProfileArtifactsProbe;
+    private readonly Func<TimeSpan, CancellationToken, ValueTask> _cleanupRetryDelay;
+    private readonly Action<string> _createIsolationDirectory;
 
     public ExternalProgramHost(ExternalProgramHostOptions options)
         : this(options, null, null, null)
@@ -29,17 +34,31 @@ public sealed class ExternalProgramHost : IExternalProgramHost
 
     internal ExternalProgramHost(
         ExternalProgramHostOptions options,
-        IsolatedProcessLauncher? processLauncher,
+        Func<IsolatedProcessStartRequest, IIsolatedProcess>? processLauncher,
         IImmutableContentProtector? contentProtector,
-        ExternalProgramHostPolicyEnforcer? policyEnforcer)
+        ExternalProgramHostPolicyEnforcer? policyEnforcer,
+        Func<string, string?, bool>? deleteAppContainerProfile = null,
+        Func<string, WindowsAppContainerProfileArtifactState>?
+            appContainerProfileArtifactsProbe = null,
+        Func<TimeSpan, CancellationToken, ValueTask>? cleanupRetryDelay = null,
+        Action<string>? createIsolationDirectory = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _options.Validate();
         _workspaceRootPath = _options.ResolveWorkspaceRootPath();
         _evidenceRootPath = _options.ResolveEvidenceRootPath();
-        _processLauncher = processLauncher ?? new IsolatedProcessLauncher();
+        _processLauncher = processLauncher ?? new IsolatedProcessLauncher().Launch;
         _contentProtector = contentProtector ?? new ImmutableContentProtector();
         _policyEnforcer = policyEnforcer ?? new ExternalProgramHostPolicyEnforcer(_options);
+        _deleteAppContainerProfile = deleteAppContainerProfile
+                                     ?? (static (profileName, lifecycleManagerServiceSid) =>
+                                         WindowsAppContainerIdentity.DeleteProfile(
+                                             profileName,
+                                             lifecycleManagerServiceSid));
+        _appContainerProfileArtifactsProbe = appContainerProfileArtifactsProbe
+                                             ?? WindowsAppContainerIdentity.ProbeProfileArtifacts;
+        _cleanupRetryDelay = cleanupRetryDelay ?? DelayCleanupRetryAsync;
+        _createIsolationDirectory = createIsolationDirectory ?? CreateDirectory;
     }
 
     public async ValueTask<ExternalProgramExecutionResult> ExecuteAsync(
@@ -70,10 +89,17 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                         ? _options.AppContainerProfileName!
                         : CreateInvocationProfileName(_options.AppContainerProfileName!),
                     request.Policy.NetworkAccessAllowed,
-                    [WindowsAppContainerIdentity.ExternalProgramContentCapabilityName])
+                    ProfileMode: _options.AppContainerProfileExternallyOwned
+                        ? WindowsAppContainerProfileMode.UseExisting
+                        : WindowsAppContainerProfileMode.CreateOrOpen,
+                    AdditionalCapabilityNames:
+                    [WindowsAppContainerIdentity.ExternalProgramContentCapabilityName],
+                    ProfileLifecycleManagerServiceSid: _options.RequireRestrictedHostIdentity
+                        ? hostIdentity.ServiceSid
+                        : null)
                 : null;
             contentReaderSid = appContainerPolicy is null
-                ? hostIdentity.Sid
+                ? hostIdentity.ServiceSid
                 : WindowsAppContainerIdentity.EnsureCapabilitySid(
                     WindowsAppContainerIdentity.ExternalProgramContentCapabilityName);
             resourceRootPath = ResolveFrozenPath(
@@ -115,7 +141,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                     resourceRootPath,
                     immutableInventory,
                     contentReaderSid,
-                    hostIdentity.Sid,
+                    hostIdentity.ServiceSid,
                     cancellationToken)
                 .ConfigureAwait(false);
             executablePath = ResolveFrozenPath(
@@ -141,17 +167,20 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                 $"External program '{request.ResourceId}' frozen executable is invalid: {exception.Message}");
         }
 
-        var workspacePath = CreateWorkspace();
-        var outputDirectory = Path.Combine(workspacePath, "output");
-        var temporaryDirectory = Path.Combine(workspacePath, "temp");
-        var standardOutputPath = Path.Combine(workspacePath, "stdout.log");
-        var standardErrorPath = Path.Combine(workspacePath, "stderr.log");
-        Directory.CreateDirectory(outputDirectory);
-        Directory.CreateDirectory(temporaryDirectory);
-
-        ExternalProgramExecutionResult result;
+        string? workspacePath = null;
+        ExternalProgramExecutionResult? result = null;
+        string? workspaceCleanupError = null;
+        string? profileCleanupError = null;
         try
         {
+            workspacePath = AllocateWorkspacePath();
+            CreateWorkspace(workspacePath);
+            var outputDirectory = Path.Combine(workspacePath, "output");
+            var temporaryDirectory = Path.Combine(workspacePath, "temp");
+            var standardOutputPath = Path.Combine(workspacePath, "stdout.log");
+            var standardErrorPath = Path.Combine(workspacePath, "stderr.log");
+            _createIsolationDirectory(outputDirectory);
+            _createIsolationDirectory(temporaryDirectory);
             var invocationPath = Path.Combine(workspacePath, "invocation.json");
             await File.WriteAllTextAsync(
                     invocationPath,
@@ -161,7 +190,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                 .ConfigureAwait(false);
             if (appContainerPolicy is not null)
             {
-                var appContainerSid = WindowsAppContainerIdentity.EnsureProfile(
+                var appContainerSid = WindowsAppContainerIdentity.GetProfileSid(
                     appContainerPolicy.ProfileName);
                 WindowsContentAccessAuthorizer.GrantWorkspaceModify(
                     workspacePath,
@@ -195,7 +224,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                         resourceRootPath,
                         immutableInventory,
                         contentReaderSid,
-                        hostIdentity.Sid,
+                        hostIdentity.ServiceSid,
                         CancellationToken.None)
                     .ConfigureAwait(false);
             }
@@ -226,18 +255,68 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                 $"External program '{request.ResourceId}' host failed: {exception.Message}",
                 []);
         }
+        catch (Exception exception)
+        {
+            result = ExternalProgramExecutionResult.Failed(
+                $"External program '{request.ResourceId}' host failed unexpectedly: "
+                + DescribeCleanupException(exception),
+                []);
+        }
+        finally
+        {
+            try
+            {
+                try
+                {
+                    if (workspacePath is not null)
+                    {
+                        workspaceCleanupError = TryDeleteWorkspace(workspacePath);
+                    }
+                }
+                catch (Exception exception)
+                {
+                    workspaceCleanupError = DescribeCleanupException(exception);
+                }
+            }
+            finally
+            {
+                if (appContainerPolicy is not null
+                    && !_options.AppContainerProfileExternallyOwned)
+                {
+                    try
+                    {
+                        profileCleanupError = await TryDeleteAppContainerProfileAsync(
+                                appContainerPolicy.ProfileName,
+                                appContainerPolicy.ProfileLifecycleManagerServiceSid,
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception exception)
+                    {
+                        profileCleanupError = DescribeCleanupException(exception);
+                    }
+                }
+            }
+        }
 
-        var workspaceCleanupError = TryDeleteWorkspace(workspacePath);
-        var profileCleanupError = appContainerPolicy is null
-                                  || _options.AppContainerProfileExternallyOwned
-            ? null
-            : TryDeleteAppContainerProfile(appContainerPolicy.ProfileName);
-        var cleanupError = workspaceCleanupError ?? profileCleanupError;
-        return cleanupError is null
-            ? result
-            : ExternalProgramExecutionResult.Failed(
-                $"External program '{request.ResourceId}' isolation cleanup failed: {cleanupError}",
-                result.Artifacts);
+        var cleanupFailures = new List<string>(capacity: 2);
+        if (workspaceCleanupError is not null)
+        {
+            cleanupFailures.Add("workspace=" + workspaceCleanupError);
+        }
+
+        if (profileCleanupError is not null)
+        {
+            cleanupFailures.Add("app-container-profile=" + profileCleanupError);
+        }
+
+        return cleanupFailures.Count == 0
+            ? result!
+            : WithCleanupFailure(
+                request,
+                result!,
+                "isolation",
+                string.Join(" | ", cleanupFailures));
     }
 
     private async ValueTask<ExternalProgramExecutionResult> ExecuteProcessAsync(
@@ -250,7 +329,59 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         string standardErrorPath,
         CancellationToken cancellationToken)
     {
-        using var process = _processLauncher.Launch(startRequest);
+        IIsolatedProcess? process = null;
+        ExternalProgramExecutionResult? result = null;
+        Exception? processBoundaryFailure = null;
+        string? processCleanupError = null;
+        try
+        {
+            process = _processLauncher(startRequest);
+            result = await ExecuteLaunchedProcessAsync(
+                    process,
+                    request,
+                    policy,
+                    workspacePath,
+                    outputDirectory,
+                    standardOutputPath,
+                    standardErrorPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            processBoundaryFailure = exception;
+        }
+        finally
+        {
+            if (process is not null)
+            {
+                processCleanupError = TryDisposeIsolatedProcess(process);
+            }
+        }
+
+        result ??= ExternalProgramExecutionResult.Failed(
+            $"External program '{request.ResourceId}' process isolation failed unexpectedly: "
+            + DescribeCleanupException(processBoundaryFailure!),
+            []);
+        return processCleanupError is null
+            ? result
+            : WithCleanupFailure(
+                request,
+                result,
+                "process isolation",
+                processCleanupError);
+    }
+
+    private async ValueTask<ExternalProgramExecutionResult> ExecuteLaunchedProcessAsync(
+        IIsolatedProcess process,
+        ExternalProgramExecutionRequest request,
+        EffectiveExternalProgramPolicy policy,
+        string workspacePath,
+        string outputDirectory,
+        string standardOutputPath,
+        string standardErrorPath,
+        CancellationToken cancellationToken)
+    {
         using var timeoutCancellation = new CancellationTokenSource(policy.ExecutionTimeout);
         using var outputLimitCancellation = new CancellationTokenSource();
         using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(
@@ -274,7 +405,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
             outputLimitCancellation,
             monitorStop.Token);
         string? executionFailure = null;
-        var processExited = false;
+        var rootProcessExited = false;
         try
         {
             var inputBytes = Encoding.UTF8.GetBytes(request.InvocationPayload);
@@ -293,7 +424,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
             }
 
             await process.WaitForExitAsync(executionCancellation.Token).ConfigureAwait(false);
-            processExited = true;
+            rootProcessExited = true;
         }
         catch (OperationCanceledException)
         {
@@ -304,8 +435,8 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         }
 
         process.TerminateProcessTree();
-        processExited = processExited
-                        || await WaitForTerminationBoundedAsync(process).ConfigureAwait(false);
+        var processTreeExited = await WaitForTerminationBoundedAsync(process)
+            .ConfigureAwait(false);
         monitorStop.Cancel();
         var outputQuotaFailure = await outputMonitorTask.ConfigureAwait(false);
         var captures = await AwaitCapturesBoundedAsync(
@@ -316,10 +447,19 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         if (captures is null)
         {
             return ExternalProgramExecutionResult.Failed(
-                $"External program '{request.ResourceId}' standard stream shutdown exceeded the host bound.",
+                processTreeExited
+                    ? $"External program '{request.ResourceId}' standard stream shutdown exceeded the host bound."
+                    : $"External program '{request.ResourceId}' process tree did not terminate within the bounded shutdown interval.",
                 []);
         }
 
+        var excludeIncompleteAtomicWriteResidue = executionFailure is not null
+                                                  || outputLimitCancellation.IsCancellationRequested
+                                                  || cancellationToken.IsCancellationRequested
+                                                  || timeoutCancellation.IsCancellationRequested
+                                                  || !rootProcessExited
+                                                  || !processTreeExited
+                                                  || process.ExitCode != 0;
         var artifacts = await PersistEvidenceAsync(
                 request,
                 policy,
@@ -327,8 +467,16 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                 outputDirectory,
                 standardOutputPath,
                 standardErrorPath,
+                excludeIncompleteAtomicWriteResidue,
                 CancellationToken.None)
             .ConfigureAwait(false);
+        if (!processTreeExited)
+        {
+            return ExternalProgramExecutionResult.Failed(
+                $"External program '{request.ResourceId}' process tree did not terminate within the bounded shutdown interval.",
+                artifacts);
+        }
+
         if (executionFailure is not null)
         {
             return ExternalProgramExecutionResult.Failed(
@@ -364,10 +512,10 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                 artifacts);
         }
 
-        if (!processExited)
+        if (!rootProcessExited)
         {
             return ExternalProgramExecutionResult.Failed(
-                $"External program '{request.ResourceId}' did not terminate within the bounded shutdown interval.",
+                $"External program '{request.ResourceId}' root process did not exit before bounded shutdown.",
                 artifacts);
         }
 
@@ -447,6 +595,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         string outputDirectory,
         string standardOutputPath,
         string standardErrorPath,
+        bool excludeIncompleteAtomicWriteResidue,
         CancellationToken cancellationToken)
     {
         var candidates = new List<(string SourcePath, string RelativePath)>
@@ -456,6 +605,13 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         };
         foreach (var path in EnumerateOutputFiles(outputDirectory))
         {
+            var outputRelativePath = Path.GetRelativePath(outputDirectory, path).Replace('\\', '/');
+            if (excludeIncompleteAtomicWriteResidue
+                && IsIncompleteAtomicWriteResidue(outputRelativePath))
+            {
+                continue;
+            }
+
             if (candidates.Count == policy.MaximumArtifactCount)
             {
                 throw new InvalidDataException(
@@ -464,7 +620,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
 
             candidates.Add((
                 path,
-                "output/" + Path.GetRelativePath(outputDirectory, path).Replace('\\', '/')));
+                "output/" + outputRelativePath));
         }
 
         if (candidates.Count > policy.MaximumArtifactCount)
@@ -640,7 +796,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+            await process.WaitForProcessTreeExitAsync(timeout.Token).ConfigureAwait(false);
             return true;
         }
         catch (OperationCanceledException)
@@ -680,14 +836,68 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         string outputDirectory,
         EffectiveExternalProgramPolicy policy)
     {
-        try
+        return InspectOutputDirectoryWithBoundedSnapshotRetries(
+            () => InspectOutputDirectory(outputDirectory, policy));
+    }
+
+    internal static string? InspectOutputDirectoryWithBoundedSnapshotRetries(
+        Func<string?> inspectSnapshot)
+    {
+        ArgumentNullException.ThrowIfNull(inspectSnapshot);
+
+        const int maximumSnapshotAttempts = 4;
+        for (var attempt = 1; attempt <= maximumSnapshotAttempts; attempt++)
         {
-            return InspectOutputDirectory(outputDirectory, policy);
+            try
+            {
+                return inspectSnapshot();
+            }
+            catch (Exception exception) when (
+                attempt < maximumSnapshotAttempts
+                && exception is FileNotFoundException or DirectoryNotFoundException)
+            {
+                Thread.Yield();
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                return $"output workspace could not be inspected: {exception.Message}";
+            }
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+
+        throw new InvalidOperationException("The bounded output workspace inspection did not terminate.");
+    }
+
+    internal static bool IsIncompleteAtomicWriteResidue(string relativePath)
+    {
+        if (!IsCanonical(relativePath)
+            || relativePath.Contains('\\', StringComparison.Ordinal))
         {
-            return $"output workspace could not be inspected: {exception.Message}";
+            return false;
         }
+
+        var segments = relativePath.Split('/');
+        if (segments.Length == 0
+            || segments[..^1].Any(segment => !IsPortableArtifactPathSegment(segment)))
+        {
+            return false;
+        }
+
+        var fileName = segments[^1];
+        const int identifierLength = 32;
+        const string suffix = ".tmp";
+        var identifierSeparator = fileName.Length - suffix.Length - identifierLength - 1;
+        if (identifierSeparator <= 1
+            || fileName[0] != '.'
+            || fileName[identifierSeparator] != '.'
+            || !fileName.EndsWith(suffix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var destinationName = fileName[1..identifierSeparator];
+        var identifier = fileName.AsSpan(identifierSeparator + 1, identifierLength);
+        return IsPortableArtifactPathSegment(destinationName)
+               && Guid.TryParseExact(identifier, "N", out _);
     }
 
     private static string? InspectOutputDirectory(
@@ -837,15 +1047,18 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         }
     }
 
-    private string CreateWorkspace()
+    private string AllocateWorkspacePath()
     {
-        Directory.CreateDirectory(_workspaceRootPath);
-        RejectReparsePoints(_workspaceRootPath, _workspaceRootPath);
         var relativePath = Guid.NewGuid().ToString("N");
-        var workspacePath = ResolveContainedPath(_workspaceRootPath, relativePath);
-        Directory.CreateDirectory(workspacePath);
+        return ResolveContainedPath(_workspaceRootPath, relativePath);
+    }
+
+    private void CreateWorkspace(string workspacePath)
+    {
+        _createIsolationDirectory(_workspaceRootPath);
+        RejectReparsePoints(_workspaceRootPath, _workspaceRootPath);
+        _createIsolationDirectory(workspacePath);
         RejectReparsePoints(_workspaceRootPath, workspacePath);
-        return workspacePath;
     }
 
     private static string CreateInvocationProfileName(string profileNamespace)
@@ -856,26 +1069,121 @@ public sealed class ExternalProgramHost : IExternalProgramHost
         return "OpenLineOps.External." + digest[..40];
     }
 
-    private static string? TryDeleteAppContainerProfile(string profileName)
+    private async ValueTask<string?> TryDeleteAppContainerProfileAsync(
+        string profileName,
+        string? profileLifecycleManagerServiceSid,
+        CancellationToken cancellationToken)
+    {
+        const int maximumAttempts = 24;
+        var retryDelay = TimeSpan.FromMilliseconds(50);
+        Exception? lastFailure = null;
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var deletionReported = _deleteAppContainerProfile(
+                    profileName,
+                    profileLifecycleManagerServiceSid);
+                var artifacts = _appContainerProfileArtifactsProbe(profileName);
+                if (!artifacts.AnyArtifactsExist)
+                {
+                    return null;
+                }
+
+                lastFailure = new InvalidOperationException(
+                    deletionReported
+                        ? $"AppContainer profile '{profileName}' retained lifecycle artifacts after deletion."
+                        : $"AppContainer profile '{profileName}' deletion reported no profile while lifecycle artifacts remain.");
+            }
+            catch (Win32Exception exception)
+            {
+                lastFailure = exception;
+            }
+            catch (Exception exception) when (exception is InvalidOperationException
+                                              or ArgumentException)
+            {
+                return DescribeCleanupException(exception);
+            }
+
+            if (attempt < maximumAttempts)
+            {
+                await _cleanupRetryDelay(retryDelay, cancellationToken).ConfigureAwait(false);
+                retryDelay = TimeSpan.FromMilliseconds(Math.Min(
+                    retryDelay.TotalMilliseconds * 2,
+                    250));
+            }
+        }
+
+        return $"Could not delete AppContainer profile '{profileName}' after "
+               + $"{maximumAttempts.ToString(CultureInfo.InvariantCulture)} bounded attempts: "
+               + DescribeCleanupException(lastFailure!);
+    }
+
+    private static string? TryDisposeIsolatedProcess(IIsolatedProcess process)
     {
         try
         {
-            WindowsAppContainerIdentity.DeleteProfile(profileName);
+            process.Dispose();
             return null;
         }
-        catch (Exception exception) when (exception is Win32Exception
-                                          or InvalidOperationException
-                                          or ArgumentException)
+        catch (Exception exception)
         {
-            return exception.Message;
+            return DescribeCleanupException(exception);
         }
+    }
+
+    private static ExternalProgramExecutionResult WithCleanupFailure(
+        ExternalProgramExecutionRequest request,
+        ExternalProgramExecutionResult result,
+        string cleanupScope,
+        string cleanupFailure)
+    {
+        var cleanupReason = $"External program '{request.ResourceId}' "
+                            + $"{cleanupScope} cleanup failed: {cleanupFailure}";
+        return ExternalProgramExecutionResult.Failed(
+            result.FailureReason is null
+                ? cleanupReason
+                : result.FailureReason + " Additional cleanup failure: " + cleanupReason,
+            result.Artifacts);
+    }
+
+    private static string DescribeCleanupException(Exception exception)
+    {
+        if (exception is AggregateException aggregate)
+        {
+            return string.Join(
+                " | ",
+                aggregate
+                    .Flatten()
+                    .InnerExceptions
+                    .Select(DescribeCleanupException));
+        }
+
+        var message = exception.Message
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Trim();
+        return string.IsNullOrEmpty(message)
+            ? exception.GetType().Name
+            : $"{exception.GetType().Name}: {message}";
+    }
+
+    private static ValueTask DelayCleanupRetryAsync(
+        TimeSpan delay,
+        CancellationToken cancellationToken) =>
+        new(Task.Delay(delay, cancellationToken));
+
+    private static void CreateDirectory(string path)
+    {
+        _ = Directory.CreateDirectory(path);
     }
 
     private async ValueTask VerifyFrozenResourceAsync(
         string resourceRootPath,
         IReadOnlyCollection<ImmutableContentFile> inventory,
         string contentReaderSid,
-        string contentHostReaderSid,
+        string stationServiceSid,
         CancellationToken cancellationToken)
     {
         if (_options.RequireImmutableContentProtection)
@@ -883,7 +1191,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
             await _contentProtector.VerifyAsync(
                 resourceRootPath,
                 inventory,
-                new ImmutableContentProtectionPolicy(contentReaderSid, contentHostReaderSid),
+                new ImmutableContentProtectionPolicy(contentReaderSid, stationServiceSid),
                     cancellationToken)
                 .ConfigureAwait(false);
             return;
@@ -1038,6 +1346,7 @@ public sealed class ExternalProgramHost : IExternalProgramHost
             || request.ResourceRootRelativePath.Contains('\\')
             || request.ResourceRootRelativePath.Split('/').Any(segment => segment is "" or "." or "..")
             || !IsCanonical(request.EntryPointRelativePath)
+            || !request.EntryPointRelativePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
             || request.EntryPointSizeBytes < 0
             || !IsLowercaseSha256(request.EntryPointSha256)
             || request.Files is null

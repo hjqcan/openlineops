@@ -43,7 +43,9 @@ internal sealed class WindowsProcessJob : IDisposable
     private const uint JobObjectLimitProcessMemory = 0x00000100;
     private const uint JobObjectLimitJobMemory = 0x00000200;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+    private const int JobObjectBasicAccountingInformation = 1;
     private const int JobObjectExtendedLimitInformation = 9;
+    private const uint TerminationExitCode = 0xC000013A;
 
     private readonly SafeJobHandle _handle;
 
@@ -56,20 +58,7 @@ internal sealed class WindowsProcessJob : IDisposable
     {
         ArgumentNullException.ThrowIfNull(limits);
         limits.Validate();
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException("Windows process jobs require Windows.");
-        }
-
-        var handle = CreateJobObject(IntPtr.Zero, null);
-        if (handle.IsInvalid)
-        {
-            throw new Win32Exception(
-                Marshal.GetLastWin32Error(),
-                "Could not create the external program Job Object.");
-        }
-
-        var job = new WindowsProcessJob(handle);
+        var job = CreateUnconfigured();
         try
         {
             job.Configure(limits);
@@ -82,13 +71,103 @@ internal sealed class WindowsProcessJob : IDisposable
         }
     }
 
+    public static WindowsProcessJob CreateKillOnClose()
+    {
+        var job = CreateUnconfigured();
+        try
+        {
+            job.ConfigureKillOnClose();
+            return job;
+        }
+        catch
+        {
+            job.Dispose();
+            throw;
+        }
+    }
+
+    private static WindowsProcessJob CreateUnconfigured()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("Windows process jobs require Windows.");
+        }
+
+        var handle = CreateJobObject(IntPtr.Zero, null);
+        if (handle.IsInvalid)
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Could not create the Windows process Job Object.");
+        }
+
+        return new WindowsProcessJob(handle);
+    }
+
+    public uint ActiveProcessCount
+    {
+        get
+        {
+            var length = Marshal.SizeOf<JobObjectBasicAccountingInformationData>();
+            var buffer = Marshal.AllocHGlobal(length);
+            try
+            {
+                if (!QueryInformationJobObject(
+                        _handle,
+                        JobObjectBasicAccountingInformation,
+                        buffer,
+                        checked((uint)length),
+                        out _))
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "Could not query the Windows process Job Object.");
+                }
+
+                return Marshal.PtrToStructure<JobObjectBasicAccountingInformationData>(buffer)
+                    .ActiveProcesses;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+    }
+
+    public bool IsClosed => _handle.IsClosed;
+
+    public TResult UseHandle<TResult>(Func<IntPtr, TResult> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        if (_handle.IsInvalid || _handle.IsClosed)
+        {
+            throw new ObjectDisposedException(
+                nameof(WindowsProcessJob),
+                "The Windows process Job Object handle is unavailable.");
+        }
+
+        var addedReference = false;
+        try
+        {
+            _handle.DangerousAddRef(ref addedReference);
+            return action(_handle.DangerousGetHandle());
+        }
+        finally
+        {
+            if (addedReference)
+            {
+                _handle.DangerousRelease();
+            }
+        }
+    }
+
     public void Assign(SafeProcessHandle processHandle)
     {
         ArgumentNullException.ThrowIfNull(processHandle);
         if (processHandle.IsInvalid || processHandle.IsClosed)
         {
             throw new ArgumentException(
-                "External program process handle must be open.",
+                "The process handle assigned to a Windows Job Object must be open.",
                 nameof(processHandle));
         }
 
@@ -96,8 +175,18 @@ internal sealed class WindowsProcessJob : IDisposable
         {
             throw new Win32Exception(
                 Marshal.GetLastWin32Error(),
-                "Could not assign the suspended external program to its Job Object. "
+                "Could not assign the process to its Windows Job Object. "
                 + "The host may already belong to a Job Object that prohibits nested jobs.");
+        }
+    }
+
+    public void Terminate()
+    {
+        if (!_handle.IsClosed && !TerminateJobObject(_handle, TerminationExitCode))
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "Could not terminate the Windows process Job Object.");
         }
     }
 
@@ -124,6 +213,24 @@ internal sealed class WindowsProcessJob : IDisposable
             JobMemoryLimit = checked((nuint)limits.JobMemoryLimitBytes)
         };
 
+        SetExtendedLimits(information);
+    }
+
+    private void ConfigureKillOnClose()
+    {
+        var information = new JobObjectExtendedLimitInformationData
+        {
+            BasicLimitInformation = new JobObjectBasicLimitInformation
+            {
+                LimitFlags = JobObjectLimitKillOnJobClose
+            }
+        };
+
+        SetExtendedLimits(information);
+    }
+
+    private void SetExtendedLimits(JobObjectExtendedLimitInformationData information)
+    {
         var length = Marshal.SizeOf<JobObjectExtendedLimitInformationData>();
         var buffer = Marshal.AllocHGlobal(length);
         try
@@ -137,7 +244,7 @@ internal sealed class WindowsProcessJob : IDisposable
             {
                 throw new Win32Exception(
                     Marshal.GetLastWin32Error(),
-                    "Could not configure the external program Job Object.");
+                    "Could not configure the Windows process Job Object.");
             }
         }
         finally
@@ -162,6 +269,19 @@ internal sealed class WindowsProcessJob : IDisposable
     private static extern bool AssignProcessToJobObject(
         SafeJobHandle job,
         SafeProcessHandle process);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool QueryInformationJobObject(
+        SafeJobHandle job,
+        int informationClass,
+        IntPtr information,
+        uint informationLength,
+        out uint returnLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateJobObject(SafeJobHandle job, uint exitCode);
 
     private sealed class SafeJobHandle : SafeHandleZeroOrMinusOneIsInvalid
     {
@@ -214,5 +334,18 @@ internal sealed class WindowsProcessJob : IDisposable
         public nuint JobMemoryLimit;
         public nuint PeakProcessMemoryUsed;
         public nuint PeakJobMemoryUsed;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectBasicAccountingInformationData
+    {
+        public long TotalUserTime;
+        public long TotalKernelTime;
+        public long ThisPeriodTotalUserTime;
+        public long ThisPeriodTotalKernelTime;
+        public uint TotalPageFaultCount;
+        public uint TotalProcesses;
+        public uint ActiveProcesses;
+        public uint TotalTerminatedProcesses;
     }
 }

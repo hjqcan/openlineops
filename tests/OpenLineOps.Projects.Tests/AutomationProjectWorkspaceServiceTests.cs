@@ -42,7 +42,7 @@ public sealed class AutomationProjectWorkspaceServiceTests : IDisposable
         var published = await projectService.PublishSnapshotAsync(
             "project.workspace",
             new PublishProjectSnapshotRequest(
-                "snapshot.main.v1",
+                "snapshot.main",
                 "application.main",
                 "topology.main",
                 ["layout.main"],
@@ -86,14 +86,14 @@ public sealed class AutomationProjectWorkspaceServiceTests : IDisposable
         }
         Assert.True(opened.IsSuccess);
         Assert.Equal(Path.GetFullPath(_projectDirectory), opened.Value.Project.ProjectPath);
-        Assert.Equal("snapshot.main.v1", opened.Value.Project.ActiveSnapshotId);
+        Assert.Equal("snapshot.main", opened.Value.Project.ActiveSnapshotId);
         Assert.Single(opened.Value.Project.Applications);
         Assert.Single(opened.Value.Project.Snapshots);
         Assert.Equal("layout.main", Assert.Single(opened.Value.Project.Snapshots.Single().LayoutIds));
         Assert.Equal(new string('a', 64), opened.Value.Project.Snapshots.Single().ReleaseContentSha256);
         Assert.Equal("topology.main", opened.Value.Project.Applications.Single().TopologyId);
         Assert.Contains("process.main", opened.Value.Project.Applications.Single().ProcessDefinitionIds);
-        Assert.Equal("snapshot.main.v1", opened.Value.Manifest.ActiveSnapshotId);
+        Assert.Equal("snapshot.main", opened.Value.Manifest.ActiveSnapshotId);
     }
 
     [Fact]

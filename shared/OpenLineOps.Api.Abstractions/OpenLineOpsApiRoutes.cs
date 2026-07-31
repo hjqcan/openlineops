@@ -5,7 +5,6 @@ public static class OpenLineOpsApiRoutes
     public const string Platform = "api/platform";
     public const string Devices = "api/devices";
     public const string OperationsAlarms = "api/operations/alarms";
-    public const string Plugins = "api/plugins";
     public const string AutomationProjects = "api/automation-projects";
     public const string AutomationProjectWorkspaces = "api/automation-project-workspaces";
     public const string RuntimeMonitoring = "api/runtime/monitoring";
@@ -35,6 +34,8 @@ public static class OpenLineOpsApiRoutes
         AutomationProjects + "/{projectId}/applications/{applicationId}/production-lines";
     public const string ProjectApplicationExternalPrograms =
         AutomationProjects + "/{projectId}/applications/{applicationId}/external-programs";
+    public const string ProjectApplicationExtensions =
+        AutomationProjects + "/{projectId}/applications/{applicationId}/extensions";
     public const string ProjectSnapshotProductionRunContext =
         AutomationProjects + "/{projectId}/snapshots/{snapshotId}/production-run-context";
     public const string Traceability = "api/traceability";

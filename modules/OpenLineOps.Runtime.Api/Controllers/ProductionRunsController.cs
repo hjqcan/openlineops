@@ -14,6 +14,7 @@ namespace OpenLineOps.Runtime.Api.Controllers;
 [ApiController]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
 [Route(OpenLineOpsApiRoutes.ProductionRuns)]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 public sealed class ProductionRunsController(
     IProductionRunRepository repository,
     IProductionRunCoordinator coordinator) : ControllerBase
@@ -39,6 +40,7 @@ public sealed class ProductionRunsController(
     }
 
     [HttpPost("{productionRunId}/commands/{command}")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<ProductionRunReadModel>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -60,7 +62,7 @@ public sealed class ProductionRunsController(
         {
             applicationRequest = new ProductionRunCommandRequest(
                 parsedCommand,
-                request.ActorId,
+                User.GetRequiredActorId(),
                 request.Reason,
                 request.OperationId,
                 ToRecoveryDecision(parsedCommand, request));
@@ -114,7 +116,7 @@ public sealed class ProductionRunsController(
         && Enum.IsDefined(command)
         && string.Equals(command.ToString(), value, StringComparison.Ordinal);
 
-    private static ProductionRecoveryDecision? ToRecoveryDecision(
+    private ProductionRecoveryDecision? ToRecoveryDecision(
         ProductionRunCommand command,
         ProductionRunCommandApiRequest request)
     {
@@ -188,7 +190,7 @@ public sealed class ProductionRunsController(
         return new ProductionRecoveryDecision(
             decisionId,
             kind,
-            request.ActorId,
+            User.GetRequiredActorId(),
             request.Reason
                 ?? throw new ArgumentException(
                     "A Recovery Decision requires an operator reason.",

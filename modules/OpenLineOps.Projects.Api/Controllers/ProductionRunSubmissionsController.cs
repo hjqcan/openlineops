@@ -17,6 +17,7 @@ public sealed class ProductionRunSubmissionsController(
     IProjectReleaseProductionRunLauncher productionRunLauncher) : ControllerBase
 {
     [HttpPost]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<ProductionRunReadModel>(StatusCodes.Status202Accepted)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
@@ -56,7 +57,7 @@ public sealed class ProductionRunSubmissionsController(
                 new SubmitProjectReleaseProductionRunRequest(
                     Guid.ParseExact(request.ProductionRunId!, "D"),
                     Guid.ParseExact(request.ProductionUnitId!, "D"),
-                    request.ActorId!),
+                    User.GetRequiredActorId()),
                 cancellationToken)
             .ConfigureAwait(false);
         if (submitResult.IsFailure)
@@ -81,7 +82,6 @@ public sealed class ProductionRunSubmissionsController(
         AddCanonicalText(errors, nameof(request.ProjectSnapshotId), request.ProjectSnapshotId);
         AddCanonicalGuid(errors, nameof(request.ProductionRunId), request.ProductionRunId);
         AddCanonicalGuid(errors, nameof(request.ProductionUnitId), request.ProductionUnitId);
-        AddCanonicalText(errors, nameof(request.ActorId), request.ActorId);
         return errors;
     }
 

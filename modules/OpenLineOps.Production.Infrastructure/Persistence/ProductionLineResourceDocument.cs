@@ -14,6 +14,7 @@ internal sealed record ProductionLineResourceDocument(
     OperationDefinitionDocument[] Operations,
     RouteTransitionDocument[] Transitions,
     LineControllerAuthorizationDocument[] LineControllerAuthorizations,
+    ProductionRouteLayoutDocument RouteLayout,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc)
 {
@@ -21,6 +22,14 @@ internal sealed record ProductionLineResourceDocument(
 
     public const string Kind = "OpenLineOps.ProductionLine";
 }
+
+internal sealed record ProductionRouteLayoutDocument(
+    OperationCanvasPositionDocument[] OperationPositions);
+
+internal sealed record OperationCanvasPositionDocument(
+    string OperationId,
+    int X,
+    int Y);
 
 internal sealed record ProductModelDocument(
     string ProductModelId,
@@ -33,7 +42,14 @@ internal sealed record OperationDefinitionDocument(
     string StationSystemId,
     string FlowDefinitionId,
     string ConfigurationSnapshotId,
-    OperationResourceBindingDocument[] Resources);
+    OperationResourceBindingDocument[] Resources,
+    OperationInputMappingDocument[] InputMappings);
+
+internal sealed record OperationInputMappingDocument(
+    string TargetInputKey,
+    string SourceOperationId,
+    string SourceOutputKey,
+    string ExpectedValueKind);
 
 internal sealed record OperationResourceBindingDocument(
     string BindingId,
@@ -58,7 +74,8 @@ internal sealed record LineControllerAuthorizationDocument(
 internal sealed record RouteTransitionDocument(
     string TransitionId,
     string SourceOperationId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    string? TerminalDisposition,
     string Kind,
     string? RequiredJudgement,
     int? MaxTraversals,

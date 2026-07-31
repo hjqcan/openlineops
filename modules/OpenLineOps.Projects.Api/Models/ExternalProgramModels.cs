@@ -58,6 +58,11 @@ public sealed record ExternalProgramTrialApiRequest(
     IReadOnlyDictionary<string, ExternalProgramTrialInputApiRequest?>? Inputs);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record ExternalProgramDefinitionTrialApiRequest(
+    SaveExternalProgramResourceApiRequest? Definition,
+    IReadOnlyDictionary<string, ExternalProgramTrialInputApiRequest?>? Inputs);
+
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record ExternalProgramTrialInputApiRequest(string? Kind, string? CanonicalValue);
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]

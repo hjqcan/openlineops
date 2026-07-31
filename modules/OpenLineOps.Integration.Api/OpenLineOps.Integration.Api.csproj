@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../shared/OpenLineOps.Api.Abstractions/OpenLineOps.Api.Abstractions.csproj" />
+    <ProjectReference Include="../OpenLineOps.Integration.Application/OpenLineOps.Integration.Application.csproj" />
+    <ProjectReference Include="../OpenLineOps.Integration.Domain/OpenLineOps.Integration.Domain.csproj" />
+    <ProjectReference Include="../OpenLineOps.Integration.Infrastructure/OpenLineOps.Integration.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

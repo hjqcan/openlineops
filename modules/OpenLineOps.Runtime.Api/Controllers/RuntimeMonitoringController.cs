@@ -14,6 +14,7 @@ namespace OpenLineOps.Runtime.Api.Controllers;
 [ApiController]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
 [Route(OpenLineOpsApiRoutes.RuntimeMonitoring)]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 public sealed class RuntimeMonitoringController : ControllerBase
 {
     private readonly IRuntimeMonitoringService _monitoringService;
@@ -161,6 +162,7 @@ public sealed class RuntimeMonitoringController : ControllerBase
     }
 
     [HttpPost("alarms/{alarmId:guid}/acknowledgements")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<RuntimeAlarmResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
@@ -177,7 +179,7 @@ public sealed class RuntimeMonitoringController : ControllerBase
         var result = await _monitoringService
             .AcknowledgeAlarmAsync(
                 new RuntimeIncidentId(alarmId),
-                request.AcknowledgedBy,
+                User.GetRequiredActorId(),
                 _clock.UtcNow,
                 cancellationToken)
             .ConfigureAwait(false);

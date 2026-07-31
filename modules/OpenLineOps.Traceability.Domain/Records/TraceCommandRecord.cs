@@ -1,5 +1,5 @@
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Traceability.Domain.Identifiers;
-using CommandResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
 
 namespace OpenLineOps.Traceability.Domain.Records;
 
@@ -13,8 +13,8 @@ public sealed record TraceCommandRecord
         string targetId,
         string targetCapabilityId,
         string commandName,
-        TraceCommandStatus status,
-        CommandResultJudgement? resultJudgement,
+        ExecutionStatus executionStatus,
+        ResultJudgement resultJudgement,
         DateTimeOffset createdAtUtc,
         DateTimeOffset deadlineAtUtc,
         DateTimeOffset? acceptedAtUtc,
@@ -30,7 +30,8 @@ public sealed record TraceCommandRecord
         TargetId = TraceabilityIdGuard.NotBlank(targetId, nameof(targetId));
         TargetCapabilityId = TraceabilityIdGuard.NotBlank(targetCapabilityId, nameof(targetCapabilityId));
         CommandName = TraceabilityIdGuard.NotBlank(commandName, nameof(commandName));
-        Status = status;
+        TraceCommandExecutionAxes.Validate(executionStatus, resultJudgement);
+        ExecutionStatus = executionStatus;
         ResultJudgement = resultJudgement;
         CreatedAtUtc = RequiredTimestamp(createdAtUtc, nameof(createdAtUtc));
         DeadlineAtUtc = RequiredTimestamp(deadlineAtUtc, nameof(deadlineAtUtc));
@@ -52,7 +53,12 @@ public sealed record TraceCommandRecord
             throw new ArgumentException("Command timestamps must be chronological.", nameof(completedAtUtc));
         }
 
-        ValidateResultJudgement(status, resultJudgement);
+        if ((ExecutionStatus == ExecutionStatus.Completed) == (FailureReason is not null))
+        {
+            throw new ArgumentException(
+                "Completed command execution cannot contain failure evidence; every unsuccessful execution requires it.",
+                nameof(failureReason));
+        }
     }
 
     public RuntimeCommandId RuntimeCommandId { get; }
@@ -69,9 +75,9 @@ public sealed record TraceCommandRecord
 
     public string CommandName { get; }
 
-    public TraceCommandStatus Status { get; }
+    public ExecutionStatus ExecutionStatus { get; }
 
-    public CommandResultJudgement? ResultJudgement { get; }
+    public ResultJudgement ResultJudgement { get; }
 
     public DateTimeOffset CreatedAtUtc { get; }
 
@@ -94,50 +100,45 @@ public sealed record TraceCommandRecord
             : value;
     }
 
-    private static void ValidateResultJudgement(
-        TraceCommandStatus status,
-        CommandResultJudgement? resultJudgement)
+}
+
+internal static class TraceCommandExecutionAxes
+{
+    public static void Validate(
+        ExecutionStatus executionStatus,
+        ResultJudgement resultJudgement)
     {
-        var isTerminal = status is TraceCommandStatus.Completed
-            or TraceCommandStatus.Failed
-            or TraceCommandStatus.TimedOut
-            or TraceCommandStatus.Canceled
-            or TraceCommandStatus.Rejected;
-        if (!isTerminal)
-        {
-            if (resultJudgement is not null)
-            {
-                throw new ArgumentException(
-                    $"Non-terminal command status {status} cannot define a result judgement.",
-                    nameof(resultJudgement));
-            }
-
-            return;
-        }
-
-        if (resultJudgement is null)
+        if (!Enum.IsDefined(executionStatus)
+            || executionStatus is ExecutionStatus.Pending or ExecutionStatus.Running)
         {
             throw new ArgumentException(
-                $"Terminal command status {status} requires a result judgement.",
+                $"Trace command execution status {executionStatus} must be terminal.",
+                nameof(executionStatus));
+        }
+
+        if (!Enum.IsDefined(resultJudgement))
+        {
+            throw new ArgumentException(
+                $"Trace command result judgement {resultJudgement} is unsupported.",
                 nameof(resultJudgement));
         }
 
-        var isValid = (status, resultJudgement.Value) switch
+        var isValid = (executionStatus, resultJudgement) switch
         {
-            (TraceCommandStatus.Completed, CommandResultJudgement.Passed) => true,
-            (TraceCommandStatus.Completed, CommandResultJudgement.Failed) => true,
-            (TraceCommandStatus.Completed, CommandResultJudgement.Aborted) => true,
-            (TraceCommandStatus.Completed, CommandResultJudgement.NotApplicable) => true,
-            (TraceCommandStatus.Failed, CommandResultJudgement.Unknown) => true,
-            (TraceCommandStatus.TimedOut, CommandResultJudgement.Unknown) => true,
-            (TraceCommandStatus.Canceled, CommandResultJudgement.Unknown) => true,
-            (TraceCommandStatus.Rejected, CommandResultJudgement.Unknown) => true,
+            (ExecutionStatus.Completed, ResultJudgement.Passed) => true,
+            (ExecutionStatus.Completed, ResultJudgement.Failed) => true,
+            (ExecutionStatus.Completed, ResultJudgement.Aborted) => true,
+            (ExecutionStatus.Completed, ResultJudgement.NotApplicable) => true,
+            (ExecutionStatus.Canceled, ResultJudgement.Aborted) => true,
+            (ExecutionStatus.Failed, ResultJudgement.Unknown) => true,
+            (ExecutionStatus.TimedOut, ResultJudgement.Unknown) => true,
+            (ExecutionStatus.Rejected, ResultJudgement.Unknown) => true,
             _ => false
         };
         if (!isValid)
         {
             throw new ArgumentException(
-                $"Result judgement {resultJudgement} is invalid for command status {status}.",
+                $"Result judgement {resultJudgement} is invalid for command execution status {executionStatus}.",
                 nameof(resultJudgement));
         }
     }

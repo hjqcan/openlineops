@@ -1,4 +1,5 @@
 using OpenLineOps.Plugin.Abstractions;
+using OpenLineOps.Plugins.Application.Discovery;
 using OpenLineOps.Plugins.Infrastructure.Lifecycle;
 
 namespace OpenLineOps.Plugins.Tests;
@@ -243,6 +244,18 @@ public sealed class ExternalPluginProcessStartInfoBuilderTests
             ["device.external-process"]);
 
         return new ExternalPluginProcessStartRequest(
+            new PluginPackageExecutionIdentity(
+                "project.test",
+                "application.test",
+                new PluginPackageRuntimeIdentity(
+                    manifest.Id,
+                    manifest.Version,
+                    new string('a', 64),
+                    new string('b', 64),
+                    new string('c', 64),
+                    "1.0.0",
+                    "win-x64",
+                    "openlineops.plugin-abi/1")),
             manifest,
             packagePath,
             manifestPath,

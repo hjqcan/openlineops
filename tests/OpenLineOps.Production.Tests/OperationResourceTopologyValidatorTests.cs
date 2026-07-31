@@ -127,7 +127,8 @@ public sealed class OperationResourceTopologyValidatorTests
                     OperationResourceKind.Device,
                     deviceTargetId,
                     OperationResourceResolution.Fixed)
-            ]);
+            ],
+            []);
 
     private static AutomationTopologyDetails Topology() => new(
         "topology.main",
@@ -153,13 +154,13 @@ public sealed class OperationResourceTopologyValidatorTests
                 "binding.axis-a",
                 "system.axis-a",
                 "motion.axis",
-                "DeviceInstance",
+                "PluginCommand",
                 "axis-a"),
             new DriverBindingDetails(
                 "binding.axis-b",
                 "system.axis-b",
                 "motion.axis",
-                "DeviceInstance",
+                "PluginCommand",
                 "axis-b")
         ],
         [],

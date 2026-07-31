@@ -112,6 +112,7 @@ public sealed record CreateTraceRouteDecisionRequest(
     string? SourceOperationRunId,
     string? TransitionId,
     string? TargetOperationId,
+    string? TerminalDisposition,
     string? SourceJudgement,
     int Traversal,
     DateTimeOffset DecidedAtUtc);
@@ -134,7 +135,7 @@ public sealed record CreateTraceCommandRequest(
     string? TargetId,
     string? TargetCapabilityId,
     string? CommandName,
-    string? Status,
+    string? ExecutionStatus,
     string? ResultJudgement,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadlineAtUtc,
@@ -155,7 +156,8 @@ public sealed record CreateMeasurementRecordRequest(
     string? ActionId,
     string? TargetKind,
     string? TargetId,
-    string? CommandStatus,
+    string? CommandExecutionStatus,
+    string? CommandResultJudgement,
     bool? Passed,
     DateTimeOffset MeasuredAtUtc);
 

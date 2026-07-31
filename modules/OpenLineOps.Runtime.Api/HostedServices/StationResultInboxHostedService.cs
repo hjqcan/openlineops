@@ -9,13 +9,18 @@ namespace OpenLineOps.Runtime.Api.HostedServices;
 
 public sealed class StationResultInboxHostedService(
     RabbitMqStationCoordinatorTransport transport,
-    IServiceScopeFactory scopeFactory) : BackgroundService
+    IServiceScopeFactory scopeFactory,
+    IHostApplicationLifetime applicationLifetime) : IHostedService
 {
-    protected override Task ExecuteAsync(CancellationToken stoppingToken) =>
-        transport.RunResultInboxAsync(
+    public Task StartAsync(CancellationToken cancellationToken) =>
+        transport.StartResultInboxAsync(
             HandleMaterialArrivalAsync,
             HandleRecoveryRequiredAsync,
-            stoppingToken);
+            applicationLifetime.ApplicationStopping,
+            cancellationToken);
+
+    public Task StopAsync(CancellationToken cancellationToken) =>
+        transport.StopResultInboxAsync(cancellationToken);
 
     private async ValueTask HandleMaterialArrivalAsync(
         MaterialArrived message,

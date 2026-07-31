@@ -1,3 +1,4 @@
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Plugins.Application.Discovery;
 using OpenLineOps.Plugins.Application.Validation;
 
@@ -17,10 +18,11 @@ public sealed class PluginCapabilityInventory : IPluginCapabilityInventory
     }
 
     public async ValueTask<IReadOnlyCollection<PluginCapabilityDescriptor>> ListCapabilitiesAsync(
+        ProjectApplicationWorkspaceScope scope,
         CancellationToken cancellationToken = default)
     {
         var packages = await _packageCatalog
-            .DiscoverAsync(cancellationToken)
+            .DiscoverAsync(scope, cancellationToken)
             .ConfigureAwait(false);
         var capabilities = new Dictionary<string, PluginCapabilityDescriptor>(StringComparer.Ordinal);
 
@@ -59,6 +61,7 @@ public sealed class PluginCapabilityInventory : IPluginCapabilityInventory
 
     public async ValueTask<bool> HasCapabilityAsync(
         string capability,
+        ProjectApplicationWorkspaceScope scope,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(capability))
@@ -66,7 +69,7 @@ public sealed class PluginCapabilityInventory : IPluginCapabilityInventory
             return false;
         }
 
-        var capabilities = await ListCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
+        var capabilities = await ListCapabilitiesAsync(scope, cancellationToken).ConfigureAwait(false);
 
         return capabilities.Any(candidate => string.Equals(
             candidate.Capability,

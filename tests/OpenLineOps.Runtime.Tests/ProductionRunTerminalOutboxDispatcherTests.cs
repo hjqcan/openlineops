@@ -28,7 +28,8 @@ public sealed class ProductionRunTerminalOutboxDispatcherTests
             new ExecutableRuntimeProcess(
                 new ProcessDefinitionId("process.main"),
                 new ProcessVersionId("process-version.main"),
-                []));
+                []),
+            []);
         var run = ProductionRun.Create(
             ProductionRunId.New(),
             "project.main",
@@ -70,7 +71,15 @@ public sealed class ProductionRunTerminalOutboxDispatcherTests
             1,
             1,
             0,
-            now.AddSeconds(1)).Succeeded);
+            now.AddSeconds(1),
+            ProductionRunExecutionEvidenceTestFactory.Create(
+                run,
+                operationRun.OperationRunId,
+                ExecutionStatus.Completed,
+                ResultJudgement.Passed,
+                now.AddSeconds(1),
+                1,
+                1)).Succeeded);
         await repository.SaveAsync(run, 0);
         var handler = new RecordingHandler();
         using var dispatcher = new ProductionRunTerminalOutboxDispatcher(repository, [handler]);
@@ -85,10 +94,10 @@ public sealed class ProductionRunTerminalOutboxDispatcherTests
         public List<ProductionRunSnapshot> Runs { get; } = [];
 
         public ValueTask HandleAsync(
-            ProductionRunSnapshot run,
+            ProductionRunTerminalEvidence evidence,
             CancellationToken cancellationToken = default)
         {
-            Runs.Add(run);
+            Runs.Add(evidence.Run);
             return ValueTask.CompletedTask;
         }
     }

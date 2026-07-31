@@ -21,6 +21,7 @@ public sealed class StationSafetyController(StationEmergencyStopService service)
         };
 
     [HttpPost(OpenLineOpsApiRoutes.OperationsStationEmergencyStop)]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.SafetyPolicy)]
     [ProducesResponseType<StationEmergencyStopApiResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<StationEmergencyStopApiResponse>(StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -41,7 +42,7 @@ public sealed class StationSafetyController(StationEmergencyStopService service)
                         request.ApplicationId,
                         request.ProjectSnapshotId,
                         stationSystemId,
-                        request.ActorId,
+                        User.GetRequiredActorId(),
                         request.Reason,
                         ParseUtc(request.RequestedAtUtc, nameof(request.RequestedAtUtc))),
                     cancellationToken)
@@ -73,6 +74,7 @@ public sealed class StationSafetyController(StationEmergencyStopService service)
     }
 
     [HttpGet(OpenLineOpsApiRoutes.OperationsSafetyEvents)]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.SafetyConfirmationPolicy)]
     [ProducesResponseType<StationSafetyEventsApiResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<StationSafetyEventsApiResponse>> ListSafetyEventsAsync(

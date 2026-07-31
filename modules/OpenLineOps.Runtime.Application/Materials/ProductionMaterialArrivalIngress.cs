@@ -177,10 +177,10 @@ public sealed class ProductionMaterialArrivalIngress(
     {
         var query = material.Kind switch
         {
-            MaterialKind.ProductionUnit => new ProductionMaterialTimelineQuery(
+            MaterialKind.ProductionUnit => ProductionMaterialTimelineQuery.StrictIntersection(
                 productionUnitId: material.RequireProductionUnitId(),
                 throughUtc: message.ArrivedAtUtc),
-            MaterialKind.Carrier => new ProductionMaterialTimelineQuery(
+            MaterialKind.Carrier => ProductionMaterialTimelineQuery.StrictIntersection(
                 carrierId: material.RequireCarrierId(),
                 throughUtc: message.ArrivedAtUtc),
             _ => throw new InvalidDataException(

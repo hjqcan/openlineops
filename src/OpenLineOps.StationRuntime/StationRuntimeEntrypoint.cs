@@ -11,8 +11,10 @@ public static class StationRuntimeEntrypoint
 
     public static async Task<int> RunAsync(
         IReadOnlyList<string> arguments,
+        StationRuntimeHostOptions options,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(options);
         StationRuntimeCommandLine commandLine;
         try
         {
@@ -22,6 +24,17 @@ public static class StationRuntimeEntrypoint
         {
             await Console.Error.WriteLineAsync(exception.Message).ConfigureAwait(false);
             return 64;
+        }
+
+        try
+        {
+            options = options.Validate();
+        }
+        catch (Exception exception) when (exception is InvalidDataException
+                                           or FileNotFoundException)
+        {
+            await Console.Error.WriteLineAsync(exception.Message).ConfigureAwait(false);
+            return 65;
         }
 
         StationOperationRequestDocument request;
@@ -47,6 +60,7 @@ public static class StationRuntimeEntrypoint
         {
             result = await StationOperationExecutor.ExecuteAsync(
                     request,
+                    options,
                     Path.GetDirectoryName(commandLine.ResultFilePath)!,
                     startedAtUtc,
                     cancellationToken)

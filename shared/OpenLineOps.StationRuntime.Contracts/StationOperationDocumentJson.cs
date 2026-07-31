@@ -10,6 +10,7 @@ public static class StationOperationDocumentJson
     {
         PropertyNameCaseInsensitive = false,
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        RespectRequiredConstructorParameters = true,
         Converters = { new JsonStringEnumConverter(allowIntegerValues: false) }
     };
 
@@ -63,6 +64,9 @@ public static class StationOperationDocumentJson
         ArgumentNullException.ThrowIfNull(request.ResourceFenceAuthority);
         RequirePipeName(request.ResourceFenceAuthority.PipeName);
         RequireSha256(request.ResourceFenceAuthority.AccessToken, nameof(request.ResourceFenceAuthority.AccessToken));
+        RequireWindowsSid(
+            request.ResourceFenceAuthority.AuthorizedPrincipalSid,
+            nameof(request.ResourceFenceAuthority.AuthorizedPrincipalSid));
         if (request.OperationAttempt <= 0)
         {
             throw new InvalidDataException("Operation attempt must be positive.");
@@ -73,6 +77,8 @@ public static class StationOperationDocumentJson
         {
             throw new InvalidDataException("Station operation inputs must be one JSON object.");
         }
+
+        _ = ProductionContextDocument.Read(request.Inputs);
 
         ValidateResourceFences(request.ResourceFences);
     }
@@ -313,7 +319,12 @@ public static class StationOperationDocumentJson
             RequireCanonical(command.TargetId, nameof(command.TargetId));
             RequireCanonical(command.CapabilityId, nameof(command.CapabilityId));
             RequireCanonical(command.CommandName, nameof(command.CommandName));
-            RequireToken(command.Status, nameof(command.Status));
+            if (command.ExecutionStatus is ExecutionStatus.Pending or ExecutionStatus.Running
+                || !Enum.IsDefined(command.ExecutionStatus))
+            {
+                throw new InvalidDataException(
+                    "Station command execution status must be terminal.");
+            }
             RequireUtc(command.CreatedAtUtc, nameof(command.CreatedAtUtc));
             RequireUtc(command.DeadlineAtUtc, nameof(command.DeadlineAtUtc));
             RequireOptionalUtc(command.AcceptedAtUtc, nameof(command.AcceptedAtUtc));
@@ -321,6 +332,25 @@ public static class StationOperationDocumentJson
             RequireOptionalUtc(command.CompletedAtUtc, nameof(command.CompletedAtUtc));
             RequireOptionalCanonical(command.ResultPayload, nameof(command.ResultPayload), 8 * 1024 * 1024);
             RequireOptionalCanonical(command.FailureReason, nameof(command.FailureReason), 4096);
+            var commandAxesAreValid = (command.ExecutionStatus, command.ResultJudgement) switch
+            {
+                (ExecutionStatus.Completed, ResultJudgement.Passed) => true,
+                (ExecutionStatus.Completed, ResultJudgement.Failed) => true,
+                (ExecutionStatus.Completed, ResultJudgement.Aborted) => true,
+                (ExecutionStatus.Completed, ResultJudgement.NotApplicable) => true,
+                (ExecutionStatus.Canceled, ResultJudgement.Aborted) => true,
+                (ExecutionStatus.Failed, ResultJudgement.Unknown) => true,
+                (ExecutionStatus.TimedOut, ResultJudgement.Unknown) => true,
+                (ExecutionStatus.Rejected, ResultJudgement.Unknown) => true,
+                _ => false
+            };
+            if (!commandAxesAreValid
+                || (command.ExecutionStatus == ExecutionStatus.Completed)
+                    == (command.FailureReason is not null))
+            {
+                throw new InvalidDataException(
+                    "Station command execution status, judgement, and failure evidence are inconsistent.");
+            }
         }
     }
 
@@ -391,6 +421,43 @@ public static class StationOperationDocumentJson
         if (value.Any(character => !char.IsAsciiLetter(character)))
         {
             throw new InvalidDataException($"{parameterName} must contain only ASCII letters.");
+        }
+    }
+
+    private static void RequireWindowsSid(string value, string parameterName)
+    {
+        RequireCanonical(value, parameterName, 184);
+        var parts = value.Split('-');
+        if (parts.Length is < 4 or > 18
+            || !string.Equals(parts[0], "S", StringComparison.Ordinal)
+            || !string.Equals(parts[1], "1", StringComparison.Ordinal)
+            || !ulong.TryParse(
+                parts[2],
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var authority)
+            || !string.Equals(
+                authority.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                parts[2],
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException($"{parameterName} must be a canonical Windows SID.");
+        }
+
+        for (var index = 3; index < parts.Length; index++)
+        {
+            if (!uint.TryParse(
+                    parts[index],
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var subAuthority)
+                || !string.Equals(
+                    subAuthority.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    parts[index],
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException($"{parameterName} must be a canonical Windows SID.");
+            }
         }
     }
 

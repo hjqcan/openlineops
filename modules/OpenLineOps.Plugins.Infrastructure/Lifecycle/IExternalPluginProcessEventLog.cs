@@ -3,6 +3,6 @@ namespace OpenLineOps.Plugins.Infrastructure.Lifecycle;
 public interface IExternalPluginProcessEventLog : IExternalPluginProcessEventSink
 {
     ValueTask<IReadOnlyList<ExternalPluginProcessEvent>> ListAsync(
-        ExternalPluginProcessEventQuery? query = null,
+        ExternalPluginProcessEventQuery query,
         CancellationToken cancellationToken = default);
 }

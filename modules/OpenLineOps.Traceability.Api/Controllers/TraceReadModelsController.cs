@@ -11,6 +11,7 @@ namespace OpenLineOps.Traceability.Api.Controllers;
 [ApiController]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Traceability)]
 [Route(OpenLineOpsApiRoutes.Traceability + "/read-models")]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 public sealed class TraceReadModelsController : ControllerBase
 {
     private readonly ITraceReadModelService _readModelService;

@@ -5,7 +5,19 @@ namespace OpenLineOps.Operations.Application.Contract.Services;
 
 public interface IAlarmAppService
 {
+    Task<AlarmDefinitionCommandResult> RegisterDefinitionAsync(
+        RegisterAlarmDefinitionRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<AlarmDefinitionDetails?> GetDefinitionAsync(
+        string id,
+        CancellationToken cancellationToken = default);
+
     Task<AlarmDetails> RaiseAsync(
+        RaiseAlarmRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<RaiseAlarmCommandResult> RaiseCommandAsync(
         RaiseAlarmRequest request,
         CancellationToken cancellationToken = default);
 
@@ -22,8 +34,22 @@ public interface IAlarmAppService
         AcknowledgeAlarmRequest request,
         CancellationToken cancellationToken = default);
 
-    Task<OperationsApplicationResult> ResolveAsync(
+    Task<OperationsApplicationResult> ClearSourceAsync(
         string id,
-        ResolveAlarmRequest request,
+        ClearAlarmSourceRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<OperationsApplicationResult> ShelfAsync(
+        string id,
+        ShelfAlarmRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<OperationsApplicationResult> SuppressAsync(
+        string id,
+        SuppressAlarmRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyCollection<AlarmLifecycleFactDetails>> GetFactsAsync(
+        string id,
         CancellationToken cancellationToken = default);
 }

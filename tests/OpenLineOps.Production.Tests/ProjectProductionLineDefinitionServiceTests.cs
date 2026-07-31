@@ -57,9 +57,20 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
             Assert.Equal("Fixed", station.Resolution);
             Assert.Equal(operation.StationSystemId, station.TopologyTargetId);
         });
-        var transition = Assert.Single(result.Value.Transitions);
+        var transition = Assert.Single(result.Value.Transitions, candidate =>
+            candidate.TargetOperationId is not null);
         Assert.Equal("Sequence", transition.Kind);
         Assert.Equal("operation.test", transition.TargetOperationId);
+        Assert.Equal(
+            "Completed",
+            Assert.Single(result.Value.Transitions, candidate =>
+                candidate.TerminalDisposition is not null).TerminalDisposition);
+        Assert.Equal(
+            [("operation.load", 120, 80), ("operation.test", 400, 80)],
+            result.Value.RouteLayout.OperationPositions.Select(position => (
+                position.OperationId,
+                position.X,
+                position.Y)));
         Assert.True(File.Exists(Path.Combine(
             fixture.Scope.ApplicationRootPath,
             "production",
@@ -74,6 +85,15 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
         Assert.Equal(
             result.Value.Operations.SelectMany(operation => operation.Resources),
             restored.Value.Operations.SelectMany(operation => operation.Resources));
+        Assert.Equal(
+            result.Value.RouteLayout.OperationPositions.Select(position => (
+                position.OperationId,
+                position.X,
+                position.Y)),
+            restored.Value.RouteLayout.OperationPositions.Select(position => (
+                position.OperationId,
+                position.X,
+                position.Y)));
     }
 
     [Theory]
@@ -242,27 +262,49 @@ public sealed class ProjectProductionLineDefinitionServiceTests : IDisposable
                     "station.eol",
                     "flow.load",
                     "configuration.load",
-                    StationResources("load")),
+                    StationResources("load"),
+                    []),
                 new OperationDefinitionRequest(
                     "operation.test",
                     "External Program",
                     "station.eol",
                     "flow.test",
                     "configuration.test",
-                    StationResources("test"))
+                    StationResources("test"),
+                    [])
             ],
-            [new RouteTransitionRequest(
-                "load-test",
-                "operation.load",
-                "operation.test",
-                RouteTransitionKind.Sequence,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null)],
-            []);
+            [
+                new RouteTransitionRequest(
+                    "load-test",
+                    "operation.load",
+                    "operation.test",
+                    null,
+                    RouteTransitionKind.Sequence,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null),
+                new RouteTransitionRequest(
+                    "test-completed",
+                    "operation.test",
+                    null,
+                    TerminalDisposition.Completed,
+                    RouteTransitionKind.Sequence,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null)
+            ],
+            [],
+            new ProductionRouteLayoutRequest(
+            [
+                new OperationCanvasPositionRequest("operation.load", 120, 80),
+                new OperationCanvasPositionRequest("operation.test", 400, 80)
+            ]));
     }
 
     private static OperationResourceBindingRequest[] StationResources(string suffix) =>

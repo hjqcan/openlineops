@@ -134,9 +134,7 @@ public sealed class ProductionRunCoordinatorHostedServiceTests
         }
 
         public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListActiveAsync(
-            string? productionLineDefinitionId = null,
-            string? stationSystemId = null,
-            string? slotId = null,
+            ProductionRunActiveQuery query,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -146,6 +144,11 @@ public sealed class ProductionRunCoordinatorHostedServiceTests
                     _runs.ToArray());
             }
         }
+
+        public ValueTask<ProductionRunTerminalPage> ListTerminalAsync(
+            ProductionRunTerminalPageRequest request,
+            CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new ProductionRunTerminalPage([], null));
 
         public ValueTask<bool> TryAddAsync(
             ProductionRun run,
@@ -166,6 +169,23 @@ public sealed class ProductionRunCoordinatorHostedServiceTests
             throw new NotSupportedException();
 
         public ValueTask<IReadOnlyCollection<ProductionRunPersistenceEntry>> ListRecoverableAsync(
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public ValueTask<IReadOnlyCollection<ProductionRunCreatedOutboxItem>>
+            ListPendingCreatedOutboxAsync(
+                int maximumCount,
+                CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public ValueTask MarkCreatedOutboxProcessedAsync(
+            ProductionRunId runId,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public ValueTask RecordCreatedOutboxFailureAsync(
+            ProductionRunId runId,
+            string failureDescription,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 

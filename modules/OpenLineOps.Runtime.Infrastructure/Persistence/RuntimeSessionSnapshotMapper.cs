@@ -162,7 +162,7 @@ internal static class RuntimeSessionSnapshotMapper
             new RuntimeStepId(command.StepId),
             new RuntimeCapabilityId(command.TargetCapabilityId),
             command.CommandName,
-            ParseEnum<OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus>(
+            ParseEnum<ExecutionStatus>(
                 command.Status,
                 nameof(command.Status)),
             command.CreatedAtUtc,

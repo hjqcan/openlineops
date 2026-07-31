@@ -1,13 +1,17 @@
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
+
 namespace OpenLineOps.Plugins.Application.Commands;
 
 public interface IPluginDeviceCommandInventory
 {
     ValueTask<IReadOnlyCollection<PluginDeviceCommandDescriptor>> ListDeviceCommandsAsync(
+        ProjectApplicationWorkspaceScope scope,
         CancellationToken cancellationToken = default);
 
     async ValueTask<PluginDeviceCommandDescriptor?> FindDeviceCommandAsync(
         string capability,
         string commandName,
+        ProjectApplicationWorkspaceScope scope,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(capability) || string.IsNullOrWhiteSpace(commandName))
@@ -15,7 +19,7 @@ public interface IPluginDeviceCommandInventory
             return null;
         }
 
-        var commands = await ListDeviceCommandsAsync(cancellationToken).ConfigureAwait(false);
+        var commands = await ListDeviceCommandsAsync(scope, cancellationToken).ConfigureAwait(false);
 
         return commands.FirstOrDefault(candidate =>
             string.Equals(candidate.Capability, capability, StringComparison.Ordinal)

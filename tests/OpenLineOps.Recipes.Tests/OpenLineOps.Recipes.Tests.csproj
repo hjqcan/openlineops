@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../modules/OpenLineOps.Recipes.Api/OpenLineOps.Recipes.Api.csproj" />
+    <ProjectReference Include="../../modules/OpenLineOps.Recipes.Application/OpenLineOps.Recipes.Application.csproj" />
+    <ProjectReference Include="../../modules/OpenLineOps.Recipes.Domain/OpenLineOps.Recipes.Domain.csproj" />
+    <ProjectReference Include="../../modules/OpenLineOps.Recipes.Infrastructure/OpenLineOps.Recipes.Infrastructure.csproj" />
+    <ProjectReference Include="../../shared/OpenLineOps.Api.Abstractions/OpenLineOps.Api.Abstractions.csproj" />
+    <ProjectReference Include="../../shared/OpenLineOps.Application.Abstractions/OpenLineOps.Application.Abstractions.csproj" />
+  </ItemGroup>
+
+</Project>

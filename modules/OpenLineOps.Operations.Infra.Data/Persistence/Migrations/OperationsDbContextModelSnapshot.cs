@@ -29,13 +29,41 @@ namespace OpenLineOps.Operations.Infra.Data.Persistence.Migrations
                         .HasMaxLength(160)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("AcknowledgementComment")
+                        .HasMaxLength(1000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DefinitionId")
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Description")
                         .IsRequired()
                         .HasMaxLength(1000)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("EscalationAction")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("EscalationDelaySeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("IsLatching")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LastChangedAtUtc")
+                        .HasColumnType("bigint");
+
+                    b.Property<int>("MaximumShelfSeconds")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long>("RaisedAtUtc")
                         .HasColumnType("bigint");
+
+                    b.Property<bool>("RequiresBuzzer")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("ResolutionNote")
                         .HasMaxLength(1000)
@@ -53,9 +81,37 @@ namespace OpenLineOps.Operations.Infra.Data.Persistence.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ShelfComment")
+                        .HasMaxLength(1000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("ShelvedAtUtc")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ShelvedBy")
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("ShelvedUntilUtc")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("Source")
                         .IsRequired()
                         .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("SourceActive")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("SourceClearedAtUtc")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("SourceClearedBy")
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceClearanceNote")
+                        .HasMaxLength(1000)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("SourceId")
@@ -72,10 +128,32 @@ namespace OpenLineOps.Operations.Infra.Data.Persistence.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
+                    b.Property<long?>("SuppressedAtUtc")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("SuppressedBy")
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("SuppressedUntilUtc")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("SuppressionReason")
+                        .HasMaxLength(1000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SuppressionSource")
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Title")
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("TEXT");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
 
@@ -84,6 +162,170 @@ namespace OpenLineOps.Operations.Infra.Data.Persistence.Migrations
                     b.HasIndex("StationId", "Status");
 
                     b.ToTable("operations_alarms", (string)null);
+                });
+
+            modelBuilder.Entity("OpenLineOps.Operations.Domain.Aggregates.AlarmDefinition", b =>
+                {
+                    b.Property<string>("Id")
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CommandFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ContentSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAtUtc")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EscalationAction")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("EscalationDelaySeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("IsLatching")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("MaximumShelfSeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RegistrationCommandId")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("RequiresBuzzer")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Severity")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("StationId")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RegistrationCommandId")
+                        .IsUnique();
+
+                    b.HasIndex("StationId", "Source");
+
+                    b.ToTable("operations_alarm_definitions", null, t =>
+                        {
+                            t.HasTrigger("operations_alarm_definitions_no_delete");
+
+                            t.HasTrigger("operations_alarm_definitions_no_update");
+                        });
+                });
+
+            modelBuilder.Entity("OpenLineOps.Operations.Domain.Aggregates.AlarmLifecycleFact", b =>
+                {
+                    b.Property<long>("Sequence")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Action")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ActorId")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AlarmId")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("AlarmVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CommandFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CommandId")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ContentSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("FactId")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("OccurredAtUtc")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasMaxLength(8000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PreviousSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Sequence");
+
+                    b.HasIndex("CommandId")
+                        .IsUnique();
+
+                    b.HasIndex("FactId")
+                        .IsUnique();
+
+                    b.HasIndex("AlarmId", "AlarmVersion")
+                        .IsUnique();
+
+                    b.HasIndex("AlarmId", "Sequence");
+
+                    b.ToTable("operations_alarm_lifecycle_facts", null, t =>
+                        {
+                            t.HasTrigger("operations_alarm_lifecycle_facts_no_delete");
+
+                            t.HasTrigger("operations_alarm_lifecycle_facts_no_update");
+                        });
                 });
 #pragma warning restore 612, 618
         }

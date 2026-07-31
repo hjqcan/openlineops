@@ -18,15 +18,10 @@ public sealed class ExternalProcessPluginProcessCommandInvoker : IPluginProcessC
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var found = request.PackageIdentity is { IsComplete: true }
-            ? _processRegistry.TryGet(request.PackageIdentity, out var process)
-            : _processRegistry.TryGet(request.PluginId, out process);
-        if (!found)
+        if (!_processRegistry.TryGet(request.PackageIdentity, out var process))
         {
             return PluginProcessCommandInvocationResult.Rejected(
-                request.PackageIdentity is null
-                    ? $"External plugin process '{request.PluginId}' is not running."
-                    : $"Exact external plugin package '{request.PluginId}' version {request.PackageIdentity.Version} with content SHA-256 {request.PackageIdentity.PackageContentSha256} is not running.");
+                $"Exact external plugin package '{request.PluginId}' for Project '{request.PackageIdentity.ProjectId}', Application '{request.PackageIdentity.ApplicationId}', version {request.PackageIdentity.PackageIdentity.Version}, and content SHA-256 {request.PackageIdentity.PackageIdentity.PackageContentSha256} is not running.");
         }
 
         if (process.HasExited)

@@ -142,6 +142,27 @@ function Invoke-SignTool {
     }
 }
 
+function Update-DesktopPackageContentManifest {
+    param([Parameter(Mandatory = $true)][string] $PackageRoot)
+
+    $resourcesApp = Join-Path $PackageRoot "resources/app"
+    if (-not (Test-Path -LiteralPath $resourcesApp -PathType Container)) {
+        return
+    }
+
+    $manifestWriter = Resolve-RepoPath "apps/desktop/scripts/write-package-content-manifest.mjs"
+    if (-not (Test-Path -LiteralPath $manifestWriter -PathType Leaf)) {
+        throw "Desktop package content manifest writer does not exist: $manifestWriter"
+    }
+
+    & node $manifestWriter --package-root $PackageRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Desktop package content manifest regeneration failed with exit code $LASTEXITCODE."
+    }
+
+    Write-Host "Desktop package content manifest regenerated after signing."
+}
+
 $ResolvedPackageRoot = Resolve-RepoPath $PackageRoot
 if (-not (Test-Path -LiteralPath $ResolvedPackageRoot -PathType Container)) {
     throw "PackageRoot does not exist: $ResolvedPackageRoot"
@@ -200,6 +221,8 @@ if (-not $SkipVerify) {
         Invoke-SignTool -Arguments $verifyArguments
     }
 }
+
+Update-DesktopPackageContentManifest -PackageRoot $ResolvedPackageRoot
 
 Write-Host "Windows package signing completed."
 Write-Host "Signed files: $($signableFiles.Count)"

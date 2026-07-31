@@ -3,7 +3,7 @@ namespace OpenLineOps.Domain.Abstractions.EventBus;
 [AttributeUsage(AttributeTargets.Class, Inherited = false)]
 public sealed class IntegrationEventAttribute : Attribute
 {
-    public IntegrationEventAttribute(string eventName, string version = "v1")
+    public IntegrationEventAttribute(string eventName)
     {
         if (string.IsNullOrWhiteSpace(eventName))
         {
@@ -11,10 +11,7 @@ public sealed class IntegrationEventAttribute : Attribute
         }
 
         EventName = eventName.Trim();
-        Version = string.IsNullOrWhiteSpace(version) ? "v1" : version.Trim();
     }
 
     public string EventName { get; }
-
-    public string Version { get; }
 }

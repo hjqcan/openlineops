@@ -27,7 +27,7 @@ public sealed class AlarmPersistenceTests
             .UseSqlite(connection)
             .Options;
         var alarm = Alarm.Raise(
-            new AlarmId("operations.alarm.persistence.v1"),
+            new AlarmId("operations.alarm.persistence"),
             "station-alpha",
             "runtime",
             "session-001",
@@ -95,7 +95,7 @@ public sealed class AlarmPersistenceTests
         await context.Database.MigrateAsync();
 
         var open = Alarm.Raise(
-            new AlarmId("operations.alarm.open.v1"),
+            new AlarmId("operations.alarm.open"),
             "station-alpha",
             "device",
             "device-001",
@@ -104,7 +104,7 @@ public sealed class AlarmPersistenceTests
             "Fixture door is open.",
             DateTimeOffset.UtcNow);
         var resolved = Alarm.Raise(
-            new AlarmId("operations.alarm.resolved.v1"),
+            new AlarmId("operations.alarm.resolved"),
             "station-alpha",
             "device",
             "device-002",
@@ -112,7 +112,7 @@ public sealed class AlarmPersistenceTests
             "Pressure low",
             "Air pressure is below threshold.",
             DateTimeOffset.UtcNow);
-        resolved.Resolve("operator-a", "Pressure restored.", DateTimeOffset.UtcNow);
+        resolved.ClearFromSource("agent-a", "Pressure restored.", DateTimeOffset.UtcNow);
 
         var repository = new EfAlarmRepository(context);
         repository.Add(open);

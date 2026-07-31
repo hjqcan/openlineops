@@ -1,4 +1,3 @@
-using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Resources;
@@ -15,8 +14,7 @@ public interface IRuntimeCommandResourceFenceValidator
 }
 
 public sealed class RuntimeCommandResourceFenceValidator(
-    IResourceLeaseRepository resourceLeases,
-    IClock clock) : IRuntimeCommandResourceFenceValidator
+    IResourceLeaseRepository resourceLeases) : IRuntimeCommandResourceFenceValidator
 {
     public ValueTask<ResourceLeaseFenceValidationResult> ValidateAsync(
         ProductionRunId productionRunId,
@@ -29,7 +27,6 @@ public sealed class RuntimeCommandResourceFenceValidator(
             productionRunId,
             operationRunId,
             evidence,
-            clock.UtcNow,
             cancellationToken);
     }
 }

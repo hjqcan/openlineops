@@ -40,7 +40,7 @@ public sealed class CapIntegrationEventPublisherTests
         Assert.Equal("alarm-alpha", payload.AlarmId);
         Assert.Equal("station-alpha", payload.StationId);
         Assert.Equal(AlarmSeverity.Critical, payload.Severity);
-        Assert.Equal(AlarmRaisedIntegrationDto.Version, message.Headers["event-version"]);
+        Assert.DoesNotContain("event-version", message.Headers.Keys);
         Assert.Equal("alarm-alpha", message.Headers["aggregate-id"]);
         Assert.Equal(typeof(AlarmRaisedDomainEvent).FullName, message.Headers["event-type"]);
         Assert.False(string.IsNullOrWhiteSpace(message.Headers["correlation-id"]));

@@ -3,6 +3,7 @@ using OpenLineOps.Domain.Abstractions.Events;
 using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Application.Recovery;
@@ -10,6 +11,7 @@ namespace OpenLineOps.Runtime.Application.Recovery;
 public sealed class ProductionRunRecoveryService(
     IProductionRunRepository repository,
     IResourceLeaseRepository resourceLeases,
+    IProductionRunSafetyTransitionStore safetyTransitions,
     IRuntimeDomainEventPublisher domainEventPublisher,
     IClock clock) : IProductionRunRecoveryService
 {
@@ -63,15 +65,18 @@ public sealed class ProductionRunRecoveryService(
                 }
 
                 events = run.DomainEvents.ToArray();
-                await repository.SaveAsync(run, entry.Revision, CancellationToken.None)
+                await safetyTransitions.SaveWithLeaseHoldsAsync(
+                        run,
+                        entry.Revision,
+                        CreateLeaseHolds(interrupted),
+                        CancellationToken.None)
                     .ConfigureAwait(false);
             }
-
-            foreach (var operation in interrupted)
+            else
             {
                 await resourceLeases.HoldForRecoveryAsync(
                         run.Id,
-                        operation.OperationRunId,
+                        CreateLeaseHolds(interrupted),
                         CancellationToken.None)
                     .ConfigureAwait(false);
             }
@@ -89,4 +94,15 @@ public sealed class ProductionRunRecoveryService(
         cancellationToken.ThrowIfCancellationRequested();
         return new ProductionRunRecoveryResult(pending, resumable, recoveryRequired);
     }
+
+    private static ProductionRunLeaseHold[] CreateLeaseHolds(
+        IReadOnlyCollection<OperationRun> operations) =>
+        operations
+            .OrderBy(static operation => operation.OperationRunId, StringComparer.Ordinal)
+            .Select(static operation => new ProductionRunLeaseHold(
+                operation.OperationRunId,
+                operation.FencingTokens
+                    .Select(static pair => new ResourceLeaseHoldClaim(pair.Key, pair.Value))
+                    .ToArray()))
+            .ToArray();
 }

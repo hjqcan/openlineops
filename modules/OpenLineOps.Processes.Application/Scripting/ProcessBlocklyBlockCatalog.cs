@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Processes.Application.Persistence;
@@ -15,15 +16,18 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
     private readonly IProcessBlocklyBlockDefinitionRepository _repository;
     private readonly IClock _clock;
     private readonly IProcessBlocklyBlockCatalogSource[] _sources;
+    private readonly ProjectApplicationWorkspaceScope? _workspaceScope;
 
     public ProcessBlocklyBlockCatalog(
         IProcessBlocklyBlockDefinitionRepository repository,
         IClock clock,
-        IEnumerable<IProcessBlocklyBlockCatalogSource>? sources = null)
+        IEnumerable<IProcessBlocklyBlockCatalogSource>? sources = null,
+        ProjectApplicationWorkspaceScope? workspaceScope = null)
     {
         _repository = repository;
         _clock = clock;
         _sources = sources?.ToArray() ?? [];
+        _workspaceScope = workspaceScope;
     }
 
     public async Task<Result<IReadOnlyCollection<ProcessBlocklyBlockDefinitionDetails>>> ListAsync(
@@ -180,12 +184,18 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
             return [];
         }
 
+        if (_workspaceScope is null)
+        {
+            throw new InvalidOperationException(
+                "Generated Blockly sources require a Project/Application workspace scope.");
+        }
+
         var blocksByType = new Dictionary<string, ProcessBlocklyBlockDefinitionDetails>(StringComparer.Ordinal);
         foreach (var source in _sources)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var sourceBlocks = await source.ListAsync(cancellationToken)
+            var sourceBlocks = await source.ListAsync(_workspaceScope, cancellationToken)
                 .ConfigureAwait(false);
             foreach (var block in sourceBlocks)
             {
@@ -711,6 +721,32 @@ public sealed partial class ProcessBlocklyBlockCatalog : IProcessBlocklyBlockCat
                   "nextStatement": null,
                   "colour": 176,
                   "tooltip": "Write the PythonScript result payload used by runtime traceability."
+                }
+                """),
+            BuiltIn(
+                "openlineops_result_from_production_input",
+                "Result",
+                "Result From Production Input",
+                """
+                {
+                  "type": "openlineops_result_from_production_input",
+                  "message0": "production input %1 to result key %2",
+                  "args0": [
+                    {
+                      "type": "field_input",
+                      "name": "INPUT_KEY",
+                      "text": "input.result"
+                    },
+                    {
+                      "type": "field_input",
+                      "name": "OUTPUT_KEY",
+                      "text": "forwarded.result"
+                    }
+                  ],
+                  "previousStatement": null,
+                  "nextStatement": null,
+                  "colour": 176,
+                  "tooltip": "Read one explicitly mapped Production Context input and write it as this Operation output."
                 }
                 """)
         ];

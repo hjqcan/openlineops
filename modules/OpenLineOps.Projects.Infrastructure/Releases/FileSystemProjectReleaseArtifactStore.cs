@@ -14,7 +14,11 @@ public sealed class FileSystemProjectReleaseArtifactStore :
     IProjectReleaseArtifactStore,
     IInstalledProjectReleaseReader
 {
+    private const int HResultSharingViolation = unchecked((int)0x80070020);
+    private const int HResultLockViolation = unchecked((int)0x80070021);
     private const int FileBufferSize = 64 * 1024;
+    private static readonly string[] SupportedRouteJudgements =
+        ["Passed", "Failed", "Aborted", "Unknown", "NotApplicable"];
     private static readonly StringComparison PathComparison = OperatingSystem.IsWindows()
         ? StringComparison.OrdinalIgnoreCase
         : StringComparison.Ordinal;
@@ -360,7 +364,16 @@ public sealed class FileSystemProjectReleaseArtifactStore :
         string sourceApplicationRelativePath,
         CancellationToken cancellationToken)
     {
-        var currentTree = InspectFileTree(sourceApplicationPath);
+        FileTreeSnapshot currentTree;
+        try
+        {
+            currentTree = InspectFileTree(sourceApplicationPath);
+        }
+        catch (IOException exception) when (IsConcurrentSourceMutationFailure(exception))
+        {
+            throw SourceChangedWhilePublishing(relativeFile: null, exception);
+        }
+
         if (!initialTree.Directories.SequenceEqual(currentTree.Directories, StringComparer.Ordinal)
             || !initialTree.Files.SequenceEqual(currentTree.Files, StringComparer.Ordinal))
         {
@@ -380,15 +393,49 @@ public sealed class FileSystemProjectReleaseArtifactStore :
                 throw new IOException("Project application source changed while the release was being published.");
             }
 
-            var sourceInfo = new FileInfo(sourcePath);
-            var sourceSha256 = await ComputeFileSha256Async(sourcePath, cancellationToken).ConfigureAwait(false);
-            if (sourceInfo.Length != copiedFile.SizeBytes
+            long sourceSizeBytes;
+            string sourceSha256;
+            try
+            {
+                sourceSizeBytes = new FileInfo(sourcePath).Length;
+                sourceSha256 = await ComputeFileSha256Async(sourcePath, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (IOException exception) when (IsConcurrentSourceMutationFailure(exception))
+            {
+                throw SourceChangedWhilePublishing(relativeFile, exception);
+            }
+
+            if (sourceSizeBytes != copiedFile.SizeBytes
                 || !string.Equals(sourceSha256, copiedFile.Sha256, StringComparison.Ordinal))
             {
                 throw new IOException(
                     $"Project application source file '{relativeFile}' changed while the release was being published.");
             }
         }
+    }
+
+    private static IOException SourceChangedWhilePublishing(
+        string? relativeFile,
+        Exception innerException)
+    {
+        var subject = relativeFile is null
+            ? "Project application source"
+            : $"Project application source file '{relativeFile}'";
+        return new IOException(
+            $"{subject} changed while the release was being published or became unavailable.",
+            innerException);
+    }
+
+    internal static bool IsConcurrentSourceMutationFailure(Exception exception)
+    {
+        if (exception is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return true;
+        }
+
+        return OperatingSystem.IsWindows()
+               && exception.HResult is HResultSharingViolation or HResultLockViolation;
     }
 
     private static FileTreeSnapshot FilterReleaseSourceTree(
@@ -1452,6 +1499,9 @@ public sealed class FileSystemProjectReleaseArtifactStore :
                         operation.BlockVersionIds,
                         nameof(operation.BlockVersionIds)),
                     resources,
+                    NormalizeOperationInputMappings(
+                        operation.InputMappings,
+                        operation.OperationId),
                     authorizedActions);
             })
             .OrderBy(operation => operation.OperationId, StringComparer.Ordinal)
@@ -1603,6 +1653,40 @@ public sealed class FileSystemProjectReleaseArtifactStore :
                 nameof(resources));
         }
 
+        return normalized;
+    }
+
+    private static ProjectReleaseOperationInputMapping[] NormalizeOperationInputMappings(
+        IReadOnlyCollection<ProjectReleaseOperationInputMapping>? inputMappings,
+        string operationId)
+    {
+        var normalized = (inputMappings
+                ?? throw new ArgumentException(
+                    $"Production operation {operationId} input mappings are required.",
+                    nameof(inputMappings)))
+            .Select(mapping =>
+            {
+                if (mapping is null)
+                {
+                    throw new ArgumentException(
+                        $"Production operation {operationId} input mappings cannot contain null.",
+                        nameof(inputMappings));
+                }
+
+                return new ProjectReleaseOperationInputMapping(
+                    RequireProductionValue(mapping.TargetInputKey, nameof(mapping.TargetInputKey)),
+                    RequireProductionValue(mapping.SourceOperationId, nameof(mapping.SourceOperationId)),
+                    RequireProductionValue(mapping.SourceOutputKey, nameof(mapping.SourceOutputKey)),
+                    RequireExactToken(
+                        mapping.ExpectedValueKind,
+                        ["Text", "Boolean", "WholeNumber", "FixedPoint", "DateTimeUtc"],
+                        "Operation input mapping value kind"));
+            })
+            .OrderBy(mapping => mapping.TargetInputKey, StringComparer.Ordinal)
+            .ToArray();
+        EnsureProductionIdentifiersAreUnique(
+            normalized.Select(mapping => mapping.TargetInputKey),
+            $"Production operation {operationId} input keys");
         return normalized;
     }
 
@@ -1812,17 +1896,34 @@ public sealed class FileSystemProjectReleaseArtifactStore :
         var sourceOperationId = RequireProductionValue(
             transition.SourceOperationId,
             nameof(transition.SourceOperationId));
-        var targetOperationId = RequireProductionValue(
-            transition.TargetOperationId,
-            nameof(transition.TargetOperationId));
-        if (!operationIds.Contains(sourceOperationId) || !operationIds.Contains(targetOperationId))
+        var hasTargetOperation = !string.IsNullOrWhiteSpace(transition.TargetOperationId);
+        var hasTerminalDisposition = !string.IsNullOrWhiteSpace(transition.TerminalDisposition);
+        if (hasTargetOperation == hasTerminalDisposition)
+        {
+            throw new ArgumentException(
+                $"Production Route Transition {transitionId} requires exactly one target Operation or terminal disposition.",
+                nameof(transition));
+        }
+
+        var targetOperationId = hasTargetOperation
+            ? RequireProductionValue(transition.TargetOperationId!, nameof(transition.TargetOperationId))
+            : null;
+        var terminalDisposition = hasTerminalDisposition
+            ? RequireExactToken(
+                transition.TerminalDisposition!,
+                ["Completed", "Nonconforming", "Held", "Scrapped"],
+                "terminal disposition")
+            : null;
+        if (!operationIds.Contains(sourceOperationId)
+            || targetOperationId is not null && !operationIds.Contains(targetOperationId))
         {
             throw new ArgumentException(
                 $"Production Route Transition {transitionId} must reference existing Operations.",
                 nameof(transition));
         }
 
-        if (string.Equals(sourceOperationId, targetOperationId, StringComparison.Ordinal))
+        if (targetOperationId is not null
+            && string.Equals(sourceOperationId, targetOperationId, StringComparison.Ordinal))
         {
             throw new ArgumentException(
                 $"Production Route Transition {transitionId} cannot target its source Operation.",
@@ -1834,6 +1935,14 @@ public sealed class FileSystemProjectReleaseArtifactStore :
         {
             throw new ArgumentException(
                 $"Production Route Transition {transitionId} kind '{kind}' is invalid.",
+                nameof(transition));
+        }
+
+        if (terminalDisposition is not null
+            && kind is "Rework" or "ParallelFork" or "ParallelJoin")
+        {
+            throw new ArgumentException(
+                $"Production Route Transition {transitionId} kind '{kind}' must target an Operation.",
                 nameof(transition));
         }
 
@@ -1916,6 +2025,7 @@ public sealed class FileSystemProjectReleaseArtifactStore :
             transitionId,
             sourceOperationId,
             targetOperationId,
+            terminalDisposition,
             kind,
             judgement,
             transition.MaxTraversals,
@@ -1934,6 +2044,7 @@ public sealed class FileSystemProjectReleaseArtifactStore :
             .GroupBy(transition => (
                 transition.SourceOperationId,
                 transition.TargetOperationId,
+                transition.TerminalDisposition,
                 transition.Kind))
             .FirstOrDefault(group => group.Count() > 1);
         if (duplicateEdge is not null)
@@ -1949,7 +2060,10 @@ public sealed class FileSystemProjectReleaseArtifactStore :
                 "Rework",
                 StringComparison.Ordinal))
             .ToArray();
-        if (forward.Any(transition => string.Equals(
+        var forwardOperations = forward
+            .Where(transition => transition.TargetOperationId is not null)
+            .ToArray();
+        if (forwardOperations.Any(transition => string.Equals(
                 transition.TargetOperationId,
                 entryOperationId,
                 StringComparison.Ordinal)))
@@ -1968,7 +2082,9 @@ public sealed class FileSystemProjectReleaseArtifactStore :
                 .ToArray();
             if (outgoing.Length == 0)
             {
-                continue;
+                throw new ArgumentException(
+                    $"Production Operation {operation.OperationId} requires an explicit terminal disposition or target Operation.",
+                    nameof(transitions));
             }
 
             if (outgoing.Length == 1 && outgoing[0].Kind is "Sequence" or "ParallelJoin")
@@ -1976,29 +2092,57 @@ public sealed class FileSystemProjectReleaseArtifactStore :
                 continue;
             }
 
-            if (outgoing.All(transition => transition.Kind is "Judgement" or "Rework"))
+            var judgementRoutes = outgoing
+                .Where(transition => transition.Kind is "Judgement" or "Rework")
+                .ToArray();
+            var sequenceFallbacks = outgoing
+                .Where(transition => transition.Kind == "Sequence")
+                .ToArray();
+            if (judgementRoutes.Length > 0
+                && judgementRoutes.Length + sequenceFallbacks.Length == outgoing.Length)
             {
-                if (outgoing.Select(transition => transition.RequiredJudgement)
-                    .Distinct(StringComparer.Ordinal).Count() == outgoing.Length)
+                var judgementFallbacks = judgementRoutes
+                    .Where(transition => transition.Kind == "Judgement")
+                    .Select(transition => transition.RequiredJudgement!)
+                    .ToHashSet(StringComparer.Ordinal);
+                var deterministic = sequenceFallbacks.Length <= 1
+                    && judgementRoutes.Where(transition => transition.Kind == "Judgement")
+                        .GroupBy(transition => transition.RequiredJudgement, StringComparer.Ordinal)
+                        .All(group => group.Count() == 1)
+                    && judgementRoutes.Where(transition => transition.Kind == "Rework")
+                        .GroupBy(transition => transition.RequiredJudgement, StringComparer.Ordinal)
+                        .All(group => group.Count() == 1)
+                    && judgementRoutes.Where(transition => transition.Kind == "Rework")
+                        .All(transition => judgementFallbacks.Contains(transition.RequiredJudgement!));
+                var exhaustive = sequenceFallbacks.Length == 1
+                    || SupportedRouteJudgements
+                        .All(judgementFallbacks.Contains);
+                if (deterministic && exhaustive)
                 {
                     continue;
                 }
             }
-            else if (outgoing.All(transition => transition.Kind == "Condition"))
+
+            var conditions = outgoing.Where(transition => transition.Kind == "Condition").ToArray();
+            if (conditions.Length > 0
+                && conditions.Length + sequenceFallbacks.Length == outgoing.Length)
             {
-                var keys = outgoing.Select(transition => transition.OutputKey)
+                var keys = conditions.Select(transition => transition.OutputKey)
                     .Distinct(StringComparer.Ordinal)
                     .ToArray();
-                var values = outgoing.Select(transition => (
+                var values = conditions.Select(transition => (
                         transition.ExpectedOutputKind,
                         transition.ExpectedOutputValue))
                     .ToArray();
-                if (keys.Length == 1 && values.Distinct().Count() == values.Length)
+                if (keys.Length == 1
+                    && values.Distinct().Count() == values.Length
+                    && sequenceFallbacks.Length == 1)
                 {
                     continue;
                 }
             }
-            else if (outgoing.Length >= 2
+
+            if (outgoing.Length >= 2
                      && outgoing.All(transition => transition.Kind == "ParallelFork")
                      && outgoing.Select(transition => transition.ParallelGroupId)
                          .Distinct(StringComparer.Ordinal).Count() == 1)
@@ -2021,9 +2165,9 @@ public sealed class FileSystemProjectReleaseArtifactStore :
         }
 
         var indegrees = operations.ToDictionary(operation => operation.OperationId, _ => 0, StringComparer.Ordinal);
-        foreach (var transition in forward)
+        foreach (var transition in forwardOperations)
         {
-            indegrees[transition.TargetOperationId]++;
+            indegrees[transition.TargetOperationId!]++;
         }
 
         var pending = new Queue<string>(
@@ -2032,15 +2176,15 @@ public sealed class FileSystemProjectReleaseArtifactStore :
         while (pending.TryDequeue(out var operationId))
         {
             visitedCount++;
-            foreach (var transition in forward.Where(candidate => string.Equals(
+            foreach (var transition in forwardOperations.Where(candidate => string.Equals(
                          candidate.SourceOperationId,
                          operationId,
                          StringComparison.Ordinal)))
             {
-                indegrees[transition.TargetOperationId]--;
-                if (indegrees[transition.TargetOperationId] == 0)
+                indegrees[transition.TargetOperationId!]--;
+                if (indegrees[transition.TargetOperationId!] == 0)
                 {
-                    pending.Enqueue(transition.TargetOperationId);
+                    pending.Enqueue(transition.TargetOperationId!);
                 }
             }
         }
@@ -2052,12 +2196,10 @@ public sealed class FileSystemProjectReleaseArtifactStore :
                 nameof(transitions));
         }
 
-        var terminals = operations
-            .Where(operation => forward.All(transition => !string.Equals(
-                transition.SourceOperationId,
-                operation.OperationId,
-                StringComparison.Ordinal)))
-            .Select(operation => operation.OperationId)
+        var terminals = forward
+            .Where(transition => transition.TerminalDisposition is not null)
+            .Select(transition => transition.SourceOperationId)
+            .Distinct(StringComparer.Ordinal)
             .ToArray();
         var completable = new HashSet<string>(terminals, StringComparer.Ordinal);
         pending = new Queue<string>(terminals);
@@ -2079,13 +2221,13 @@ public sealed class FileSystemProjectReleaseArtifactStore :
         if (trapped is not null)
         {
             throw new ArgumentException(
-                $"Production Operation {trapped.OperationId} has no forward path to a terminal Operation.",
+                $"Production Operation {trapped.OperationId} has no forward path to a terminal disposition.",
                 nameof(transitions));
         }
 
         foreach (var rework in transitions.Where(transition => transition.Kind == "Rework"))
         {
-            if (!TraverseFrom(rework.TargetOperationId, forward).Contains(rework.SourceOperationId))
+            if (!TraverseFrom(rework.TargetOperationId!, forwardOperations).Contains(rework.SourceOperationId))
             {
                 throw new ArgumentException(
                     $"Rework Transition {rework.TransitionId} must return to an earlier Operation.",
@@ -2093,7 +2235,94 @@ public sealed class FileSystemProjectReleaseArtifactStore :
             }
         }
 
-        ValidateParallelGroups(forward, transitions);
+        ValidateParallelGroups(forwardOperations, transitions);
+        ValidateOperationInputMappings(
+            operations,
+            forwardOperations);
+    }
+
+    private static void ValidateOperationInputMappings(
+        IReadOnlyCollection<ProjectReleaseOperation> operations,
+        IReadOnlyCollection<ProjectReleaseRouteTransition> forwardTransitions)
+    {
+        var operationIds = operations.Select(operation => operation.OperationId)
+            .ToHashSet(StringComparer.Ordinal);
+        var incoming = forwardTransitions.ToLookup(
+            transition => transition.TargetOperationId!,
+            StringComparer.Ordinal);
+        var outgoing = forwardTransitions.ToLookup(
+            transition => transition.SourceOperationId,
+            StringComparer.Ordinal);
+        var indegrees = operations.ToDictionary(
+            operation => operation.OperationId,
+            operation => incoming[operation.OperationId].Count(),
+            StringComparer.Ordinal);
+        var pending = new Queue<string>(
+            indegrees.Where(static pair => pair.Value == 0).Select(static pair => pair.Key));
+        var definiteBefore = operations.ToDictionary(
+            operation => operation.OperationId,
+            _ => new HashSet<string>(StringComparer.Ordinal),
+            StringComparer.Ordinal);
+        while (pending.TryDequeue(out var operationId))
+        {
+            var incomingTransitions = incoming[operationId].ToArray();
+            if (incomingTransitions.Length > 0)
+            {
+                var predecessorSets = incomingTransitions.Select(transition =>
+                {
+                    var completed = new HashSet<string>(
+                        definiteBefore[transition.SourceOperationId],
+                        StringComparer.Ordinal);
+                    completed.Add(transition.SourceOperationId);
+                    return completed;
+                }).ToArray();
+                var isAndJoin = incomingTransitions.Length >= 2
+                    && incomingTransitions.All(static transition => transition.Kind == "ParallelJoin")
+                    && incomingTransitions.Select(static transition => transition.ParallelGroupId)
+                        .Distinct(StringComparer.Ordinal).Count() == 1;
+                var guaranteed = new HashSet<string>(predecessorSets[0], StringComparer.Ordinal);
+                foreach (var predecessorSet in predecessorSets.Skip(1))
+                {
+                    if (isAndJoin)
+                    {
+                        guaranteed.UnionWith(predecessorSet);
+                    }
+                    else
+                    {
+                        guaranteed.IntersectWith(predecessorSet);
+                    }
+                }
+
+                definiteBefore[operationId] = guaranteed;
+            }
+
+            foreach (var transition in outgoing[operationId])
+            {
+                indegrees[transition.TargetOperationId!]--;
+                if (indegrees[transition.TargetOperationId!] == 0)
+                {
+                    pending.Enqueue(transition.TargetOperationId!);
+                }
+            }
+        }
+
+        foreach (var operation in operations)
+        {
+            foreach (var mapping in operation.InputMappings)
+            {
+                if (!operationIds.Contains(mapping.SourceOperationId)
+                    || string.Equals(
+                        mapping.SourceOperationId,
+                        operation.OperationId,
+                        StringComparison.Ordinal)
+                    || !definiteBefore[operation.OperationId].Contains(mapping.SourceOperationId))
+                {
+                    throw new ArgumentException(
+                        $"Production operation {operation.OperationId} input {mapping.TargetInputKey} source {mapping.SourceOperationId} must definitely complete first; conditional bypasses and sibling-branch reads before an AND join are not allowed.",
+                        nameof(operations));
+                }
+            }
+        }
     }
 
     private static void ValidateParallelGroups(
@@ -2126,7 +2355,7 @@ public sealed class FileSystemProjectReleaseArtifactStore :
             }
 
             var forkSource = forks[0].SourceOperationId;
-            var joinTarget = joins[0].TargetOperationId;
+            var joinTarget = joins[0].TargetOperationId!;
             if (string.Equals(forkSource, joinTarget, StringComparison.Ordinal))
             {
                 throw new ArgumentException(
@@ -2141,7 +2370,7 @@ public sealed class FileSystemProjectReleaseArtifactStore :
             foreach (var fork in forks)
             {
                 var branch = TraverseUntil(
-                    fork.TargetOperationId,
+                    fork.TargetOperationId!,
                     joinTarget,
                     forwardTransitions);
                 var branchJoinSources = branch.Where(joinSources.Contains).ToArray();
@@ -2169,14 +2398,15 @@ public sealed class FileSystemProjectReleaseArtifactStore :
                 }
 
                 var branchTerminal = branch.FirstOrDefault(operationId =>
-                    forwardTransitions.All(transition => !string.Equals(
-                        transition.SourceOperationId,
-                        operationId,
-                        StringComparison.Ordinal)));
+                    transitions.Any(transition => string.Equals(
+                            transition.SourceOperationId,
+                            operationId,
+                            StringComparison.Ordinal)
+                        && transition.TerminalDisposition is not null));
                 if (branchTerminal is not null)
                 {
                     throw new ArgumentException(
-                        $"Parallel group {group.Key} branch {fork.TargetOperationId} can terminate before its join.",
+                        $"Parallel group {group.Key} branch {fork.TargetOperationId} can reach a terminal disposition before its join.",
                         nameof(transitions));
                 }
 
@@ -2267,7 +2497,10 @@ public sealed class FileSystemProjectReleaseArtifactStore :
 
             foreach (var transition in edges[operationId])
             {
-                pending.Enqueue(transition.TargetOperationId);
+                if (transition.TargetOperationId is not null)
+                {
+                    pending.Enqueue(transition.TargetOperationId);
+                }
             }
         }
 
@@ -2295,7 +2528,10 @@ public sealed class FileSystemProjectReleaseArtifactStore :
 
             foreach (var transition in edges[operationId])
             {
-                pending.Enqueue(transition.TargetOperationId);
+                if (transition.TargetOperationId is not null)
+                {
+                    pending.Enqueue(transition.TargetOperationId);
+                }
             }
         }
 

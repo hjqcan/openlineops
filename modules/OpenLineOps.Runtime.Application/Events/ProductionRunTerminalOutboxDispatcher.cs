@@ -49,7 +49,7 @@ public sealed class ProductionRunTerminalOutboxDispatcher :
                     {
                         foreach (var handler in _handlers)
                         {
-                            await handler.HandleAsync(item.Run, cancellationToken)
+                            await handler.HandleAsync(item.Evidence, cancellationToken)
                                 .ConfigureAwait(false);
                         }
 

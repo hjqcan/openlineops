@@ -1,15 +1,16 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using OpenLineOps.Plugins.Api.Management;
 using OpenLineOps.Plugins.Application.Capabilities;
 using OpenLineOps.Plugins.Application.Commands;
 using OpenLineOps.Plugins.Application.Compatibility;
 using OpenLineOps.Plugins.Application.Discovery;
 using OpenLineOps.Plugins.Application.Lifecycle;
+using OpenLineOps.Plugins.Application.Trials;
 using OpenLineOps.Plugins.Application.Validation;
 using OpenLineOps.Plugins.Infrastructure.Discovery;
 using OpenLineOps.Plugins.Infrastructure.Lifecycle;
+using OpenLineOps.Plugins.Infrastructure.Trials;
 
 namespace OpenLineOps.Plugins.Api.DependencyInjection;
 
@@ -25,8 +26,7 @@ public static class PluginsModuleServiceCollectionExtensions
         var hostOptions = LoadHostOptions(configuration, options);
         services.AddSingleton(hostOptions);
 
-        services.AddSingleton<IPluginPackageCatalog>(_ =>
-            new FileSystemPluginPackageCatalog(options.ResolvePackageRoot()));
+        services.AddSingleton<IPluginPackageCatalog, FileSystemPluginPackageCatalog>();
         services.AddSingleton<IPluginManifestValidator>(_ =>
             new PluginManifestValidator(new PluginCompatibilityOptions(
                 options.PlatformVersion,
@@ -51,12 +51,15 @@ public static class PluginsModuleServiceCollectionExtensions
                 serviceProvider.GetRequiredService<ExternalProcessPluginHostOptions>(),
                 serviceProvider.GetRequiredService<IExternalPluginProcessEventSink>()));
         services.AddSingleton<IPluginInstanceActivator>(serviceProvider =>
-            CreateActivator(options, serviceProvider));
+            new ExternalProcessPluginInstanceActivator(
+                serviceProvider.GetRequiredService<IExternalPluginProcessRunner>(),
+                serviceProvider.GetRequiredService<IExternalPluginProcessRegistry>(),
+                serviceProvider.GetRequiredService<ExternalProcessPluginHostOptions>(),
+                serviceProvider.GetRequiredService<IExternalPluginProcessEventSink>()));
         services.AddSingleton<IPluginLifecycleManager, PluginLifecycleManager>();
+        services.AddSingleton<IPluginProviderTrialRunner, ExternalProcessPluginProviderTrialRunner>();
         services.TryAddSingleton<IPluginDeviceCommandInvoker, ExternalProcessPluginDeviceCommandInvoker>();
         services.TryAddSingleton<IPluginProcessCommandInvoker, ExternalProcessPluginProcessCommandInvoker>();
-        services.AddSingleton<IPluginManagementService, PluginManagementService>();
-
         return services;
     }
 
@@ -65,8 +68,6 @@ public static class PluginsModuleServiceCollectionExtensions
         var section = configuration?.GetSection(PluginsModuleOptions.SectionName);
         var options = new PluginsModuleOptions
         {
-            PackageRoot = section?["PackageRoot"] ?? string.Empty,
-            Activator = section?["Activator"] ?? PluginActivators.ManifestOnly,
             EventLogProvider = section?["EventLog:Provider"] ?? PluginEventLogProviders.Sqlite,
             EventLogConnectionString = section?["EventLog:ConnectionString"],
             EventLogDatabasePath = section?["EventLog:DatabasePath"] ?? "data/openlineops-plugin-events.sqlite",
@@ -80,7 +81,6 @@ public static class PluginsModuleServiceCollectionExtensions
             ExternalHostArgumentsTemplate = section?["ExternalHost:ArgumentsTemplate"]
         };
 
-        _ = PluginActivators.Parse(options.Activator);
         _ = PluginEventLogProviders.Parse(options.EventLogProvider);
         return options;
     }
@@ -108,9 +108,9 @@ public static class PluginsModuleServiceCollectionExtensions
         var section = configuration?.GetSection($"{PluginsModuleOptions.SectionName}:ExternalHost");
         var hostOptions = new ExternalProcessPluginHostOptions
         {
-            ExecutablePath = options.ExternalHostExecutablePath ?? "dotnet",
+            ExecutablePath = options.ExternalHostExecutablePath ?? "OpenLineOps.PluginHost.exe",
             ArgumentsTemplate = options.ExternalHostArgumentsTemplate
-                ?? "\"{EntryAssemblyPath}\" --openlineops-plugin-host --manifest \"{ManifestPath}\""
+                ?? "--openlineops-plugin-host --manifest \"{ManifestPath}\" --entry \"{EntryAssemblyPath}\" --type \"{EntryType}\""
         };
         var sandboxSection = section?.GetSection("Sandbox");
         var isolationMode = sandboxSection?["IsolationMode"]
@@ -155,24 +155,6 @@ public static class PluginsModuleServiceCollectionExtensions
                 throw new InvalidOperationException(
                     $"Unsupported plugin event-log provider '{options.EventLogProvider}'.");
         }
-    }
-
-    private static IPluginInstanceActivator CreateActivator(
-        PluginsModuleOptions options,
-        IServiceProvider serviceProvider)
-    {
-        return PluginActivators.Parse(options.Activator) switch
-        {
-            PluginActivator.ManifestOnly => new ManifestOnlyPluginInstanceActivator(),
-            PluginActivator.AssemblyLoadContext => new AssemblyLoadContextPluginInstanceActivator(),
-            PluginActivator.ExternalProcess => new ExternalProcessPluginInstanceActivator(
-                serviceProvider.GetRequiredService<IExternalPluginProcessRunner>(),
-                serviceProvider.GetRequiredService<IExternalPluginProcessRegistry>(),
-                serviceProvider.GetRequiredService<ExternalProcessPluginHostOptions>(),
-                serviceProvider.GetRequiredService<IExternalPluginProcessEventSink>()),
-            _ => throw new InvalidOperationException(
-                $"Unsupported plugin activator '{options.Activator}'.")
-        };
     }
 
     private static TimeSpan ReadTimeSpan(string value, string configurationPath)

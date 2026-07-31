@@ -1,4 +1,6 @@
 using System.IO.Pipes;
+using System.Runtime.Versioning;
+using System.Security.Principal;
 using System.Text.Json;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
@@ -6,17 +8,25 @@ using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Agent.Infrastructure.Execution;
 using OpenLineOps.Agent.Infrastructure.Persistence;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.StationRuntime.Contracts;
 
 namespace OpenLineOps.Agent.Tests;
 
+[SupportedOSPlatform("windows")]
 public sealed class StationJobCoordinatorTests
 {
+    private const string StationGateEvidence =
+        "station-lifecycle:system-station-assembly:3:Automatic:Execute|controller-handshake:7";
+    private const string StationGateRevision =
+        "station-gate-revision:v1:system-station-assembly:3:1";
     private static readonly JsonSerializerOptions MessageJsonOptions =
         new(JsonSerializerDefaults.Web);
     private static readonly DateTimeOffset Now =
         new(2026, 7, 11, 8, 0, 0, TimeSpan.Zero);
+    private const string AgentControlLeaseOwnerInstanceId =
+        "11111111-1111-4111-8111-111111111111";
 
     [Fact]
     public async Task RunningStationAuthorityRejectsJobImmediatelyAfterFenceReplacement()
@@ -25,7 +35,10 @@ public sealed class StationJobCoordinatorTests
         var first = CreateAcceptedJob(42).ToSnapshot();
         await ApplyLeaseAsync(validator, first);
         Assert.True((await validator.ValidateCurrentAsync(first)).Accepted);
-        var authority = new StationResourceFenceAuthorityServer(first, validator);
+        var authority = new StationResourceFenceAuthorityServer(
+            first,
+            validator,
+            CurrentUserSid());
         using var cancellation = new CancellationTokenSource();
         var server = authority.RunAsync(cancellation.Token);
 
@@ -40,6 +53,57 @@ public sealed class StationJobCoordinatorTests
 
             Assert.False(stale.Accepted);
             Assert.Contains("does not exactly match", stale.RejectionReason, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await cancellation.CancelAsync();
+            await server;
+        }
+    }
+
+    [Fact]
+    public async Task SlowCallerCannotOccupyOrPreemptTheFenceAuthority()
+    {
+        var validator = new InMemoryStationResourceFenceValidator(new FixedClock(Now));
+        var job = CreateAcceptedJob(42).ToSnapshot();
+        await ApplyLeaseAsync(validator, job);
+        var principalSid = CurrentUserSid();
+        var authority = new StationResourceFenceAuthorityServer(
+            job,
+            validator,
+            principalSid,
+            TimeSpan.FromSeconds(2));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var server = authority.RunAsync(cancellation.Token);
+
+        try
+        {
+            await using (var blocker = new NamedPipeClientStream(
+                             ".",
+                             authority.Descriptor.PipeName,
+                             PipeDirection.InOut,
+                             PipeOptions.Asynchronous))
+            {
+                await blocker.ConnectAsync(cancellation.Token);
+                WindowsIdentityBoundNamedPipe.Verify(blocker, principalSid);
+                var disconnected = await blocker.ReadAsync(
+                    new byte[1],
+                    cancellation.Token);
+                Assert.Equal(0, disconnected);
+            }
+
+            var duplicate = Record.Exception(() =>
+                WindowsIdentityBoundNamedPipe.CreateServer(
+                    authority.Descriptor.PipeName,
+                    principalSid,
+                    maximumServerInstances: 1,
+                    inputBufferSize: 4096,
+                    outputBufferSize: 4096));
+            Assert.NotNull(duplicate);
+            Assert.True(
+                duplicate is IOException or UnauthorizedAccessException,
+                $"Unexpected duplicate fence pipe exception: {duplicate}");
+            Assert.True((await ValidateViaAuthorityAsync(authority, job)).Accepted);
         }
         finally
         {
@@ -87,7 +151,7 @@ public sealed class StationJobCoordinatorTests
                 "system.tester",
                 "device.tester",
                 "Measure",
-                "Completed",
+                ExecutionStatus.Completed,
                 Now.AddSeconds(-1),
                 Now.AddMinutes(1),
                 Now.AddSeconds(-1),
@@ -107,10 +171,13 @@ public sealed class StationJobCoordinatorTests
             1,
             null,
             null));
+        var controlLeaseVerifier =
+            TestStationDispatchControlLeaseVerifier.Accepting();
         var coordinator = new StationJobCoordinator(
             store,
             executor,
             validator,
+            controlLeaseVerifier,
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             new RecordingIsolationCleaner(),
@@ -136,6 +203,31 @@ public sealed class StationJobCoordinatorTests
         Assert.Equal(result.ExecutionStatus, duplicate.ExecutionStatus);
         Assert.Equal(result.Judgement, duplicate.Judgement);
         Assert.Equal(result.ResourceFences, duplicate.ResourceFences);
+        Assert.Equal(
+            request.StationExecutionGateEvidence,
+            result.StationExecutionGateEvidence);
+        Assert.Equal(
+            request.StationExecutionGateEvidenceSha256,
+            result.StationExecutionGateEvidenceSha256);
+        Assert.Equal(
+            request.StationExecutionGateExpiresAtUtc,
+            result.StationExecutionGateExpiresAtUtc);
+        Assert.Equal(
+            request.StationAgentControlLeaseOwnerInstanceId,
+            result.StationAgentControlLeaseOwnerInstanceId);
+        Assert.Equal(
+            request.StationAgentControlLeaseFencingToken,
+            result.StationAgentControlLeaseFencingToken);
+        Assert.Equal(
+            request.StationAgentControlLeaseExpiresAtUtc,
+            result.StationAgentControlLeaseExpiresAtUtc);
+        Assert.NotNull(controlLeaseVerifier.LastExpectation);
+        Assert.Equal(
+            request.StationSystemId,
+            controlLeaseVerifier.LastExpectation.StationSystemId);
+        Assert.Equal(
+            request.StationAgentControlLeaseOwnerInstanceId,
+            controlLeaseVerifier.LastExpectation.Authority.OwnerInstanceId);
         Assert.Equal(1, executor.ExecutionCount);
         Assert.Equal(
             [
@@ -156,6 +248,7 @@ public sealed class StationJobCoordinatorTests
             new InMemoryStationJobStore(),
             new RecordingExecutor(Success()),
             validator,
+            TestStationDispatchControlLeaseVerifier.Accepting(),
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             new RecordingIsolationCleaner(),
@@ -163,9 +256,106 @@ public sealed class StationJobCoordinatorTests
         await coordinator.HandleAsync(request);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
-            await coordinator.HandleAsync(request with { OperationId = "operation-inspection" }));
+            await coordinator.HandleAsync(RebindStationGateEvidence(
+                request with { OperationId = "operation-inspection" })));
 
         Assert.Contains("reused with different", exception.Message, StringComparison.Ordinal);
+
+        const string changedEvidence =
+            "station-lifecycle:system-station-assembly:4:Automatic:Execute|controller-handshake:8";
+        var changedGateClaim = StationMessageContract.BindStationExecutionGateEvidence(
+            request with
+            {
+                StationExecutionGateRevision = null,
+                StationExecutionGateEvidence = null,
+                StationExecutionGateEvidenceSha256 = null,
+                StationExecutionGateEvidenceVersion = 0,
+                StationExecutionGateAuthorizedAtUtc = null,
+                StationExecutionGateExpiresAtUtc = null,
+                StationAgentControlLeaseOwnerAgentId = null,
+                StationAgentControlLeaseOwnerInstanceId = null,
+                StationAgentControlLeaseFencingToken = 0,
+                StationAgentControlLeaseExpiresAtUtc = null
+            },
+            "station-gate-revision:v1:system-station-assembly:4:1",
+            changedEvidence,
+            Now,
+            Now.AddMinutes(5),
+            ControlLeaseAuthority(request.AgentId));
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await coordinator.HandleAsync(changedGateClaim));
+    }
+
+    [Fact]
+    public void PublishedJobRequiresCurrentBoundStationGateEvidence()
+    {
+        var valid = CreateRequest();
+        StationMessageContract.ValidateForAgentDispatch(valid);
+
+        var missing = valid with
+        {
+            StationExecutionGateRevision = null,
+            StationExecutionGateEvidence = null,
+            StationExecutionGateEvidenceSha256 = null,
+            StationExecutionGateEvidenceVersion = 0,
+            StationExecutionGateAuthorizedAtUtc = null,
+            StationExecutionGateExpiresAtUtc = null,
+            StationAgentControlLeaseOwnerAgentId = null,
+            StationAgentControlLeaseOwnerInstanceId = null,
+            StationAgentControlLeaseFencingToken = 0,
+            StationAgentControlLeaseExpiresAtUtc = null
+        };
+        Assert.Throws<InvalidDataException>(() =>
+            StationMessageContract.ValidateForAgentDispatch(missing));
+
+        var tampered = valid with
+        {
+            StationExecutionGateEvidence = valid.StationExecutionGateEvidence + ":tampered"
+        };
+        Assert.Throws<InvalidDataException>(() =>
+            StationMessageContract.ValidateForAgentDispatch(tampered));
+
+        var tamperedLeaseOwner = valid with
+        {
+            StationAgentControlLeaseOwnerInstanceId =
+                "22222222-2222-4222-8222-222222222222"
+        };
+        Assert.Throws<InvalidDataException>(() =>
+            StationMessageContract.ValidateForAgentDispatch(tamperedLeaseOwner));
+    }
+
+    [Fact]
+    public async Task AgentControlLeaseProofMismatchIsDurablyRejectedBeforeExecution()
+    {
+        var request = CreateRequest();
+        var clock = new FixedClock(Now);
+        var resourceFences = new InMemoryStationResourceFenceValidator(clock);
+        await ApplyLeaseAsync(resourceFences, request);
+        var controlLeaseVerifier = new TestStationDispatchControlLeaseVerifier(
+            StationDispatchControlLeaseVerificationResult.Reject(
+                "Active boot lease proof does not match the dispatch authority."));
+        var executor = new RecordingExecutor(Success());
+        var coordinator = new StationJobCoordinator(
+            new InMemoryStationJobStore(),
+            executor,
+            resourceFences,
+            controlLeaseVerifier,
+            new EmptyCancellationStore(),
+            new StationJobExecutionRegistry(),
+            new RecordingIsolationCleaner(),
+            clock);
+
+        var result = await coordinator.HandleAsync(request);
+
+        Assert.Equal(StationJobStatus.Rejected, result.Status);
+        Assert.Equal("Agent.StationControlLeaseRejected", result.FailureCode);
+        Assert.Equal(0, executor.ExecutionCount);
+        Assert.Equal(
+            request.StationAgentControlLeaseOwnerInstanceId,
+            controlLeaseVerifier.LastExpectation?.Authority.OwnerInstanceId);
+        Assert.Equal(
+            request.StationAgentControlLeaseFencingToken,
+            controlLeaseVerifier.LastExpectation?.Authority.FencingToken);
     }
 
     [Fact]
@@ -179,12 +369,13 @@ public sealed class StationJobCoordinatorTests
             new InMemoryStationJobStore(),
             executor,
             validator,
+            TestStationDispatchControlLeaseVerifier.Accepting(),
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             new RecordingIsolationCleaner(),
             new FixedClock(Now));
         var accepted = await coordinator.HandleAsync(first);
-        var stale = first with
+        var stale = RebindStationGateEvidence(first with
         {
             MessageId = Guid.NewGuid(),
             JobId = Guid.NewGuid(),
@@ -196,7 +387,7 @@ public sealed class StationJobCoordinatorTests
                 "system-station-assembly",
                 41,
                 Now.AddHours(1))]
-        };
+        });
 
         var rejected = await coordinator.HandleAsync(stale);
 
@@ -218,18 +409,19 @@ public sealed class StationJobCoordinatorTests
             new InMemoryStationJobStore(),
             executor,
             new InMemoryStationResourceFenceValidator(clock),
+            TestStationDispatchControlLeaseVerifier.Accepting(),
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             new RecordingIsolationCleaner(),
             clock);
-        var request = CreateRequest() with
+        var request = RebindStationGateEvidence(CreateRequest() with
         {
             ResourceFences = [new StationResourceFence(
                 "Station",
                 "system-station-assembly",
                 42,
                 Now.AddMinutes(1))]
-        };
+        });
 
         var rejected = await coordinator.HandleAsync(request);
 
@@ -239,6 +431,102 @@ public sealed class StationJobCoordinatorTests
         Assert.Equal("Agent.ResourceFenceRejected", rejected.FailureCode);
         Assert.Equal(0, executor.ExecutionCount);
         Assert.Null(rejected.StartedAtUtc);
+    }
+
+    [Fact]
+    public async Task AcceptedJobWhoseStationGateExpiresWhileQueuedNeverExecutesHardware()
+    {
+        var request = RebindStationGateEvidence(
+            CreateRequest(),
+            authorizedAtUtc: Now,
+            expiresAtUtc: Now.AddSeconds(1));
+        var clock = new MutableClock(Now);
+        var store = new InMemoryStationJobStore();
+        var executor = new RecordingExecutor(Success());
+        var coordinator = new StationJobCoordinator(
+            store,
+            executor,
+            new InMemoryStationResourceFenceValidator(clock),
+            TestStationDispatchControlLeaseVerifier.Accepting(),
+            new EmptyCancellationStore(),
+            new StationJobExecutionRegistry(),
+            new RecordingIsolationCleaner(),
+            clock);
+
+        await Assert.ThrowsAsync<StationResourceFenceUnavailableException>(async () =>
+            await coordinator.HandleAsync(request));
+        clock.UtcNow = Now.AddSeconds(2);
+
+        var rejected = await coordinator.HandleAsync(request);
+
+        Assert.Equal(StationJobStatus.Rejected, rejected.Status);
+        Assert.Equal("Agent.StationExecutionGateExpired", rejected.FailureCode);
+        Assert.Null(rejected.StartedAtUtc);
+        Assert.Equal(0, executor.ExecutionCount);
+    }
+
+    [Fact]
+    public async Task ColdRestartRejectsTamperedPersistedStationGateClaimBeforeHardwareExecution()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(),
+            $"openlineops-agent-gate-claim-{Guid.NewGuid():N}.sqlite");
+        var request = CreateRequest();
+        var clock = new FixedClock(Now);
+        try
+        {
+            using (var store = new SqliteStationJobStore($"Data Source={path}"))
+            {
+                var coordinator = new StationJobCoordinator(
+                    store,
+                    new RecordingExecutor(Success()),
+                    new InMemoryStationResourceFenceValidator(clock),
+                    TestStationDispatchControlLeaseVerifier.Accepting(),
+                    new EmptyCancellationStore(),
+                    new StationJobExecutionRegistry(),
+                    new RecordingIsolationCleaner(),
+                    clock);
+                await Assert.ThrowsAsync<StationResourceFenceUnavailableException>(async () =>
+                    await coordinator.HandleAsync(request));
+            }
+
+            await using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(
+                             $"Data Source={path}"))
+            {
+                await connection.OpenAsync();
+                await using var tamper = connection.CreateCommand();
+                tamper.CommandText = """
+                    UPDATE station_jobs
+                    SET document_json = json_set(
+                        document_json,
+                        '$.inputsJson',
+                        '{"tampered":true}')
+                    WHERE job_id = $job_id;
+                    """;
+                tamper.Parameters.AddWithValue("$job_id", request.JobId.ToString("D"));
+                Assert.Equal(1, await tamper.ExecuteNonQueryAsync());
+            }
+
+            using var restarted = new SqliteStationJobStore($"Data Source={path}");
+            var restartedCoordinator = new StationJobCoordinator(
+                restarted,
+                new RecordingExecutor(Success()),
+                new InMemoryStationResourceFenceValidator(clock),
+                TestStationDispatchControlLeaseVerifier.Accepting(),
+                new EmptyCancellationStore(),
+                new StationJobExecutionRegistry(),
+                new RecordingIsolationCleaner(),
+                clock);
+
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(async () =>
+                await restartedCoordinator.RecoverAsync());
+            Assert.Contains("fingerprint", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            DeleteSqliteFiles(path);
+        }
     }
 
     [Fact]
@@ -252,6 +540,7 @@ public sealed class StationJobCoordinatorTests
             store,
             executor,
             validator,
+            TestStationDispatchControlLeaseVerifier.Accepting(),
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             new RecordingIsolationCleaner(),
@@ -280,20 +569,21 @@ public sealed class StationJobCoordinatorTests
     [Fact]
     public async Task MissingLeaseBecomesPermanentRejectionAtFenceExpiryWithoutHardwareExecution()
     {
-        var request = CreateRequest() with
+        var request = RebindStationGateEvidence(CreateRequest() with
         {
             ResourceFences = [new StationResourceFence(
                 "Station",
                 "system-station-assembly",
                 42,
                 Now.AddSeconds(1))]
-        };
+        });
         var clock = new MutableClock(Now);
         var executor = new RecordingExecutor(Success());
         var coordinator = new StationJobCoordinator(
             new InMemoryStationJobStore(),
             executor,
             new InMemoryStationResourceFenceValidator(clock),
+            TestStationDispatchControlLeaseVerifier.Accepting(),
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             new RecordingIsolationCleaner(),
@@ -325,6 +615,7 @@ public sealed class StationJobCoordinatorTests
                 new SqliteStationResourceFenceValidator(
                     $"Data Source={path}",
                     new FixedClock(Now)),
+                TestStationDispatchControlLeaseVerifier.Accepting(),
                 new EmptyCancellationStore(),
                 new StationJobExecutionRegistry(),
                 isolationCleaner,
@@ -371,6 +662,7 @@ public sealed class StationJobCoordinatorTests
             store,
             new CleanupFailureExecutor(),
             validator,
+            TestStationDispatchControlLeaseVerifier.Accepting(),
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             cleaner,
@@ -379,6 +671,24 @@ public sealed class StationJobCoordinatorTests
             await coordinator.HandleAsync(request));
         var persisted = await store.GetAsync(new StationJobId(request.JobId));
         Assert.Equal(StationJobStatus.RecoveryRequired, persisted!.Job.Status);
+        Assert.Contains(
+            "Synthetic isolation cleanup failure.",
+            persisted.Job.FailureReason,
+            StringComparison.Ordinal);
+        var acceptedOutbox = Assert.Single(await store.ListPendingOutboxAsync(10, Now));
+        Assert.Equal(StationAgentMessageKinds.JobAccepted, acceptedOutbox.Kind);
+        await store.AcknowledgeOutboxAsync(acceptedOutbox.MessageId, Now);
+        var recoveryOutbox = Assert.Single(await store.ListPendingOutboxAsync(10, Now));
+        Assert.Equal(StationAgentMessageKinds.JobRecoveryRequired, recoveryOutbox.Kind);
+        var recoveryMessage = JsonSerializer.Deserialize<StationJobRecoveryRequired>(
+            recoveryOutbox.PayloadJson,
+            MessageJsonOptions);
+        Assert.NotNull(recoveryMessage);
+        Assert.Equal(request.JobId, recoveryMessage.JobId);
+        Assert.Contains(
+            "Synthetic isolation cleanup failure.",
+            recoveryMessage.Reason,
+            StringComparison.Ordinal);
 
         var recovered = await coordinator.RecoverAsync();
 
@@ -397,6 +707,7 @@ public sealed class StationJobCoordinatorTests
             store,
             executor,
             validator,
+            TestStationDispatchControlLeaseVerifier.Accepting(),
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             new RecordingIsolationCleaner(),
@@ -408,6 +719,7 @@ public sealed class StationJobCoordinatorTests
             store,
             executor,
             validator,
+            TestStationDispatchControlLeaseVerifier.Accepting(),
             new EmptyCancellationStore(),
             new StationJobExecutionRegistry(),
             new RecordingIsolationCleaner(),
@@ -439,6 +751,7 @@ public sealed class StationJobCoordinatorTests
                 new InMemoryStationJobStore(),
                 executor,
                 new InMemoryStationResourceFenceValidator(new FixedClock(Now)),
+                TestStationDispatchControlLeaseVerifier.Accepting(),
                 cancellations,
                 new StationJobExecutionRegistry(),
                 new RecordingIsolationCleaner(),
@@ -476,6 +789,7 @@ public sealed class StationJobCoordinatorTests
                 store,
                 executor,
                 validator,
+                TestStationDispatchControlLeaseVerifier.Accepting(),
                 cancellations,
                 executions,
                 new RecordingIsolationCleaner(),
@@ -603,8 +917,9 @@ public sealed class StationJobCoordinatorTests
 
     private static StationJobRequested CreateRequest(long fencingToken = 42)
     {
-        using var inputs = JsonDocument.Parse("{\"serialNumber\":\"BOARD-001\"}");
-        return new StationJobRequested(
+        using var inputs = JsonDocument.Parse(
+            "{\"serialNumber\":{\"kind\":\"Text\",\"value\":\"BOARD-001\"}}");
+        var request = new StationJobRequested(
             Guid.NewGuid(),
             Guid.NewGuid(),
             "run/operation/attempt-1",
@@ -640,7 +955,49 @@ public sealed class StationJobCoordinatorTests
                 Now.AddHours(1))],
             inputs.RootElement.Clone(),
             Now);
+        return StationMessageContract.BindStationExecutionGateEvidence(
+            request,
+            StationGateRevision,
+            StationGateEvidence,
+            Now,
+            Now.AddMinutes(5),
+            ControlLeaseAuthority(request.AgentId));
     }
+
+    private static StationJobRequested RebindStationGateEvidence(
+        StationJobRequested request,
+        DateTimeOffset? authorizedAtUtc = null,
+        DateTimeOffset? expiresAtUtc = null)
+    {
+        var unbound = request with
+        {
+            StationExecutionGateRevision = null,
+            StationExecutionGateEvidence = null,
+            StationExecutionGateEvidenceSha256 = null,
+            StationExecutionGateEvidenceVersion = 0,
+            StationExecutionGateAuthorizedAtUtc = null,
+            StationExecutionGateExpiresAtUtc = null,
+            StationAgentControlLeaseOwnerAgentId = null,
+            StationAgentControlLeaseOwnerInstanceId = null,
+            StationAgentControlLeaseFencingToken = 0,
+            StationAgentControlLeaseExpiresAtUtc = null
+        };
+        return StationMessageContract.BindStationExecutionGateEvidence(
+            unbound,
+            StationGateRevision,
+            StationGateEvidence,
+            authorizedAtUtc ?? Now,
+            expiresAtUtc ?? Now.AddMinutes(5),
+            ControlLeaseAuthority(request.AgentId));
+    }
+
+    private static StationAgentControlLeaseDispatchAuthority ControlLeaseAuthority(
+        string ownerAgentId) =>
+        new(
+            ownerAgentId,
+            AgentControlLeaseOwnerInstanceId,
+            FencingToken: 17,
+            Now.AddMinutes(10));
 
     private static StationJobCancelRequested CreateCancellation(StationJobRequested request) => new(
         Guid.NewGuid(),
@@ -667,6 +1024,7 @@ public sealed class StationJobCoordinatorTests
                 $"{request.IdempotencyKey}/lease/{fence.ResourceKind}/{fence.ResourceId}/{fence.FencingToken}",
                 request.AgentId,
                 request.StationId,
+                request.StationSystemId,
                 request.JobId,
                 request.ProductionRunId,
                 request.OperationRunId,
@@ -690,6 +1048,7 @@ public sealed class StationJobCoordinatorTests
                 $"{job.IdempotencyKey}/lease/{fence.ResourceKind}/{fence.ResourceId}/{fence.FencingToken}",
                 job.AgentId,
                 job.StationId,
+                job.StationSystemId,
                 job.JobId.Value,
                 job.ProductionRunId,
                 job.OperationRunId.Value,
@@ -755,6 +1114,9 @@ public sealed class StationJobCoordinatorTests
             PipeDirection.InOut,
             PipeOptions.Asynchronous);
         await pipe.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        WindowsIdentityBoundNamedPipe.Verify(
+            pipe,
+            authority.Descriptor.AuthorizedPrincipalSid);
         await StationResourceFenceAuthorityWire.WriteAsync(
             pipe,
             new StationResourceFenceValidationRequest(
@@ -769,11 +1131,19 @@ public sealed class StationJobCoordinatorTests
                     fence.FencingToken,
                     fence.ExpiresAtUtc)).ToArray()),
             CancellationToken.None);
-        return await StationResourceFenceAuthorityWire
+        var response = await StationResourceFenceAuthorityWire
             .ReadAsync<StationResourceFenceValidationResponse>(pipe, CancellationToken.None)
             .AsTask()
             .WaitAsync(TimeSpan.FromSeconds(5));
+        await StationResourceFenceAuthorityWire.WriteResponseReceiptAsync(
+            pipe,
+            CancellationToken.None);
+        return response;
     }
+
+    private static string CurrentUserSid() =>
+        WindowsIdentity.GetCurrent(TokenAccessLevels.Query).User?.Value
+        ?? throw new InvalidOperationException("Current test token has no user SID.");
 
     private static StationOperationExecutionResult Success() => new(
         ExecutionStatus.Completed,

@@ -1,3 +1,4 @@
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Traceability.Domain.Identifiers;
 
 namespace OpenLineOps.Traceability.Domain.Records;
@@ -15,7 +16,8 @@ public sealed record MeasurementRecord
         string actionId,
         TraceTargetKind targetKind,
         string targetId,
-        TraceCommandStatus commandStatus,
+        ExecutionStatus commandExecutionStatus,
+        ResultJudgement commandResultJudgement,
         bool? passed,
         DateTimeOffset measuredAtUtc)
     {
@@ -34,7 +36,9 @@ public sealed record MeasurementRecord
         ActionId = TraceabilityIdGuard.NotBlank(actionId, nameof(actionId));
         TargetKind = targetKind;
         TargetId = TraceabilityIdGuard.NotBlank(targetId, nameof(targetId));
-        CommandStatus = commandStatus;
+        TraceCommandExecutionAxes.Validate(commandExecutionStatus, commandResultJudgement);
+        CommandExecutionStatus = commandExecutionStatus;
+        CommandResultJudgement = commandResultJudgement;
         Passed = passed;
         MeasuredAtUtc = measuredAtUtc;
     }
@@ -59,7 +63,9 @@ public sealed record MeasurementRecord
 
     public string TargetId { get; }
 
-    public TraceCommandStatus CommandStatus { get; }
+    public ExecutionStatus CommandExecutionStatus { get; }
+
+    public ResultJudgement CommandResultJudgement { get; }
 
     public bool? Passed { get; }
 

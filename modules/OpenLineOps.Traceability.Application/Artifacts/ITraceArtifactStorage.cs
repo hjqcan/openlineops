@@ -18,7 +18,8 @@ public sealed record StoreTraceArtifactRequest(
     string FileName,
     string? MediaType,
     Stream Content,
-    string? ExpectedSha256 = null);
+    string? ExpectedSha256 = null,
+    long? ExpectedSizeBytes = null);
 
 public sealed record StoredTraceArtifact(
     string StorageKey,

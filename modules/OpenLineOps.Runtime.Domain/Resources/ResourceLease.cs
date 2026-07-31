@@ -135,3 +135,47 @@ public sealed record ResourceLeaseFenceEvidence
             lease.ExpiresAtUtc);
     }
 }
+
+public sealed record ResourceLeaseReleaseClaim
+{
+    public ResourceLeaseReleaseClaim(
+        ResourceRequirement resource,
+        long fencingToken)
+    {
+        Resource = resource ?? throw new ArgumentNullException(nameof(resource));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fencingToken);
+        FencingToken = fencingToken;
+    }
+
+    public ResourceRequirement Resource { get; }
+
+    public long FencingToken { get; }
+
+    public static ResourceLeaseReleaseClaim FromLease(ResourceLease lease)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        return new ResourceLeaseReleaseClaim(lease.Resource, lease.FencingToken);
+    }
+}
+
+public sealed record ResourceLeaseHoldClaim
+{
+    public ResourceLeaseHoldClaim(
+        ResourceRequirement resource,
+        long fencingToken)
+    {
+        Resource = resource ?? throw new ArgumentNullException(nameof(resource));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fencingToken);
+        FencingToken = fencingToken;
+    }
+
+    public ResourceRequirement Resource { get; }
+
+    public long FencingToken { get; }
+
+    public static ResourceLeaseHoldClaim FromLease(ResourceLease lease)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        return new ResourceLeaseHoldClaim(lease.Resource, lease.FencingToken);
+    }
+}

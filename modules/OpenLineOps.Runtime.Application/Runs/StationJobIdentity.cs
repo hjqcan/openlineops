@@ -17,4 +17,11 @@ public static class StationJobIdentity
         ArgumentException.ThrowIfNullOrWhiteSpace(jobIdempotencyKey);
         return $"{jobIdempotencyKey}/cancel";
     }
+
+    public static Guid CreateSafetyMessageId(string idempotencyKey)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(idempotencyKey);
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes($"station-safety/{idempotencyKey}"));
+        return new Guid(hash.AsSpan(0, 16));
+    }
 }

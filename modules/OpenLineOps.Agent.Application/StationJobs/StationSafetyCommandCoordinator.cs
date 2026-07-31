@@ -88,7 +88,8 @@ public sealed class StationSafetyCommandCoordinator(
             .ConfigureAwait(false);
         if (!created)
         {
-            return await ReplayEmergencyStopAsync(entry, cancellationToken).ConfigureAwait(false);
+            return await ReplayEmergencyStopAsync(entry, request.MessageId, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         var result = await handler(request, cancellationToken).ConfigureAwait(false);
@@ -127,7 +128,8 @@ public sealed class StationSafetyCommandCoordinator(
             .ConfigureAwait(false);
         if (!created)
         {
-            return await ReplaySafeStopAsync(entry, cancellationToken).ConfigureAwait(false);
+            return await ReplaySafeStopAsync(entry, request.MessageId, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         var result = await handler(request, cancellationToken).ConfigureAwait(false);
@@ -170,7 +172,8 @@ public sealed class StationSafetyCommandCoordinator(
             .ConfigureAwait(false);
         if (!created)
         {
-            return await ReplayJobCancelAsync(entry, cancellationToken).ConfigureAwait(false);
+            return await ReplayJobCancelAsync(entry, request.MessageId, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         var result = await handler(request, cancellationToken).ConfigureAwait(false);
@@ -233,12 +236,13 @@ public sealed class StationSafetyCommandCoordinator(
 
     private async ValueTask<EmergencyStopAcknowledged> ReplayEmergencyStopAsync(
         StationSafetyInboxEntry entry,
+        Guid currentRequestMessageId,
         CancellationToken cancellationToken)
     {
         EnsureKind(entry, StationSafetyCommandKind.EmergencyStop);
         if (entry.AcknowledgementJson is not null)
         {
-            return DeserializeEmergencyStop(entry);
+            return Correlate(DeserializeEmergencyStop(entry), currentRequestMessageId);
         }
 
         var recovery = new EmergencyStopAcknowledged(
@@ -252,17 +256,18 @@ public sealed class StationSafetyCommandCoordinator(
             RecoveryFailureReason,
             UtcNow());
         var completed = await CompleteAsync(entry, recovery, cancellationToken).ConfigureAwait(false);
-        return DeserializeEmergencyStop(completed);
+        return Correlate(DeserializeEmergencyStop(completed), currentRequestMessageId);
     }
 
     private async ValueTask<StationSafeStopAcknowledged> ReplaySafeStopAsync(
         StationSafetyInboxEntry entry,
+        Guid currentRequestMessageId,
         CancellationToken cancellationToken)
     {
         EnsureKind(entry, StationSafetyCommandKind.SafeStop);
         if (entry.AcknowledgementJson is not null)
         {
-            return DeserializeSafeStop(entry);
+            return Correlate(DeserializeSafeStop(entry), currentRequestMessageId);
         }
 
         var recovery = new StationSafeStopAcknowledged(
@@ -276,17 +281,18 @@ public sealed class StationSafetyCommandCoordinator(
             RecoveryFailureReason,
             UtcNow());
         var completed = await CompleteAsync(entry, recovery, cancellationToken).ConfigureAwait(false);
-        return DeserializeSafeStop(completed);
+        return Correlate(DeserializeSafeStop(completed), currentRequestMessageId);
     }
 
     private async ValueTask<StationJobCancelAcknowledged> ReplayJobCancelAsync(
         StationSafetyInboxEntry entry,
+        Guid currentRequestMessageId,
         CancellationToken cancellationToken)
     {
         EnsureKind(entry, StationSafetyCommandKind.JobCancel);
         if (entry.AcknowledgementJson is not null)
         {
-            return DeserializeJobCancel(entry);
+            return Correlate(DeserializeJobCancel(entry), currentRequestMessageId);
         }
 
         var recovery = new StationJobCancelAcknowledged(
@@ -302,7 +308,57 @@ public sealed class StationSafetyCommandCoordinator(
             JobCancellationRecoveryFailureReason,
             UtcNow());
         var completed = await CompleteAsync(entry, recovery, cancellationToken).ConfigureAwait(false);
-        return DeserializeJobCancel(completed);
+        return Correlate(DeserializeJobCancel(completed), currentRequestMessageId);
+    }
+
+    private static EmergencyStopAcknowledged Correlate(
+        EmergencyStopAcknowledged acknowledgement,
+        Guid currentRequestMessageId) =>
+        acknowledgement.RequestMessageId == currentRequestMessageId
+            ? acknowledgement
+            : acknowledgement with
+            {
+                MessageId = ReplayAcknowledgementMessageId(
+                    acknowledgement.MessageId,
+                    currentRequestMessageId),
+                RequestMessageId = currentRequestMessageId
+            };
+
+    private static StationSafeStopAcknowledged Correlate(
+        StationSafeStopAcknowledged acknowledgement,
+        Guid currentRequestMessageId) =>
+        acknowledgement.RequestMessageId == currentRequestMessageId
+            ? acknowledgement
+            : acknowledgement with
+            {
+                MessageId = ReplayAcknowledgementMessageId(
+                    acknowledgement.MessageId,
+                    currentRequestMessageId),
+                RequestMessageId = currentRequestMessageId
+            };
+
+    private static StationJobCancelAcknowledged Correlate(
+        StationJobCancelAcknowledged acknowledgement,
+        Guid currentRequestMessageId) =>
+        acknowledgement.RequestMessageId == currentRequestMessageId
+            ? acknowledgement
+            : acknowledgement with
+            {
+                MessageId = ReplayAcknowledgementMessageId(
+                    acknowledgement.MessageId,
+                    currentRequestMessageId),
+                RequestMessageId = currentRequestMessageId
+            };
+
+    private static Guid ReplayAcknowledgementMessageId(
+        Guid persistedAcknowledgementMessageId,
+        Guid currentRequestMessageId)
+    {
+        Span<byte> identity = stackalloc byte[32];
+        _ = persistedAcknowledgementMessageId.TryWriteBytes(identity[..16]);
+        _ = currentRequestMessageId.TryWriteBytes(identity[16..]);
+        var hash = SHA256.HashData(identity);
+        return new Guid(hash.AsSpan(0, 16));
     }
 
     private async ValueTask<StationSafetyInboxEntry> CompleteAsync<TAcknowledgement>(

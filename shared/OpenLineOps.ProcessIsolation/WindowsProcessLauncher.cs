@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -10,13 +11,21 @@ public sealed record IsolatedProcessStartRequest(
     IReadOnlyCollection<string> Arguments,
     string WorkingDirectory,
     IReadOnlyDictionary<string, string> Environment,
-    WindowsProcessLimits Limits,
+    WindowsProcessLimits? Limits,
     WindowsAppContainerPolicy? AppContainerPolicy = null);
 
 public sealed record WindowsAppContainerPolicy(
     string ProfileName,
     bool NetworkAccessAllowed,
-    IReadOnlyCollection<string>? AdditionalCapabilityNames = null);
+    WindowsAppContainerProfileMode ProfileMode,
+    IReadOnlyCollection<string>? AdditionalCapabilityNames = null,
+    string? ProfileLifecycleManagerServiceSid = null);
+
+public enum WindowsAppContainerProfileMode
+{
+    CreateOrOpen = 0,
+    UseExisting = 1
+}
 
 public enum WindowsProcessLaunchCheckpoint
 {
@@ -55,7 +64,9 @@ public sealed class WindowsProcessLauncher
         using var attributes = ProcessThreadAttributeList.Create(
             request.AppContainerPolicy,
             [standardInput.ChildHandle, standardOutput.ChildHandle, standardError.ChildHandle]);
-        WindowsProcessJob? job = WindowsProcessJob.Create(request.Limits);
+        WindowsProcessJob? job = request.Limits is null
+            ? WindowsProcessJob.CreateKillOnClose()
+            : WindowsProcessJob.Create(request.Limits);
 
         var startupInfo = new StartupInfoEx
         {
@@ -76,6 +87,13 @@ public sealed class WindowsProcessLauncher
         FileStream? inputStream = null;
         FileStream? outputStream = null;
         FileStream? errorStream = null;
+        SafeProcessHandle? managedProcessHandle = null;
+        SafeFileHandle? inputPipeHandle = null;
+        SafeFileHandle? outputPipeHandle = null;
+        SafeFileHandle? errorPipeHandle = null;
+        SafeFileHandle? childInputPipeHandle = null;
+        SafeFileHandle? childOutputPipeHandle = null;
+        SafeFileHandle? childErrorPipeHandle = null;
         try
         {
             if (!CreateProcess(
@@ -109,12 +127,19 @@ public sealed class WindowsProcessLauncher
             _checkpoint?.Invoke(WindowsProcessLaunchCheckpoint.ProcessAssignedToJob, processId);
 
             process = Process.GetProcessById(processId);
-            inputStream = standardInput.TakeParentStream(FileAccess.Write);
-            outputStream = standardOutput.TakeParentStream(FileAccess.Read);
-            errorStream = standardError.TakeParentStream(FileAccess.Read);
-            standardInput.CloseChildHandle();
-            standardOutput.CloseChildHandle();
-            standardError.CloseChildHandle();
+            managedProcessHandle = process.SafeHandle;
+            inputStream = standardInput.TakeParentStream(
+                FileAccess.Write,
+                out inputPipeHandle);
+            outputStream = standardOutput.TakeParentStream(
+                FileAccess.Read,
+                out outputPipeHandle);
+            errorStream = standardError.TakeParentStream(
+                FileAccess.Read,
+                out errorPipeHandle);
+            childInputPipeHandle = standardInput.CloseChildHandle();
+            childOutputPipeHandle = standardOutput.CloseChildHandle();
+            childErrorPipeHandle = standardError.CloseChildHandle();
 
             var resumeResult = ResumeThread(threadHandle);
             if (resumeResult != 1)
@@ -129,16 +154,24 @@ public sealed class WindowsProcessLauncher
 
             var launched = new WindowsIsolatedProcess(
                 process,
+                processHandle,
                 inputStream,
                 outputStream,
                 errorStream,
-                job);
+                job,
+                managedProcessHandle,
+                inputPipeHandle,
+                outputPipeHandle,
+                errorPipeHandle,
+                threadHandle,
+                childInputPipeHandle,
+                childOutputPipeHandle,
+                childErrorPipeHandle);
             job = null;
             process = null;
             inputStream = null;
             outputStream = null;
             errorStream = null;
-            processHandle.Dispose();
             processHandle = null;
             threadHandle.Dispose();
             threadHandle = null;
@@ -220,7 +253,7 @@ public sealed class WindowsProcessLauncher
                 nameof(request));
         }
 
-        request.Limits.Validate();
+        request.Limits?.Validate();
     }
 
     private static string ToNativePath(string path)
@@ -368,10 +401,13 @@ public sealed class WindowsProcessLauncher
             }
         }
 
-        public FileStream TakeParentStream(FileAccess access)
+        public FileStream TakeParentStream(
+            FileAccess access,
+            out SafeFileHandle handle)
         {
-            var handle = Interlocked.Exchange(ref _parentHandle, null)
-                ?? throw new InvalidOperationException("Parent pipe stream has already been taken.");
+            handle = Interlocked.Exchange(ref _parentHandle, null)
+                     ?? throw new InvalidOperationException(
+                         "Parent pipe stream has already been taken.");
             try
             {
                 return new FileStream(handle, access, 4096, isAsync: false);
@@ -383,9 +419,13 @@ public sealed class WindowsProcessLauncher
             }
         }
 
-        public void CloseChildHandle()
+        public SafeFileHandle CloseChildHandle()
         {
-            Interlocked.Exchange(ref _childHandle, null)?.Dispose();
+            var handle = Interlocked.Exchange(ref _childHandle, null)
+                         ?? throw new InvalidOperationException(
+                             "Child pipe handle has already been closed.");
+            handle.Dispose();
+            return handle;
         }
 
         public void Dispose()
@@ -707,27 +747,73 @@ public interface IIsolatedProcess : IDisposable
 
     Task WaitForExitAsync(CancellationToken cancellationToken = default);
 
+    Task WaitForProcessTreeExitAsync(CancellationToken cancellationToken = default);
+
     void TerminateProcessTree();
 }
+
+internal readonly record struct WindowsIsolatedProcessHandleState(
+    bool JobHandleClosed,
+    bool CreateProcessHandleClosed,
+    bool ManagedProcessHandleClosed,
+    bool StandardInputPipeHandleClosed,
+    bool StandardOutputPipeHandleClosed,
+    bool StandardErrorPipeHandleClosed,
+    bool PrimaryThreadHandleClosed,
+    bool ChildStandardInputPipeHandleClosed,
+    bool ChildStandardOutputPipeHandleClosed,
+    bool ChildStandardErrorPipeHandleClosed);
 
 public sealed class WindowsIsolatedProcess : IIsolatedProcess
 {
     private readonly Process _process;
+    private readonly SafeProcessHandle _processHandle;
+    private readonly SafeProcessHandle _managedProcessHandle;
+    private readonly WindowsProcessJob _ownedJob;
+    private readonly SafeFileHandle? _standardInputPipeHandle;
+    private readonly SafeFileHandle? _standardOutputPipeHandle;
+    private readonly SafeFileHandle? _standardErrorPipeHandle;
+    private readonly SafeHandle? _primaryThreadHandle;
+    private readonly SafeFileHandle? _childStandardInputPipeHandle;
+    private readonly SafeFileHandle? _childStandardOutputPipeHandle;
+    private readonly SafeFileHandle? _childStandardErrorPipeHandle;
+    private readonly TaskCompletionSource<bool> _disposeCompletion =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     private WindowsProcessJob? _job;
     private int _disposed;
 
     internal WindowsIsolatedProcess(
         Process process,
+        SafeProcessHandle processHandle,
         Stream standardInput,
         Stream standardOutput,
         Stream standardError,
-        WindowsProcessJob job)
+        WindowsProcessJob job,
+        SafeProcessHandle managedProcessHandle,
+        SafeFileHandle? standardInputPipeHandle = null,
+        SafeFileHandle? standardOutputPipeHandle = null,
+        SafeFileHandle? standardErrorPipeHandle = null,
+        SafeHandle? primaryThreadHandle = null,
+        SafeFileHandle? childStandardInputPipeHandle = null,
+        SafeFileHandle? childStandardOutputPipeHandle = null,
+        SafeFileHandle? childStandardErrorPipeHandle = null)
     {
         _process = process ?? throw new ArgumentNullException(nameof(process));
+        _processHandle = processHandle ?? throw new ArgumentNullException(nameof(processHandle));
         StandardInput = standardInput ?? throw new ArgumentNullException(nameof(standardInput));
         StandardOutput = standardOutput ?? throw new ArgumentNullException(nameof(standardOutput));
         StandardError = standardError ?? throw new ArgumentNullException(nameof(standardError));
-        _job = job ?? throw new ArgumentNullException(nameof(job));
+        _ownedJob = job ?? throw new ArgumentNullException(nameof(job));
+        _job = _ownedJob;
+        _managedProcessHandle = managedProcessHandle
+                                ?? throw new ArgumentNullException(nameof(managedProcessHandle));
+        _standardInputPipeHandle = standardInputPipeHandle;
+        _standardOutputPipeHandle = standardOutputPipeHandle;
+        _standardErrorPipeHandle = standardErrorPipeHandle;
+        _primaryThreadHandle = primaryThreadHandle;
+        _childStandardInputPipeHandle = childStandardInputPipeHandle;
+        _childStandardOutputPipeHandle = childStandardOutputPipeHandle;
+        _childStandardErrorPipeHandle = childStandardErrorPipeHandle;
     }
 
     public Stream StandardInput { get; }
@@ -738,27 +824,170 @@ public sealed class WindowsIsolatedProcess : IIsolatedProcess
 
     public int Id => _process.Id;
 
-    public int ExitCode => _process.ExitCode;
+    public long StartedAtUnixMilliseconds =>
+        new DateTimeOffset(_process.StartTime.ToUniversalTime())
+            .ToUnixTimeMilliseconds();
+
+    public int ExitCode
+    {
+        get
+        {
+            if (!GetExitCodeProcess(_processHandle, out var exitCode))
+            {
+                throw new Win32Exception(
+                    Marshal.GetLastWin32Error(),
+                    "Could not read the isolated Windows process exit code.");
+            }
+
+            if (exitCode == StillActive && !_process.HasExited)
+            {
+                throw new InvalidOperationException(
+                    "The isolated Windows process has not exited.");
+            }
+
+            return unchecked((int)exitCode);
+        }
+    }
+
+    public uint ActiveProcessCount => Volatile.Read(ref _job)?.ActiveProcessCount ?? 0;
+
+    internal bool IsJobHandleClosed => _ownedJob.IsClosed;
+
+    internal WindowsIsolatedProcessHandleState OwnedHandleState => new(
+        JobHandleClosed: IsJobHandleClosed,
+        CreateProcessHandleClosed: _processHandle.IsClosed,
+        ManagedProcessHandleClosed: _managedProcessHandle.IsClosed,
+        StandardInputPipeHandleClosed: ReadClosedState(
+            _standardInputPipeHandle,
+            nameof(StandardInput)),
+        StandardOutputPipeHandleClosed: ReadClosedState(
+            _standardOutputPipeHandle,
+            nameof(StandardOutput)),
+        StandardErrorPipeHandleClosed: ReadClosedState(
+            _standardErrorPipeHandle,
+            nameof(StandardError)),
+        PrimaryThreadHandleClosed: ReadClosedState(
+            _primaryThreadHandle,
+            "PrimaryThread"),
+        ChildStandardInputPipeHandleClosed: ReadClosedState(
+            _childStandardInputPipeHandle,
+            "ChildStandardInput"),
+        ChildStandardOutputPipeHandleClosed: ReadClosedState(
+            _childStandardOutputPipeHandle,
+            "ChildStandardOutput"),
+        ChildStandardErrorPipeHandleClosed: ReadClosedState(
+            _childStandardErrorPipeHandle,
+            "ChildStandardError"));
 
     public Task WaitForExitAsync(CancellationToken cancellationToken = default) =>
         _process.WaitForExitAsync(cancellationToken);
 
+    public async Task WaitForProcessTreeExitAsync(
+        CancellationToken cancellationToken = default)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var job = Volatile.Read(ref _job);
+            if (job is null)
+            {
+                if (Volatile.Read(ref _disposed) != 0)
+                {
+                    await _disposeCompletion.Task
+                        .WaitAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    throw new ObjectDisposedException(nameof(WindowsIsolatedProcess));
+                }
+
+                throw new InvalidOperationException(
+                    "The isolated Windows process has no Job Object.");
+            }
+
+            try
+            {
+                if (job.ActiveProcessCount == 0)
+                {
+                    return;
+                }
+            }
+            catch (ObjectDisposedException) when (Volatile.Read(ref _disposed) != 0)
+            {
+                await _disposeCompletion.Task
+                    .WaitAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                throw new ObjectDisposedException(nameof(WindowsIsolatedProcess));
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
     public void TerminateProcessTree()
     {
-        Interlocked.Exchange(ref _job, null)?.Dispose();
+        Volatile.Read(ref _job)?.Terminate();
     }
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0)
         {
+            _disposeCompletion.Task.GetAwaiter().GetResult();
             return;
         }
 
-        TerminateProcessTree();
-        StandardInput.Dispose();
-        StandardOutput.Dispose();
-        StandardError.Dispose();
-        _process.Dispose();
+        var failures = new List<Exception>();
+        var job = Interlocked.Exchange(ref _job, null);
+        try
+        {
+            CaptureFailure(failures, () => job?.Terminate());
+            CaptureFailure(failures, () => job?.Dispose());
+            CaptureFailure(failures, StandardInput.Dispose);
+            CaptureFailure(failures, StandardOutput.Dispose);
+            CaptureFailure(failures, StandardError.Dispose);
+            CaptureFailure(failures, _process.Dispose);
+            CaptureFailure(failures, _processHandle.Dispose);
+        }
+        finally
+        {
+            _disposeCompletion.TrySetResult(true);
+        }
+
+        if (failures.Count == 1)
+        {
+            ExceptionDispatchInfo.Capture(failures[0]).Throw();
+        }
+
+        if (failures.Count > 1)
+        {
+            throw new AggregateException(
+                "Could not release the isolated Windows process tree.",
+                failures);
+        }
     }
+
+    private static void CaptureFailure(List<Exception> failures, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception exception)
+        {
+            failures.Add(exception);
+        }
+    }
+
+    private static bool ReadClosedState(SafeHandle? handle, string handleName) =>
+        handle?.IsClosed
+        ?? throw new InvalidOperationException(
+            $"{handleName} is not backed by an owned Windows process handle.");
+
+    private const uint StillActive = 259;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetExitCodeProcess(
+        SafeProcessHandle process,
+        out uint exitCode);
 }

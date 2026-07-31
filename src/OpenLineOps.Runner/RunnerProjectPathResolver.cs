@@ -48,6 +48,6 @@ public static class RunnerProjectPathResolver
     {
         return path.EndsWith(
             AutomationProjectFileConvention.ProjectFileExtension,
-            StringComparison.OrdinalIgnoreCase);
+            StringComparison.Ordinal);
     }
 }

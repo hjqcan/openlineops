@@ -28,6 +28,7 @@ public sealed class DeviceConfigurationController : ControllerBase
     }
 
     [HttpPost("definitions")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.EngineeringPolicy)]
     [ProducesResponseType<DeviceDefinitionResponse>(StatusCodes.Status201Created)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
@@ -56,6 +57,7 @@ public sealed class DeviceConfigurationController : ControllerBase
     }
 
     [HttpGet("definitions")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<IReadOnlyCollection<DeviceDefinitionResponse>>(StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyCollection<DeviceDefinitionResponse>>> ListDefinitionsAsync(
         CancellationToken cancellationToken)
@@ -66,6 +68,7 @@ public sealed class DeviceConfigurationController : ControllerBase
     }
 
     [HttpGet("definitions/{deviceDefinitionId}")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<DeviceDefinitionResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<DeviceDefinitionResponse>> GetDefinitionAsync(
@@ -80,6 +83,7 @@ public sealed class DeviceConfigurationController : ControllerBase
     }
 
     [HttpPost("instances")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.EngineeringPolicy)]
     [ProducesResponseType<DeviceInstanceResponse>(StatusCodes.Status201Created)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
@@ -109,6 +113,7 @@ public sealed class DeviceConfigurationController : ControllerBase
     }
 
     [HttpGet("instances")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<IReadOnlyCollection<DeviceInstanceResponse>>(StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyCollection<DeviceInstanceResponse>>> ListInstancesAsync(
         CancellationToken cancellationToken)
@@ -119,6 +124,7 @@ public sealed class DeviceConfigurationController : ControllerBase
     }
 
     [HttpGet("instances/{deviceInstanceId}")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<DeviceInstanceResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<DeviceInstanceResponse>> GetInstanceAsync(
@@ -133,6 +139,7 @@ public sealed class DeviceConfigurationController : ControllerBase
     }
 
     [HttpPost("instances/{deviceInstanceId}/connect")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<DeviceInstanceResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
@@ -148,6 +155,7 @@ public sealed class DeviceConfigurationController : ControllerBase
     }
 
     [HttpPost("instances/{deviceInstanceId}/disconnect")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<DeviceInstanceResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<DeviceInstanceResponse>> DisconnectInstanceAsync(
@@ -166,6 +174,7 @@ public sealed class DeviceConfigurationController : ControllerBase
     }
 
     [HttpPost("instances/{deviceInstanceId}/faults")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<DeviceInstanceResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
@@ -185,6 +194,7 @@ public sealed class DeviceConfigurationController : ControllerBase
     }
 
     [HttpPost("instances/{deviceInstanceId}/fault-reset")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<DeviceInstanceResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<DeviceInstanceResponse>> ResetFaultAsync(

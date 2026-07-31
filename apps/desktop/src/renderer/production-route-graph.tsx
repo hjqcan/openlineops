@@ -4,6 +4,7 @@ import type {
   AutomationTopologyResponse,
   ProcessDefinitionSummary,
   ProductionOperationRequest,
+  ProductionTerminalDisposition,
   RouteTransitionRequest
 } from './contracts';
 
@@ -73,12 +74,25 @@ export const ProductionRouteGraph = memo(function ProductionRouteGraph({
   const flowById = useMemo(
     () => new Map(flows.map(flow => [flow.processDefinitionId, flow])),
     [flows]);
-  const forwardSources = useMemo(
-    () => new Set(
-      transitions
-        .filter(transition => transition.kind !== 'Rework')
-        .map(transition => transition.sourceOperationId)),
+  const terminalDispositions = useMemo(
+    () => [...new Set(transitions
+      .map(transition => transition.terminalDisposition)
+      .filter((disposition): disposition is ProductionTerminalDisposition => disposition !== null))],
     [transitions]);
+  const operationCanvasWidth = Math.max(
+    layout.width,
+    ...Object.values(effectivePositions).map(position => position.x + NODE_WIDTH + 70));
+  const canvasWidth = operationCanvasWidth + (terminalDispositions.length > 0 ? 250 : 0);
+  const canvasHeight = Math.max(
+    layout.height,
+    ...Object.values(effectivePositions).map(position => position.y + NODE_HEIGHT + 40),
+    50 + terminalDispositions.length * 118 + 40);
+  const terminalPositions = useMemo(
+    () => Object.fromEntries(terminalDispositions.map((disposition, index) => [
+      disposition,
+      { x: operationCanvasWidth + 24, y: 50 + index * 118 }
+    ])) as Partial<Record<ProductionTerminalDisposition, GraphPoint>>,
+    [operationCanvasWidth, terminalDispositions]);
 
   if (operations.length === 0) {
     return (
@@ -94,7 +108,7 @@ export const ProductionRouteGraph = memo(function ProductionRouteGraph({
     <div className="production-route-scroll" data-testid="production-route-graph">
       <div
         className="production-route-canvas"
-        style={{ width: layout.width, height: layout.height }}
+        style={{ width: canvasWidth, height: canvasHeight }}
         onPointerDown={() => onSelect(null)}
       >
         {layout.stationLanes.map(lane => (
@@ -113,8 +127,8 @@ export const ProductionRouteGraph = memo(function ProductionRouteGraph({
 
         <svg
           className="production-route-edges"
-          width={layout.width}
-          height={layout.height}
+          width={canvasWidth}
+          height={canvasHeight}
           aria-label="Route transitions"
         >
           <defs>
@@ -132,7 +146,9 @@ export const ProductionRouteGraph = memo(function ProductionRouteGraph({
           </defs>
           {transitions.map(transition => {
             const source = effectivePositions[transition.sourceOperationId];
-            const target = effectivePositions[transition.targetOperationId];
+            const target = transition.targetOperationId === null
+              ? terminalPositions[transition.terminalDisposition!]
+              : effectivePositions[transition.targetOperationId];
             if (!source || !target) {
               return null;
             }
@@ -162,14 +178,31 @@ export const ProductionRouteGraph = memo(function ProductionRouteGraph({
               stationName={station?.displayName ?? 'Unbound Station'}
               flowName={flow?.displayName ?? 'Unbound Flow'}
               entry={operation.operationId === entryOperationId}
-              terminal={!forwardSources.has(operation.operationId)}
+              terminalDispositions={terminalDispositions.filter(disposition => transitions.some(transition => (
+                transition.sourceOperationId === operation.operationId
+                && transition.terminalDisposition === disposition)))}
               selected={selection?.kind === 'operation' && selection.id === operation.operationId}
               invalid={operationProblemIds.has(operation.operationId)}
-              canvasWidth={layout.width}
-              canvasHeight={layout.height}
+              canvasWidth={canvasWidth}
+              canvasHeight={canvasHeight}
               onSelect={() => onSelect({ kind: 'operation', id: operation.operationId })}
               onMove={next => onMove(operation.operationId, next)}
             />
+          );
+        })}
+        {terminalDispositions.map(disposition => {
+          const position = terminalPositions[disposition]!;
+          return (
+            <article
+              key={disposition}
+              className="production-terminal-node"
+              style={{ transform: `translate(${position.x}px, ${position.y}px)` }}
+              data-testid={`production-terminal-node-${disposition}`}
+            >
+              <small>TERMINAL</small>
+              <strong>{disposition}</strong>
+              <span>Product disposition</span>
+            </article>
           );
         })}
       </div>
@@ -183,7 +216,7 @@ const OperationNode = memo(function OperationNode({
   stationName,
   flowName,
   entry,
-  terminal,
+  terminalDispositions,
   selected,
   invalid,
   canvasWidth,
@@ -196,7 +229,7 @@ const OperationNode = memo(function OperationNode({
   stationName: string;
   flowName: string;
   entry: boolean;
-  terminal: boolean;
+  terminalDispositions: ProductionTerminalDisposition[];
   selected: boolean;
   invalid: boolean;
   canvasWidth: number;
@@ -279,7 +312,16 @@ const OperationNode = memo(function OperationNode({
       </div>
       <footer>
         {entry ? <span className="entry"><GitBranch size={11} /> ENTRY</span> : <span />}
-        {terminal ? <span className="terminal">COMPLETED</span> : null}
+        {terminalDispositions.length > 0 ? (
+          <span
+            className="terminal"
+            title={terminalDispositions.join(' / ')}
+          >
+            {terminalDispositions.length === 1
+              ? terminalDispositions[0].toUpperCase()
+              : `${terminalDispositions.length} CONDITIONAL TERMINALS`}
+          </span>
+        ) : null}
       </footer>
     </article>
   );
@@ -336,11 +378,13 @@ export function createAutoRouteLayout(
   const forward = transitions.filter(transition => (
     transition.kind !== 'Rework'
     && operationIds.has(transition.sourceOperationId)
+    && transition.targetOperationId !== null
     && operationIds.has(transition.targetOperationId)));
   const indegrees = new Map(operations.map(operation => [operation.operationId, 0]));
   const rank = new Map(operations.map(operation => [operation.operationId, 0]));
   for (const transition of forward) {
-    indegrees.set(transition.targetOperationId, (indegrees.get(transition.targetOperationId) ?? 0) + 1);
+    const targetOperationId = transition.targetOperationId!;
+    indegrees.set(targetOperationId, (indegrees.get(targetOperationId) ?? 0) + 1);
   }
   const pending = operations
     .filter(operation => (indegrees.get(operation.operationId) ?? 0) === 0)
@@ -351,13 +395,14 @@ export function createAutoRouteLayout(
       continue;
     }
     for (const transition of forward.filter(candidate => candidate.sourceOperationId === sourceId)) {
+      const targetOperationId = transition.targetOperationId!;
       rank.set(
-        transition.targetOperationId,
-        Math.max(rank.get(transition.targetOperationId) ?? 0, (rank.get(sourceId) ?? 0) + 1));
-      const nextDegree = (indegrees.get(transition.targetOperationId) ?? 0) - 1;
-      indegrees.set(transition.targetOperationId, nextDegree);
+        targetOperationId,
+        Math.max(rank.get(targetOperationId) ?? 0, (rank.get(sourceId) ?? 0) + 1));
+      const nextDegree = (indegrees.get(targetOperationId) ?? 0) - 1;
+      indegrees.set(targetOperationId, nextDegree);
       if (nextDegree === 0) {
-        pending.push(transition.targetOperationId);
+        pending.push(targetOperationId);
       }
     }
   }

@@ -31,7 +31,7 @@ internal static class TraceTestData
             stationSystemId,
             "capability.inspect",
             "Inspect",
-            TraceCommandStatus.Completed,
+            ExecutionStatus.Completed,
             judgement,
             BaseTimeUtc.AddSeconds(10),
             BaseTimeUtc.AddSeconds(40),
@@ -51,7 +51,8 @@ internal static class TraceTestData
             command.ActionId,
             TraceTargetKind.System,
             stationSystemId,
-            command.Status,
+            command.ExecutionStatus,
+            command.ResultJudgement,
             judgement switch
             {
                 ResultJudgement.Passed => true,

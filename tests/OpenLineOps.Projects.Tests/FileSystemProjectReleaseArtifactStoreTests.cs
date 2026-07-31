@@ -48,14 +48,14 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     {
         var scope = CreateScope("project.release", "application.main");
         WriteTopologyResources(scope, "topology.main", "layout.a", "layout.b");
-        WriteSourceFile(scope, "flows/process-main/flow.json", "flow-v1");
+        WriteSourceFile(scope, "flows/process-main/flow.json", "flow-original");
         WriteSourceFile(scope, "flows/process-main/nodes/node-script/generated.py", "print('release')\n");
         Directory.CreateDirectory(Path.Combine(GetApplicationSourcePath(scope), "empty-folder"));
         var store = new FileSystemProjectReleaseArtifactStore();
 
         var descriptor = await store.PublishAsync(
             scope,
-            "snapshot.main.v1",
+            "snapshot.main",
             PublishedAtUtc,
             CreateUnnormalizedMetadata());
         var opened = await store.OpenAsync(scope, descriptor.SnapshotId, descriptor.ContentSha256);
@@ -89,7 +89,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             opened.SourceRootPath,
             opened.ApplicationProjectRelativePath);
         var releaseApplicationPath = GetApplicationSourcePath(releaseSourceScope);
-        Assert.Equal("flow-v1", File.ReadAllText(Path.Combine(releaseApplicationPath, "flows", "process-main", "flow.json")));
+        Assert.Equal("flow-original", File.ReadAllText(Path.Combine(releaseApplicationPath, "flows", "process-main", "flow.json")));
         Assert.True(Directory.Exists(Path.Combine(releaseApplicationPath, "empty-folder")));
         Assert.StartsWith(Path.GetFullPath(scope.ProjectPath), descriptor.ReleaseRootPath, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(Path.Combine(descriptor.ReleaseRootPath, "source"), descriptor.SourceRootPath);
@@ -177,6 +177,19 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                         "transition.inspect-eol",
                         entry.OperationId,
                         terminal.OperationId,
+                        null,
+                        "Sequence",
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null),
+                    new ProjectReleaseRouteTransition(
+                        "transition.eol-completed",
+                        terminal.OperationId,
+                        null,
+                        "Completed",
                         "Sequence",
                         null,
                         null,
@@ -202,7 +215,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         Assert.Equal(
             ["operation.eol", "operation.inspect"],
             opened.Metadata.ProductionLine.Operations.Select(operation => operation.OperationId));
-        var transition = Assert.Single(opened.Metadata.ProductionLine.Transitions);
+        var transition = Assert.Single(opened.Metadata.ProductionLine.Transitions, candidate =>
+            candidate.TargetOperationId is not null);
         Assert.Equal("transition.inspect-eol", transition.TransitionId);
         Assert.Equal("Sequence", transition.Kind);
     }
@@ -244,7 +258,11 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             ProductionLine = metadata.ProductionLine with
             {
                 Operations = [entry, unreachable],
-                Transitions = []
+                Transitions =
+                [
+                    TerminalTransition("transition.entry-completed", entry.OperationId),
+                    TerminalTransition("transition.unreachable-completed", unreachable.OperationId)
+                ]
             }
         };
         var store = new FileSystemProjectReleaseArtifactStore();
@@ -257,6 +275,27 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                 metadata));
 
         Assert.Contains("not reachable", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PublishRejectsImplicitTerminalOperation()
+    {
+        var scope = CreateScope("project.implicit-terminal", "application.main");
+        var metadata = CreateMetadata();
+        metadata = metadata with
+        {
+            ProductionLine = metadata.ProductionLine with { Transitions = [] }
+        };
+        var store = new FileSystemProjectReleaseArtifactStore();
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await store.PublishAsync(
+                scope,
+                "snapshot.implicit-terminal",
+                PublishedAtUtc,
+                metadata));
+
+        Assert.Contains("explicit terminal disposition", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -278,13 +317,15 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                         "transition.entry-eol",
                         entry.OperationId,
                         terminal.OperationId,
+                        null,
                         "sequence",
                         null,
                         null,
                         null,
                         null,
                         null,
-                        null)
+                        null),
+                    TerminalTransition("transition.eol-completed", terminal.OperationId)
                 ]
             }
         };
@@ -349,8 +390,8 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var packagePath = Path.Combine(_testRoot, "plugin-package");
         Directory.CreateDirectory(packagePath);
         await File.WriteAllTextAsync(Path.Combine(packagePath, "manifest.json"), "{\"id\":\"plugin.motion\"}");
-        await File.WriteAllTextAsync(Path.Combine(packagePath, "plugin.dll"), "plugin-binary-v1");
-        await File.WriteAllTextAsync(Path.Combine(packagePath, "dependency.dat"), "dependency-v1");
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "plugin.dll"), "plugin-binary-original");
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "dependency.dat"), "dependency-original");
         var dependency = CreatePackageDependency(packagePath);
         var metadata = CreateMetadata() with
         {
@@ -380,7 +421,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             opened.ReleaseRootPath,
             frozenDependency.PackageRelativePath.Replace('/', Path.DirectorySeparatorChar));
 
-        Assert.Equal("dependency-v1", File.ReadAllText(Path.Combine(frozenPackagePath, "dependency.dat")));
+        Assert.Equal("dependency-original", File.ReadAllText(Path.Combine(frozenPackagePath, "dependency.dat")));
         Assert.DoesNotContain(Path.GetFullPath(packagePath), await File.ReadAllTextAsync(descriptor.ManifestPath));
 
         await File.WriteAllTextAsync(Path.Combine(frozenPackagePath, "dependency.dat"), "dependency-tampered");
@@ -478,11 +519,43 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
             "snapshot.concurrent-source-change")));
     }
 
+    [Theory]
+    [InlineData(unchecked((int)0x80070020))]
+    [InlineData(unchecked((int)0x80070021))]
+    public void ConcurrentSourceMutationClassifierRecognizesWindowsSharingFailures(int hResult)
+    {
+        var exception = new IOException("Simulated Windows file access conflict.", hResult);
+
+        Assert.Equal(
+            OperatingSystem.IsWindows(),
+            FileSystemProjectReleaseArtifactStore.IsConcurrentSourceMutationFailure(exception));
+    }
+
+    [Fact]
+    public void ConcurrentSourceMutationClassifierRecognizesMissingSourceFailures()
+    {
+        Assert.True(FileSystemProjectReleaseArtifactStore.IsConcurrentSourceMutationFailure(
+            new FileNotFoundException("Source file was removed.")));
+        Assert.True(FileSystemProjectReleaseArtifactStore.IsConcurrentSourceMutationFailure(
+            new DirectoryNotFoundException("Source directory was removed.")));
+    }
+
+    [Fact]
+    public void ConcurrentSourceMutationClassifierRejectsUnrelatedFileSystemFailures()
+    {
+        Assert.False(FileSystemProjectReleaseArtifactStore.IsConcurrentSourceMutationFailure(
+            new IOException("Unrelated I/O failure.")));
+        Assert.False(FileSystemProjectReleaseArtifactStore.IsConcurrentSourceMutationFailure(
+            new UnauthorizedAccessException("Access denied.")));
+        Assert.False(FileSystemProjectReleaseArtifactStore.IsConcurrentSourceMutationFailure(
+            new PathTooLongException("Path is too long.")));
+    }
+
     [Fact]
     public async Task OpenRejectsTamperedSourceFile()
     {
         var scope = CreateScope("project.tamper", "application.main");
-        WriteSourceFile(scope, "configuration/project.json", "configuration-v1");
+        WriteSourceFile(scope, "configuration/project.json", "configuration-original");
         var store = new FileSystemProjectReleaseArtifactStore();
         var descriptor = await store.PublishAsync(
             scope,
@@ -583,7 +656,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     public async Task PublishRejectsFlowIrHashMismatch()
     {
         var scope = CreateScope("project.flow-ir-hash", "application.main");
-        WriteSourceFile(scope, "flows/process-main/flow.json", "flow-v1");
+        WriteSourceFile(scope, "flows/process-main/flow.json", "flow-original");
         var store = new FileSystemProjectReleaseArtifactStore();
         var metadata = WithOperation(
             CreateMetadata(),
@@ -614,7 +687,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         var packagePath = Path.Combine(_testRoot, $"plugin-package-{digestField}");
         Directory.CreateDirectory(packagePath);
         await File.WriteAllTextAsync(Path.Combine(packagePath, "manifest.json"), "{\"id\":\"plugin.motion\"}");
-        await File.WriteAllTextAsync(Path.Combine(packagePath, "plugin.dll"), "plugin-binary-v1");
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "plugin.dll"), "plugin-binary-original");
         var dependency = CreatePackageDependency(packagePath);
         var metadata = CreateMetadata() with
         {
@@ -709,7 +782,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
     {
         const string invalidJson = "not-json";
         var scope = CreateScope("project.flow-ir-json", "application.main");
-        WriteSourceFile(scope, "flows/process-main/flow.json", "flow-v1");
+        WriteSourceFile(scope, "flows/process-main/flow.json", "flow-original");
         var store = new FileSystemProjectReleaseArtifactStore();
         var metadata = WithOperation(
             CreateMetadata(),
@@ -1056,7 +1129,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                     "EOL",
                     "station.eol",
                     "process.main",
-                    "configuration.main.v1",
+                    "configuration.main",
                     "process.main@1.0.0",
                     "openlineops.flow-ir",
                     "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
@@ -1068,11 +1141,25 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
                         "station.eol",
                         "Fixed",
                         [])],
+                    [],
                     [])
             ],
-            Transitions: [],
+            Transitions: [TerminalTransition("transition.eol-completed", "operation.eol")],
             LineControllerAuthorizations: []);
     }
+
+    private static ProjectReleaseRouteTransition TerminalTransition(string id, string source) => new(
+        id,
+        source,
+        null,
+        "Completed",
+        "Sequence",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null);
 
     private static string WriteSourceFile(
         ProjectApplicationWorkspaceScope scope,
@@ -1146,7 +1233,7 @@ public sealed class FileSystemProjectReleaseArtifactStoreTests : IDisposable
         File.WriteAllText(
             Path.Combine(engineeringProjectsDirectory, "project-main.json"),
             $$$"""
-            {"schema":"openlineops.engineering-configuration-resource","schemaVersion":1,"applicationId":"{{{scope.ApplicationId}}}","resourceKind":"project","resourceId":"engineering.main","snapshot":{"projectId":"engineering.main","workspaceId":"workspace.main","displayName":"Main","createdAtUtc":"2026-07-10T08:00:00+00:00","activeSnapshotId":"configuration.main.v1","snapshots":[{"snapshotId":"configuration.main.v1","projectId":"engineering.main","processDefinitionId":"process.main","processVersionId":"process.main@1.0.0","recipeId":"recipe.main","recipeVersionId":"recipe.main@1","stationProfileId":"station.profile.main","status":"Published","publishedAtUtc":"2026-07-10T08:00:00+00:00","deviceBindings":[]}]}}
+            {"schema":"openlineops.engineering-configuration-resource","schemaVersion":1,"applicationId":"{{{scope.ApplicationId}}}","resourceKind":"project","resourceId":"engineering.main","snapshot":{"projectId":"engineering.main","workspaceId":"workspace.main","displayName":"Main","createdAtUtc":"2026-07-10T08:00:00+00:00","activeSnapshotId":"configuration.main","snapshots":[{"snapshotId":"configuration.main","projectId":"engineering.main","processDefinitionId":"process.main","processVersionId":"process.main@1.0.0","recipeId":"recipe.main","recipeVersionId":"recipe.main@1","stationProfileId":"station.profile.main","status":"Published","publishedAtUtc":"2026-07-10T08:00:00+00:00","deviceBindings":[]}]}}
             """);
         File.WriteAllText(
             Path.Combine(stationProfilesDirectory, "station-profile-main.json"),

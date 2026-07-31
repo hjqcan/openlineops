@@ -51,7 +51,8 @@ public sealed record RunnerOperationOutput(
 public sealed record RunnerRouteDecisionOutput(
     string SourceOperationRunId,
     string TransitionId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    string? TerminalDisposition,
     string SourceJudgement,
     int Traversal,
     DateTimeOffset DecidedAtUtc);
@@ -184,6 +185,7 @@ public sealed record RunnerJsonOutput(
                 decision.SourceOperationRunId,
                 decision.TransitionId,
                 decision.TargetOperationId,
+                decision.TerminalDisposition?.ToString(),
                 decision.SourceJudgement.ToString(),
                 decision.Traversal,
                 decision.DecidedAtUtc))

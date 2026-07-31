@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using OpenLineOps.Api.Health;
+using OpenLineOps.Runtime.Infrastructure.Transport;
 
 namespace OpenLineOps.PostgresIntegration.Tests;
 
@@ -19,6 +20,15 @@ public sealed class RabbitMqEventBusReadinessIntegrationTests
     [RabbitMqIntegrationFact]
     public async Task ReadinessHealthCheckConnectsToConfiguredEventBusRabbitMqBroker()
     {
+        var runtimeBrokerUri = new UriBuilder(
+            "amqp",
+            _rabbitMq.HostName,
+            _rabbitMq.Port,
+            _rabbitMq.VirtualHost)
+        {
+            UserName = _rabbitMq.UserName,
+            Password = _rabbitMq.Password
+        }.Uri.AbsoluteUri;
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -31,7 +41,11 @@ public sealed class RabbitMqEventBusReadinessIntegrationTests
                 ["OpenLineOps:EventBus:RabbitMq:Password"] = _rabbitMq.Password,
                 ["OpenLineOps:EventBus:RabbitMq:VirtualHost"] = _rabbitMq.VirtualHost,
                 ["OpenLineOps:EventBus:RabbitMq:ExchangeName"] =
-                    "openlineops.events.integration-test"
+                    "openlineops.events.integration-test",
+                [$"{StationCoordinatorTransportOptions.SectionName}:Provider"] =
+                    StationCoordinatorTransportProviders.RabbitMq,
+                [$"{StationCoordinatorTransportOptions.SectionName}:BrokerUri"] = runtimeBrokerUri,
+                [$"{StationCoordinatorTransportOptions.SectionName}:RequireTls"] = "false"
             })
             .Build();
         var services = new ServiceCollection();
@@ -48,5 +62,8 @@ public sealed class RabbitMqEventBusReadinessIntegrationTests
         Assert.Equal(
             HealthStatus.Healthy,
             report.Entries["openlineops.eventbus.rabbitmq"].Status);
+        Assert.Equal(
+            HealthStatus.Healthy,
+            report.Entries["openlineops.runtime.station-transport.rabbitmq"].Status);
     }
 }

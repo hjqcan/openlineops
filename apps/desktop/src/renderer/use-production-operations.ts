@@ -5,11 +5,12 @@ import type {
   ProductionRunReadModel
 } from './contracts';
 import { getActiveProductionRuns, getProductionLineRuntimeState } from './api';
+import { slotResourceIdMatchesScope } from './production-operations-filters';
 
 const emptyFilters: ProductionOperationsFilters = {
   productionLineDefinitionId: '',
   stationSystemId: '',
-  slotId: ''
+  slotResourceId: ''
 };
 
 interface ScopedOperationsFilters {
@@ -76,7 +77,7 @@ export function useProductionOperations({
     applicationId ?? '',
     filters.productionLineDefinitionId,
     filters.stationSystemId,
-    filters.slotId,
+    filters.slotResourceId,
     preferredLineId ?? '',
     isBackendHealthy ? 'healthy' : 'unhealthy'
   ].join('\u001f');
@@ -224,19 +225,19 @@ export function useProductionOperations({
           value: {
             productionLineDefinitionId: value,
             stationSystemId: '',
-            slotId: ''
+            slotResourceId: ''
           }
         };
       }
       if (filter === 'stationSystemId') {
         return {
           storageKey,
-          value: { ...currentFilters, stationSystemId: value, slotId: '' }
+          value: { ...currentFilters, stationSystemId: value, slotResourceId: '' }
         };
       }
       return {
         storageKey,
-        value: { ...currentFilters, slotId: value }
+        value: { ...currentFilters, slotResourceId: value }
       };
     });
   }, [storageKey]);
@@ -260,12 +261,23 @@ function readFilters(storageKey: string): ProductionOperationsFilters | null {
     if (!parsed) {
       return null;
     }
+    const productionLineDefinitionId = typeof parsed.productionLineDefinitionId === 'string'
+      ? parsed.productionLineDefinitionId
+      : '';
+    const stationSystemId = typeof parsed.stationSystemId === 'string'
+      ? parsed.stationSystemId
+      : '';
+    const slotResourceId = typeof parsed.slotResourceId === 'string'
+      && (!parsed.slotResourceId || slotResourceIdMatchesScope(
+        parsed.slotResourceId,
+        productionLineDefinitionId,
+        stationSystemId))
+      ? parsed.slotResourceId
+      : '';
     return {
-      productionLineDefinitionId: typeof parsed.productionLineDefinitionId === 'string'
-        ? parsed.productionLineDefinitionId
-        : '',
-      stationSystemId: typeof parsed.stationSystemId === 'string' ? parsed.stationSystemId : '',
-      slotId: typeof parsed.slotId === 'string' ? parsed.slotId : ''
+      productionLineDefinitionId,
+      stationSystemId,
+      slotResourceId
     };
   } catch {
     return null;

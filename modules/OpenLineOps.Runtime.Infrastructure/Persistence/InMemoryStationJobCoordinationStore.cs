@@ -351,6 +351,42 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
         }
     }
 
+    public ValueTask<StationJobRequested> BindStationExecutionGateEvidenceAsync(
+        StationJobRequested authorizedRequest,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        StationMessageContract.ValidateForAgentDispatch(authorizedRequest);
+        lock (_dispatchGate)
+        {
+            var entry = _outbox.Values.SingleOrDefault(item =>
+                item.JobId == authorizedRequest.JobId
+                && string.Equals(item.Kind, nameof(StationJobRequested), StringComparison.Ordinal))
+                ?? throw new InvalidOperationException(
+                    $"Station dispatch Job {authorizedRequest.JobId:D} does not exist.");
+            var existing = JsonSerializer.Deserialize<StationJobRequested>(
+                    entry.PayloadJson,
+                    JsonOptions)
+                ?? throw new InvalidDataException(
+                    "Station dispatch request payload is empty.");
+            if (!SameDispatchWithoutStationGate(existing, authorizedRequest))
+            {
+                throw new InvalidDataException(
+                    "Station execution gate evidence targets different dispatch evidence.");
+            }
+
+            var candidateJson = JsonSerializer.Serialize(authorizedRequest, JsonOptions);
+            if (existing.StationExecutionGateEvidence is not null)
+            {
+                StationMessageContract.ValidateForAgentDispatch(existing);
+                return ValueTask.FromResult(existing);
+            }
+
+            entry.PayloadJson = candidateJson;
+            return ValueTask.FromResult(authorizedRequest);
+        }
+    }
+
     public ValueTask MarkPublishedAsync(
         Guid messageId,
         CancellationToken cancellationToken = default)
@@ -482,6 +518,22 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
                 $"Station dispatch idempotency key '{candidate.IdempotencyKey}' was reused with different identity.");
         }
 
+        if (string.Equals(candidate.Kind, nameof(StationJobRequested), StringComparison.Ordinal))
+        {
+            var existingRequest = JsonSerializer.Deserialize<StationJobRequested>(
+                existing.PayloadJson,
+                JsonOptions);
+            var candidateRequest = JsonSerializer.Deserialize<StationJobRequested>(
+                candidate.PayloadJson,
+                JsonOptions);
+            if (existingRequest is not null
+                && candidateRequest is not null
+                && SameDispatchWithoutStationGate(existingRequest, candidateRequest))
+            {
+                return;
+            }
+        }
+
         EnsureSameJson(
             existing.PayloadJson,
             candidate.PayloadJson,
@@ -606,6 +658,35 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
         }
     }
 
+    private static bool SameDispatchWithoutStationGate(
+        StationJobRequested left,
+        StationJobRequested right) =>
+        SameJson(
+            JsonSerializer.Serialize(WithoutStationGate(left), JsonOptions),
+            JsonSerializer.Serialize(WithoutStationGate(right), JsonOptions));
+
+    private static bool SameJson(string left, string right)
+    {
+        using var leftJson = JsonDocument.Parse(left);
+        using var rightJson = JsonDocument.Parse(right);
+        return JsonElement.DeepEquals(leftJson.RootElement, rightJson.RootElement);
+    }
+
+    private static StationJobRequested WithoutStationGate(StationJobRequested request) =>
+        request with
+        {
+            StationExecutionGateRevision = null,
+            StationExecutionGateEvidence = null,
+            StationExecutionGateEvidenceSha256 = null,
+            StationExecutionGateEvidenceVersion = 0,
+            StationExecutionGateAuthorizedAtUtc = null,
+            StationExecutionGateExpiresAtUtc = null,
+            StationAgentControlLeaseOwnerAgentId = null,
+            StationAgentControlLeaseOwnerInstanceId = null,
+            StationAgentControlLeaseFencingToken = 0,
+            StationAgentControlLeaseExpiresAtUtc = null
+        };
+
     private sealed class OutboxEntry(
         Guid messageId,
         Guid jobId,
@@ -625,7 +706,7 @@ public sealed class InMemoryStationJobCoordinationStore : IStationJobCoordinatio
 
         public int Sequence { get; } = sequence;
 
-        public string PayloadJson { get; } = payloadJson;
+        public string PayloadJson { get; set; } = payloadJson;
 
         public DateTimeOffset CreatedAtUtc { get; } = createdAtUtc;
 

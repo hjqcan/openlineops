@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using OpenLineOps.Application.Abstractions.Results;
@@ -13,6 +14,7 @@ using OpenLineOps.Runtime.Application.Sessions;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Incidents;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Steps;
@@ -75,18 +77,40 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
         return request.Process.UsesGraph
-            ? await RunGraphAsync(session, request.Process, cancellationToken).ConfigureAwait(false)
-            : await RunLinearAsync(session, request.Process.Nodes, cancellationToken).ConfigureAwait(false);
+            ? await RunGraphAsync(
+                session,
+                request.Process,
+                request.ProductionInputs,
+                cancellationToken).ConfigureAwait(false)
+            : await RunLinearAsync(
+                session,
+                request.Process.Nodes,
+                request.ProductionInputs,
+                cancellationToken).ConfigureAwait(false);
     }
 
     private async ValueTask<Result<RuntimeSessionRunResult>> RunLinearAsync(
         RuntimeSession session,
         IReadOnlyList<ExecutableRuntimeNode> nodes,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
         CancellationToken cancellationToken)
     {
         foreach (var node in nodes)
         {
-            var nodeResult = await ExecuteNodeAsync(session, node, cancellationToken).ConfigureAwait(false);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return await CancelIdleSessionAsync(
+                        session,
+                        "Runtime session execution was canceled before the next node started.")
+                    .ConfigureAwait(false);
+            }
+
+            var nodeResult = await ExecuteNodeWithPolicyAsync(
+                    session,
+                    node,
+                    productionInputs,
+                    cancellationToken)
+                .ConfigureAwait(false);
             if (nodeResult.IsFailure)
             {
                 return Result.Failure<RuntimeSessionRunResult>(nodeResult.Error);
@@ -104,6 +128,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
     private async ValueTask<Result<RuntimeSessionRunResult>> RunGraphAsync(
         RuntimeSession session,
         ExecutableRuntimeProcess process,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
         CancellationToken cancellationToken)
     {
         var executableNodes = process.Nodes.ToDictionary(node => node.NodeId);
@@ -113,20 +138,28 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             .ToDictionary(group => group.Key, group => group.ToArray());
         var transitionTraversals = new Dictionary<ExecutableRuntimeTransition, int>();
         var currentNodeId = process.StartNodeId!;
-        var graphSize = process.Nodes.Count + process.RoutingNodes.Count + process.Transitions.Count;
-        var loopTraversalBudget = process.Transitions.Sum(transition => transition.MaxTraversals.GetValueOrDefault());
-        var hopLimit = Math.Max(
-            1,
-            (graphSize * (loopTraversalBudget + 1)) + 1);
+        var maximumNodeVisits = ExecutableRuntimeProcessExecutionBounds
+            .Calculate(process)
+            .MaximumNodeVisits;
         string? lastCommandPayload = null;
 
-        for (var hop = 0; hop < hopLimit; hop++)
+        for (var hop = 0; hop < maximumNodeVisits; hop++)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return await CancelIdleSessionAsync(
+                        session,
+                        "Runtime session execution was canceled before the next graph node started.")
+                    .ConfigureAwait(false);
+            }
 
             if (executableNodes.TryGetValue(currentNodeId, out var executableNode))
             {
-                var nodeResult = await ExecuteNodeAsync(session, executableNode, cancellationToken)
+                var nodeResult = await ExecuteNodeWithPolicyAsync(
+                        session,
+                        executableNode,
+                        productionInputs,
+                        cancellationToken)
                     .ConfigureAwait(false);
                 if (nodeResult.IsFailure)
                 {
@@ -224,7 +257,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         return await FailSessionAsync(
             session,
             "Runtime.ProcessGraphHopLimitExceeded",
-            $"Runtime process graph exceeded the hop limit of {hopLimit}.",
+            $"Runtime process graph exceeded its proven node-visit bound of {maximumNodeVisits}.",
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -243,12 +276,65 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         return Result.Success(CreateRunResult(session));
     }
 
+    private async ValueTask<Result<RuntimeNodeExecutionResult>> ExecuteNodeWithPolicyAsync(
+        RuntimeSession session,
+        ExecutableRuntimeNode node,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
+        CancellationToken cancellationToken)
+    {
+        var failurePolicy = node.OperationalPolicy?.FailurePolicy
+            ?? RuntimeActionFailurePolicy.Terminate;
+        var maximumAttempts = failurePolicy == RuntimeActionFailurePolicy.Retry
+            ? checked(node.RetryLimit + 1)
+            : 1;
+
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                var canceled = await CancelIdleSessionAsync(
+                        session,
+                        "Runtime session execution was canceled before the next command attempt started.")
+                    .ConfigureAwait(false);
+                return canceled.IsSuccess
+                    ? Result.Success(new RuntimeNodeExecutionResult(
+                        canceled.Value,
+                        null,
+                        CommandSucceeded: false))
+                    : Result.Failure<RuntimeNodeExecutionResult>(canceled.Error);
+            }
+
+            var disposition = ResolveFailureDisposition(
+                failurePolicy,
+                hasRetryRemaining: attempt < maximumAttempts);
+            var result = await ExecuteNodeAsync(
+                    session,
+                    node,
+                    productionInputs,
+                    disposition,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (result.IsFailure
+                || result.Value.CommandSucceeded
+                || session.IsTerminal
+                || failurePolicy != RuntimeActionFailurePolicy.Retry
+                || attempt == maximumAttempts)
+            {
+                return result;
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"Runtime retry loop for node {node.NodeId} escaped its bounded attempt count.");
+    }
+
     private async ValueTask<Result<RuntimeNodeExecutionResult>> ExecuteNodeAsync(
         RuntimeSession session,
         ExecutableRuntimeNode node,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
+        RuntimeNodeFailureDisposition failureDisposition,
         CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
         var step = session.StartStep(
             _idProvider.NewStepId(),
             node.NodeId,
@@ -281,6 +367,21 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 
         await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
+        var payloadResolution = ResolveProductionInputPayload(
+            node.InputPayload,
+            productionInputs);
+        if (payloadResolution.FailureReason is not null)
+        {
+            return await RejectNodeAsync(
+                    session,
+                    step.Id,
+                    command.Id,
+                    payloadResolution.FailureReason,
+                    RuntimeNodeFailureDisposition.Terminate,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var executionContext = new RuntimeCommandExecutionContext(
             session.Id,
             session.TraceMetadata.ProductionRunId,
@@ -301,7 +402,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             node.NodeId,
             node.TargetCapability,
             node.CommandName,
-            node.InputPayload,
+            payloadResolution.Payload,
             node.Timeout,
             step.ActionId,
             step.TargetKind,
@@ -309,6 +410,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             session.TraceMetadata.ProjectId,
             session.TraceMetadata.ApplicationId,
             session.TraceMetadata.ProjectSnapshotId,
+            productionInputs,
             session.TraceMetadata.ResourceLeaseFences);
 
         var executionResult = await ExecuteCommandSafelyAsync(
@@ -333,12 +435,14 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 executionResult.Reason ?? "Command failed.",
                 executionResult.Payload,
                 executionResult.ResultJudgement,
+                failureDisposition,
                 cancellationToken).ConfigureAwait(false),
             RuntimeCommandExecutionOutcome.Rejected => await RejectNodeAsync(
                 session,
                 step.Id,
                 command.Id,
                 executionResult.Reason ?? "Command rejected.",
+                failureDisposition,
                 cancellationToken).ConfigureAwait(false),
             RuntimeCommandExecutionOutcome.TimedOut => await TimeoutNodeAsync(
                 session,
@@ -346,6 +450,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 command.Id,
                 executionResult.Reason ?? "Command timed out.",
                 executionResult.Payload,
+                failureDisposition,
                 cancellationToken).ConfigureAwait(false),
             RuntimeCommandExecutionOutcome.Canceled => await CancelNodeAsync(
                 session,
@@ -367,14 +472,48 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         RuntimeCommandExecutionContext context,
         CancellationToken cancellationToken)
     {
+        using var executionCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
         try
         {
-            return await _commandExecutor.ExecuteAsync(context, cancellationToken)
-                .ConfigureAwait(false);
+            executionCancellation.CancelAfter(context.Timeout);
+            var execution = _commandExecutor
+                .ExecuteAsync(context, executionCancellation.Token)
+                .AsTask();
+            RuntimeCommandExecutionResult result;
+            if (execution.IsCompleted)
+            {
+                result = await execution.ConfigureAwait(false);
+            }
+            else
+            {
+                result = await execution
+                    .WaitAsync(executionCancellation.Token)
+                    .ConfigureAwait(false);
+            }
+
+            return result.Outcome == RuntimeCommandExecutionOutcome.Canceled
+                   && !cancellationToken.IsCancellationRequested
+                   && executionCancellation.IsCancellationRequested
+                ? RuntimeCommandExecutionResult.TimedOut(
+                    $"Command execution exceeded its timeout of {context.Timeout}.",
+                    result.Payload)
+                : result;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             return RuntimeCommandExecutionResult.Canceled("Command execution was canceled.");
+        }
+        catch (OperationCanceledException) when (executionCancellation.IsCancellationRequested)
+        {
+            return RuntimeCommandExecutionResult.TimedOut(
+                $"Command execution exceeded its timeout of {context.Timeout}.");
+        }
+        catch (OperationCanceledException)
+        {
+            return RuntimeCommandExecutionResult.Failed(
+                "Command executor canceled without a matching caller cancellation or command timeout.");
         }
         catch (Exception exception) when (exception is not OperationCanceledException
                                            and not OutOfMemoryException)
@@ -383,6 +522,130 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 $"Command executor threw {exception.GetType().FullName ?? exception.GetType().Name}.");
         }
     }
+
+    private static ProductionInputPayloadResolution ResolveProductionInputPayload(
+        string? inputPayload,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs)
+    {
+        if (string.IsNullOrWhiteSpace(inputPayload))
+        {
+            return new ProductionInputPayloadResolution(inputPayload, null);
+        }
+
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(inputPayload);
+        }
+        catch (JsonException)
+        {
+            return new ProductionInputPayloadResolution(inputPayload, null);
+        }
+
+        using (document)
+        {
+            try
+            {
+                var changed = false;
+                var resolved = ResolveProductionInputElement(
+                    document.RootElement,
+                    productionInputs,
+                    ref changed);
+                return new ProductionInputPayloadResolution(
+                    changed ? resolved?.ToJsonString() ?? "null" : inputPayload,
+                    null);
+            }
+            catch (InvalidDataException exception)
+            {
+                return new ProductionInputPayloadResolution(null, exception.Message);
+            }
+        }
+    }
+
+    private static JsonNode? ResolveProductionInputElement(
+        JsonElement element,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
+        ref bool changed)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var properties = element.EnumerateObject().ToArray();
+            var propertyNames = new HashSet<string>(StringComparer.Ordinal);
+            if (properties.Any(property => !propertyNames.Add(property.Name)))
+            {
+                throw new InvalidDataException(
+                    "Runtime action input JSON cannot contain duplicate properties.");
+            }
+
+            var markerIndex = Array.FindIndex(properties, property => string.Equals(
+                property.Name,
+                "$productionInput",
+                StringComparison.Ordinal));
+            if (markerIndex >= 0)
+            {
+                var marker = properties[markerIndex];
+                if (properties.Length != 1
+                    || marker.Value.ValueKind != JsonValueKind.String
+                    || string.IsNullOrWhiteSpace(marker.Value.GetString()))
+                {
+                    throw new InvalidDataException(
+                        "A $productionInput marker must be the only object property and contain one canonical input key.");
+                }
+
+                var inputKey = marker.Value.GetString()!;
+                if (!productionInputs.TryGetValue(inputKey, out var input))
+                {
+                    throw new InvalidDataException(
+                        $"Runtime action references undeclared Production Context input '{inputKey}'.");
+                }
+
+                changed = true;
+                return ProductionContextJsonValue(input);
+            }
+
+            var result = new JsonObject();
+            foreach (var property in properties)
+            {
+                result[property.Name] = ResolveProductionInputElement(
+                    property.Value,
+                    productionInputs,
+                    ref changed);
+            }
+
+            return result;
+        }
+
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            var result = new JsonArray();
+            foreach (var item in element.EnumerateArray())
+            {
+                result.Add(ResolveProductionInputElement(item, productionInputs, ref changed));
+            }
+
+            return result;
+        }
+
+        return JsonNode.Parse(element.GetRawText());
+    }
+
+    private static JsonValue ProductionContextJsonValue(ProductionContextValue value) => value.Kind switch
+    {
+        ProductionContextValueKind.Text or ProductionContextValueKind.DateTimeUtc =>
+            JsonValue.Create(value.CanonicalValue)!,
+        ProductionContextValueKind.Boolean =>
+            JsonValue.Create(string.Equals(value.CanonicalValue, "true", StringComparison.Ordinal))!,
+        ProductionContextValueKind.WholeNumber => JsonValue.Create(long.Parse(
+            value.CanonicalValue,
+            NumberStyles.AllowLeadingSign,
+            CultureInfo.InvariantCulture))!,
+        ProductionContextValueKind.FixedPoint => JsonValue.Create(decimal.Parse(
+            value.CanonicalValue,
+            NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint,
+            CultureInfo.InvariantCulture))!,
+        _ => throw new InvalidDataException(
+            $"Unsupported Production Context value kind {value.Kind}.")
+    };
 
     private async ValueTask<Result<RuntimeNodeExecutionResult>> CompleteNodeAsync(
         RuntimeSession session,
@@ -410,7 +673,10 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 
         await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
-        return Result.Success(new RuntimeNodeExecutionResult(CreateRunResult(session), payload));
+        return Result.Success(new RuntimeNodeExecutionResult(
+            CreateRunResult(session),
+            payload,
+            CommandSucceeded: true));
     }
 
     private async ValueTask<Result<RuntimeNodeExecutionResult>> FailNodeAsync(
@@ -421,6 +687,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         string reason,
         string? payload,
         ResultJudgement resultJudgement,
+        RuntimeNodeFailureDisposition failureDisposition,
         CancellationToken cancellationToken)
     {
         var commandResult = session.FailCommand(
@@ -434,11 +701,12 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToNodeExecutionFailure(commandResult);
         }
 
-        return await FailStepAndSessionAsync(
+        return await FinishFailedStepAsync(
             session,
             stepId,
             code,
             reason,
+            failureDisposition,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -447,6 +715,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         RuntimeStepId stepId,
         RuntimeCommandId commandId,
         string reason,
+        RuntimeNodeFailureDisposition failureDisposition,
         CancellationToken cancellationToken)
     {
         var commandResult = session.RejectCommand(commandId, reason, _clock.UtcNow);
@@ -455,11 +724,12 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToNodeExecutionFailure(commandResult);
         }
 
-        return await FailStepAndSessionAsync(
+        return await FinishFailedStepAsync(
             session,
             stepId,
             "Runtime.CommandRejected",
             reason,
+            failureDisposition,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -469,6 +739,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         RuntimeCommandId commandId,
         string reason,
         string? payload,
+        RuntimeNodeFailureDisposition failureDisposition,
         CancellationToken cancellationToken)
     {
         var commandResult = session.TimeoutCommand(commandId, _clock.UtcNow, payload);
@@ -477,11 +748,12 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToNodeExecutionFailure(commandResult);
         }
 
-        return await FailStepAndSessionAsync(
+        return await FinishFailedStepAsync(
             session,
             stepId,
             "Runtime.CommandTimedOut",
             reason,
+            failureDisposition,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -519,31 +791,54 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 
         await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
-        return Result.Success(new RuntimeNodeExecutionResult(CreateRunResult(session), null));
+        return Result.Success(new RuntimeNodeExecutionResult(
+            CreateRunResult(session),
+            null,
+            CommandSucceeded: false));
     }
 
-    private async ValueTask<Result<RuntimeNodeExecutionResult>> FailStepAndSessionAsync(
+    private async ValueTask<Result<RuntimeNodeExecutionResult>> FinishFailedStepAsync(
         RuntimeSession session,
         RuntimeStepId stepId,
         string code,
         string reason,
+        RuntimeNodeFailureDisposition disposition,
         CancellationToken cancellationToken)
     {
-        var stepResult = session.FailStep(stepId, reason, _clock.UtcNow);
+        var stepResult = disposition.SkipStep
+            ? session.SkipStep(stepId, reason, _clock.UtcNow)
+            : session.FailStep(stepId, reason, _clock.UtcNow);
         if (!stepResult.Succeeded)
         {
             return ToNodeExecutionFailure(stepResult);
         }
 
-        var sessionResult = session.Fail(_clock.UtcNow, code, reason);
-        if (!sessionResult.Succeeded)
+        if (disposition.FailSession)
         {
-            return ToNodeExecutionFailure(sessionResult);
+            var sessionResult = session.Fail(
+                _clock.UtcNow,
+                disposition.TerminalCode ?? code,
+                reason);
+            if (!sessionResult.Succeeded)
+            {
+                return ToNodeExecutionFailure(sessionResult);
+            }
+        }
+        else
+        {
+            session.RecordIncident(
+                RuntimeIncidentSeverity.Warning,
+                $"{code}.{disposition.NonTerminalCodeSuffix}",
+                reason,
+                _clock.UtcNow);
         }
 
         await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
-        return Result.Success(new RuntimeNodeExecutionResult(CreateRunResult(session), null));
+        return Result.Success(new RuntimeNodeExecutionResult(
+            CreateRunResult(session),
+            null,
+            CommandSucceeded: false));
     }
 
     private async ValueTask<Result<RuntimeSessionRunResult>> FailSessionAsync(
@@ -563,13 +858,30 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         return Result.Success(CreateRunResult(session));
     }
 
+    private async ValueTask<Result<RuntimeSessionRunResult>> CancelIdleSessionAsync(
+        RuntimeSession session,
+        string reason)
+    {
+        var sessionResult = session.Cancel(_clock.UtcNow, reason);
+        if (!sessionResult.Succeeded)
+        {
+            return ToApplicationFailure(sessionResult);
+        }
+
+        await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
+
+        return Result.Success(CreateRunResult(session));
+    }
+
     private async ValueTask PersistAndPublishAsync(
         RuntimeSession session,
         CancellationToken cancellationToken)
     {
         var domainEvents = session.DomainEvents.ToArray();
 
-        await _sessionRepository.SaveAsync(session, cancellationToken).ConfigureAwait(false);
+        await _sessionRepository
+            .SaveAsync(session, domainEvents, cancellationToken)
+            .ConfigureAwait(false);
 
         if (domainEvents.Length > 0)
         {
@@ -597,10 +909,24 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 
         if (request.Process.UsesGraph)
         {
-            return ValidateGraph(request.Process);
+            var graphValidation = ValidateGraph(request.Process);
+            if (graphValidation is not null)
+            {
+                return graphValidation;
+            }
         }
 
-        return null;
+        try
+        {
+            _ = ExecutableRuntimeProcessExecutionBounds.Calculate(request.Process);
+            return null;
+        }
+        catch (InvalidDataException exception)
+        {
+            return ApplicationError.Validation(
+                "Runtime.ProcessExecutionBoundsInvalid",
+                exception.Message);
+        }
     }
 
     private static ApplicationError? ValidateGraph(ExecutableRuntimeProcess process)
@@ -826,6 +1152,45 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         values.Add(text);
     }
 
+    private static RuntimeNodeFailureDisposition ResolveFailureDisposition(
+        RuntimeActionFailurePolicy failurePolicy,
+        bool hasRetryRemaining)
+    {
+        return failurePolicy switch
+        {
+            RuntimeActionFailurePolicy.Continue =>
+                new RuntimeNodeFailureDisposition(
+                    FailSession: false,
+                    SkipStep: false,
+                    TerminalCode: null,
+                    NonTerminalCodeSuffix: "Continued"),
+            RuntimeActionFailurePolicy.Skip =>
+                new RuntimeNodeFailureDisposition(
+                    FailSession: false,
+                    SkipStep: true,
+                    TerminalCode: null,
+                    NonTerminalCodeSuffix: "Skipped"),
+            RuntimeActionFailurePolicy.Retry when hasRetryRemaining =>
+                new RuntimeNodeFailureDisposition(
+                    FailSession: false,
+                    SkipStep: false,
+                    TerminalCode: null,
+                    NonTerminalCodeSuffix: "RetryScheduled"),
+            RuntimeActionFailurePolicy.Rework =>
+                RuntimeNodeFailureDisposition.TerminateWith("Runtime.ReworkRequired"),
+            RuntimeActionFailurePolicy.ManualDisposition =>
+                RuntimeNodeFailureDisposition.TerminateWith(
+                    "Runtime.ManualDispositionRequired"),
+            RuntimeActionFailurePolicy.Hold =>
+                RuntimeNodeFailureDisposition.TerminateWith("Runtime.HoldRequired"),
+            RuntimeActionFailurePolicy.Terminate
+                or RuntimeActionFailurePolicy.Retry =>
+                RuntimeNodeFailureDisposition.Terminate,
+            _ => throw new InvalidDataException(
+                $"Unsupported Runtime action failure policy {failurePolicy}.")
+        };
+    }
+
     private static Result<RuntimeSessionRunResult> ToApplicationFailure(RuntimeOperationResult result)
     {
         return Result.Failure<RuntimeSessionRunResult>(
@@ -851,6 +1216,32 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 
     private sealed record RuntimeNodeExecutionResult(
         RuntimeSessionRunResult RunResult,
-        string? ResultPayload);
+        string? ResultPayload,
+        bool CommandSucceeded);
+
+    private sealed record RuntimeNodeFailureDisposition(
+        bool FailSession,
+        bool SkipStep,
+        string? TerminalCode,
+        string? NonTerminalCodeSuffix)
+    {
+        public static RuntimeNodeFailureDisposition Terminate { get; } =
+            new(
+                FailSession: true,
+                SkipStep: false,
+                TerminalCode: null,
+                NonTerminalCodeSuffix: null);
+
+        public static RuntimeNodeFailureDisposition TerminateWith(string code) =>
+            new(
+                FailSession: true,
+                SkipStep: false,
+                TerminalCode: code,
+                NonTerminalCodeSuffix: null);
+    }
+
+    private sealed record ProductionInputPayloadResolution(
+        string? Payload,
+        string? FailureReason);
 
 }

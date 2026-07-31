@@ -7,5 +7,4 @@ public sealed record SubmitPublishedProductionRunRequest(
     string? ProjectId,
     string? ProjectSnapshotId,
     string? ProductionRunId,
-    string? ProductionUnitId,
-    string? ActorId);
+    string? ProductionUnitId);

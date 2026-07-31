@@ -1,22 +1,39 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using OpenLineOps.Plugins.Api.DependencyInjection;
+using OpenLineOps.Plugins.Application.Extensions;
+using OpenLineOps.Plugins.Application.Lifecycle;
+using OpenLineOps.Plugins.Infrastructure.Extensions;
+using OpenLineOps.Plugins.Infrastructure.Lifecycle;
 
 namespace OpenLineOps.Api.Tests;
 
 public sealed class PluginsModuleDependencyInjectionTests
 {
-    [Theory]
-    [InlineData("manifestonly")]
-    [InlineData("External")]
-    [InlineData("Assembly")]
-    [InlineData("")]
-    public void AddOpenLineOpsPluginsModuleRejectsNonCanonicalActivator(string activator)
+    [Fact]
+    public void AddOpenLineOpsPluginsModuleRegistersOnlyExternalProcessActivation()
     {
-        var exception = Assert.Throws<InvalidOperationException>(() =>
-            AddModule(("Activator", activator)));
+        var services = new ServiceCollection();
+        services.AddOpenLineOpsPluginsModule();
+        using var provider = services.BuildServiceProvider();
 
-        Assert.Contains("Expected exactly", exception.Message, StringComparison.Ordinal);
+        Assert.IsType<ExternalProcessPluginInstanceActivator>(
+            provider.GetRequiredService<IPluginInstanceActivator>());
+        Assert.Null(provider.GetService<IApplicationExtensionPackageService>());
+    }
+
+    [Fact]
+    public void AddOpenLineOpsPluginsApiRegistersApplicationExtensionAuthoringService()
+    {
+        var services = new ServiceCollection();
+
+        services.AddControllers().AddOpenLineOpsPluginsApi();
+
+        var descriptor = Assert.Single(
+            services,
+            candidate => candidate.ServiceType == typeof(IApplicationExtensionPackageService));
+        Assert.Equal(ServiceLifetime.Singleton, descriptor.Lifetime);
+        Assert.Equal(typeof(FileSystemApplicationExtensionPackageService), descriptor.ImplementationType);
     }
 
     [Theory]

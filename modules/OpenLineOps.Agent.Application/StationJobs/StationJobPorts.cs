@@ -93,6 +93,59 @@ public interface IStationResourceFenceValidator
         CancellationToken cancellationToken = default);
 }
 
+public sealed record StationDispatchControlLeaseExpectation(
+    string DispatchAgentId,
+    string DispatchStationId,
+    string StationSystemId,
+    StationAgentControlLeaseDispatchAuthority Authority);
+
+public sealed record StationDispatchControlLeaseVerificationResult
+{
+    private StationDispatchControlLeaseVerificationResult(
+        bool accepted,
+        bool retryable,
+        string? rejectionReason)
+    {
+        Accepted = accepted;
+        Retryable = retryable;
+        RejectionReason = rejectionReason;
+    }
+
+    public bool Accepted { get; }
+
+    public bool Retryable { get; }
+
+    public string? RejectionReason { get; }
+
+    public static StationDispatchControlLeaseVerificationResult Allow() =>
+        new(true, false, null);
+
+    public static StationDispatchControlLeaseVerificationResult Reject(
+        string reason) =>
+        new(false, false, Required(reason));
+
+    public static StationDispatchControlLeaseVerificationResult Unavailable(
+        string reason) =>
+        new(false, true, Required(reason));
+
+    private static string Required(string value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? throw new ArgumentException(
+                "Station control lease verification reason is required.",
+                nameof(value))
+            : value;
+}
+
+public interface IStationDispatchControlLeaseVerifier
+{
+    ValueTask<StationDispatchControlLeaseVerificationResult> ValidateCurrentAsync(
+        StationDispatchControlLeaseExpectation expectation,
+        CancellationToken cancellationToken = default);
+}
+
+public sealed class StationDispatchControlLeaseUnavailableException(string message) :
+    InvalidOperationException(message);
+
 public interface IStationRuntimeHost
 {
     ValueTask<StationOperationExecutionResult> ExecuteAsync(

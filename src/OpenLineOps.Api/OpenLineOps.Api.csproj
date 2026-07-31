@@ -7,6 +7,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
     <PackageReference Include="Microsoft.OpenApi" />
     <PackageReference Include="Npgsql" />
@@ -15,16 +16,25 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\shared\OpenLineOps.Api.Abstractions\OpenLineOps.Api.Abstractions.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Agent.Contracts\OpenLineOps.Agent.Contracts.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Application.Abstractions\OpenLineOps.Application.Abstractions.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.EventBus\OpenLineOps.EventBus.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.ProcessIsolation\OpenLineOps.ProcessIsolation.csproj" />
     <ProjectReference Include="..\..\shared\OpenLineOps.Runtime.Contracts\OpenLineOps.Runtime.Contracts.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Commissioning.Api\OpenLineOps.Commissioning.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Devices.Api\OpenLineOps.Devices.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Engineering.Api\OpenLineOps.Engineering.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Integration.Api\OpenLineOps.Integration.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Maintenance.Api\OpenLineOps.Maintenance.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Operations.Api\OpenLineOps.Operations.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Operations.Metrics.Api\OpenLineOps.Operations.Metrics.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Plugins.Api\OpenLineOps.Plugins.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Projects.Api\OpenLineOps.Projects.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Processes.Api\OpenLineOps.Processes.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Production.Api\OpenLineOps.Production.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Quality.Api\OpenLineOps.Quality.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Recipes.Api\OpenLineOps.Recipes.Api.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Recipes.Application\OpenLineOps.Recipes.Application.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Runtime.Api\OpenLineOps.Runtime.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Topology.Api\OpenLineOps.Topology.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Traceability.Api\OpenLineOps.Traceability.Api.csproj" />

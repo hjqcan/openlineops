@@ -811,6 +811,116 @@
 .operations-axis-grid span { color: #7a868a; font-size: 7px; text-transform: uppercase; }
 .operations-axis-grid strong { margin-top: 2px; font-size: 9px; }
 
+.operations-route-runtime {
+  border-bottom: 1px solid #ccd1cc;
+  background: #eceee9;
+}
+
+.operations-route-runtime > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 28px;
+  padding: 0 9px;
+  border-bottom: 1px solid #d6dad5;
+  background: #e3e7e2;
+}
+
+.operations-route-runtime > header span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #2e756d;
+}
+
+.operations-route-runtime > header strong,
+.operations-route-runtime > header small {
+  font-size: 7px;
+  letter-spacing: .08em;
+}
+
+.operations-route-runtime > header small {
+  color: #7c8889;
+  letter-spacing: 0;
+}
+
+.operations-route-current {
+  display: grid;
+  gap: 5px;
+  padding: 7px 9px;
+}
+
+.operations-route-focus {
+  --route-tone: var(--ops-blue);
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 48px;
+  padding: 6px 7px;
+  border: 1px solid #c7d0cc;
+  border-left: 3px solid var(--route-tone);
+  background: #f8f9f5;
+  box-shadow: inset 0 0 20px color-mix(in srgb, var(--route-tone) 5%, transparent);
+}
+
+.operations-route-focus.tone-passed { --route-tone: var(--ops-green); }
+.operations-route-focus.tone-failed { --route-tone: var(--ops-red); }
+.operations-route-focus.tone-rework { --route-tone: var(--ops-held); }
+.operations-route-focus.tone-terminal { --route-tone: #7a7470; }
+.operations-route-focus > svg { color: var(--route-tone); }
+.operations-route-focus > span { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
+.operations-route-focus small { color: var(--route-tone); font-size: 6px; font-weight: 850; letter-spacing: .11em; }
+.operations-route-focus strong { overflow: hidden; font: 8px "Cascadia Code", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.operations-route-focus em { overflow: hidden; color: #7b8688; font-size: 7px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.operations-route-focus > b { color: var(--route-tone); font-size: 7px; text-transform: uppercase; }
+
+.operations-route-awaiting {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 5px 7px;
+  border: 1px dashed #bcc6c1;
+  color: #728083;
+}
+
+.operations-route-awaiting span { display: flex; flex-direction: column; gap: 2px; }
+.operations-route-awaiting strong { font-size: 8px; }
+.operations-route-awaiting small { font-size: 7px; }
+
+.operations-route-trail {
+  max-height: 190px;
+  overflow-y: auto;
+  padding: 0 9px 7px;
+}
+
+.operations-route-trail > article {
+  --route-tone: #8b999b;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 42px;
+  padding: 5px 3px;
+  border-top: 1px solid #d8dcd7;
+  content-visibility: auto;
+  contain-intrinsic-size: 42px;
+}
+
+.operations-route-trail > article.tone-passed { --route-tone: var(--ops-green); }
+.operations-route-trail > article.tone-failed { --route-tone: var(--ops-red); }
+.operations-route-trail > article.tone-rework { --route-tone: var(--ops-held); }
+.operations-route-trail > article.tone-terminal { --route-tone: #7a7470; }
+.operations-route-trail > article.current { background: color-mix(in srgb, var(--route-tone) 7%, transparent); }
+.operations-route-trail > article > i { width: 6px; height: 6px; border-radius: 50%; background: var(--route-tone); box-shadow: 0 0 0 3px color-mix(in srgb, var(--route-tone) 14%, transparent); }
+.operations-route-trail > article > span { display: flex; min-width: 0; flex-direction: column; gap: 1px; }
+.operations-route-trail > article > span:last-child { align-items: flex-end; text-align: right; }
+.operations-route-trail small,
+.operations-route-trail em { overflow: hidden; color: #7c8788; font-size: 6px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
+.operations-route-trail strong { overflow: hidden; font: 7px "Cascadia Code", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.operations-route-trail b { color: var(--route-tone); font-size: 7px; }
+
 .operations-operation-list {
   padding: 7px 9px;
 }

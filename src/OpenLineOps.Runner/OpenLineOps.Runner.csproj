@@ -12,6 +12,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="OpenLineOps.Runner.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\shared\OpenLineOps.Runtime.Contracts\OpenLineOps.Runtime.Contracts.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Devices.Api\OpenLineOps.Devices.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Engineering.Api\OpenLineOps.Engineering.Api.csproj" />

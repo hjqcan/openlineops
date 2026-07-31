@@ -11,7 +11,8 @@ public sealed class OperationDefinition : Entity<OperationDefinitionId>
         string stationSystemId,
         string flowDefinitionId,
         string configurationSnapshotId,
-        IEnumerable<OperationResourceBinding> resources)
+        IEnumerable<OperationResourceBinding> resources,
+        IEnumerable<OperationInputMapping> inputMappings)
         : base(id ?? throw new ArgumentNullException(nameof(id)))
     {
         DisplayName = ProductionIdGuard.NotBlank(displayName, nameof(displayName));
@@ -80,6 +81,23 @@ public sealed class OperationDefinition : Entity<OperationDefinitionId>
             .ThenBy(resource => resource.Resolution)
             .ThenBy(resource => resource.Id.Value, StringComparer.Ordinal)
             .ToArray();
+
+        ArgumentNullException.ThrowIfNull(inputMappings);
+        var mappingArray = inputMappings.ToArray();
+        if (mappingArray.Any(static mapping => mapping is null)
+            || mappingArray.Select(static mapping => mapping.TargetInputKey)
+                .Distinct(StringComparer.Ordinal).Count() != mappingArray.Length
+            || mappingArray.Select(static mapping => mapping.TargetInputKey)
+                .Distinct(StringComparer.OrdinalIgnoreCase).Count() != mappingArray.Length)
+        {
+            throw new ArgumentException(
+                "Operation input mappings require unique non-null target keys that cannot differ only by case.",
+                nameof(inputMappings));
+        }
+
+        InputMappings = mappingArray
+            .OrderBy(static mapping => mapping.TargetInputKey, StringComparer.Ordinal)
+            .ToArray();
     }
 
     public string DisplayName { get; }
@@ -92,13 +110,16 @@ public sealed class OperationDefinition : Entity<OperationDefinitionId>
 
     public IReadOnlyList<OperationResourceBinding> Resources { get; }
 
+    public IReadOnlyList<OperationInputMapping> InputMappings { get; }
+
     public static OperationDefinition Create(
         OperationDefinitionId id,
         string displayName,
         string stationSystemId,
         string flowDefinitionId,
         string configurationSnapshotId,
-        IEnumerable<OperationResourceBinding> resources)
+        IEnumerable<OperationResourceBinding> resources,
+        IEnumerable<OperationInputMapping> inputMappings)
     {
         return new OperationDefinition(
             id,
@@ -106,6 +127,7 @@ public sealed class OperationDefinition : Entity<OperationDefinitionId>
             stationSystemId,
             flowDefinitionId,
             configurationSnapshotId,
-            resources);
+            resources,
+            inputMappings);
     }
 }

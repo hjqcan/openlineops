@@ -148,6 +148,7 @@ internal static class TraceRecordSnapshotMapper
             decision.SourceOperationRunId,
             decision.TransitionId,
             decision.TargetOperationId,
+            decision.TerminalDisposition?.ToString(),
             decision.SourceJudgement.ToString(),
             decision.Traversal,
             decision.DecidedAtUtc);
@@ -159,6 +160,11 @@ internal static class TraceRecordSnapshotMapper
             decision.SourceOperationRunId,
             decision.TransitionId,
             decision.TargetOperationId,
+            decision.TerminalDisposition is null
+                ? null
+                : ParseEnum<ProductDisposition>(
+                    decision.TerminalDisposition,
+                    nameof(decision.TerminalDisposition)),
             ParseEnum<ResultJudgement>(decision.SourceJudgement, nameof(decision.SourceJudgement)),
             decision.Traversal,
             decision.DecidedAtUtc);
@@ -292,8 +298,8 @@ internal static class TraceRecordSnapshotMapper
             command.TargetId,
             command.TargetCapabilityId,
             command.CommandName,
-            command.Status.ToString(),
-            command.ResultJudgement?.ToString(),
+            command.ExecutionStatus.ToString(),
+            command.ResultJudgement.ToString(),
             command.CreatedAtUtc,
             command.DeadlineAtUtc,
             command.AcceptedAtUtc,
@@ -313,10 +319,12 @@ internal static class TraceRecordSnapshotMapper
             command.TargetId,
             command.TargetCapabilityId,
             command.CommandName,
-            ParseEnum<TraceCommandStatus>(command.Status, nameof(command.Status)),
-            command.ResultJudgement is null
-                ? null
-                : ParseEnum<ResultJudgement>(command.ResultJudgement, nameof(command.ResultJudgement)),
+            ParseEnum<ExecutionStatus>(
+                command.ExecutionStatus,
+                nameof(command.ExecutionStatus)),
+            ParseEnum<ResultJudgement>(
+                command.ResultJudgement,
+                nameof(command.ResultJudgement)),
             command.CreatedAtUtc,
             command.DeadlineAtUtc,
             command.AcceptedAtUtc,
@@ -339,7 +347,8 @@ internal static class TraceRecordSnapshotMapper
             measurement.ActionId,
             measurement.TargetKind.ToString(),
             measurement.TargetId,
-            measurement.CommandStatus.ToString(),
+            measurement.CommandExecutionStatus.ToString(),
+            measurement.CommandResultJudgement.ToString(),
             measurement.Passed,
             measurement.MeasuredAtUtc);
     }
@@ -357,7 +366,12 @@ internal static class TraceRecordSnapshotMapper
             measurement.ActionId,
             ParseEnum<TraceTargetKind>(measurement.TargetKind, nameof(measurement.TargetKind)),
             measurement.TargetId,
-            ParseEnum<TraceCommandStatus>(measurement.CommandStatus, nameof(measurement.CommandStatus)),
+            ParseEnum<ExecutionStatus>(
+                measurement.CommandExecutionStatus,
+                nameof(measurement.CommandExecutionStatus)),
+            ParseEnum<ResultJudgement>(
+                measurement.CommandResultJudgement,
+                nameof(measurement.CommandResultJudgement)),
             measurement.Passed,
             measurement.MeasuredAtUtc);
     }
@@ -556,7 +570,8 @@ internal sealed record PersistedTraceOperationExecution(
 internal sealed record PersistedTraceRouteDecision(
     string SourceOperationRunId,
     string TransitionId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    string? TerminalDisposition,
     string SourceJudgement,
     int Traversal,
     DateTimeOffset DecidedAtUtc);
@@ -576,8 +591,8 @@ internal sealed record PersistedTraceCommand(
     string TargetId,
     string TargetCapabilityId,
     string CommandName,
-    string Status,
-    string? ResultJudgement,
+    string ExecutionStatus,
+    string ResultJudgement,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset DeadlineAtUtc,
     DateTimeOffset? AcceptedAtUtc,
@@ -597,7 +612,8 @@ internal sealed record PersistedMeasurementRecord(
     string ActionId,
     string TargetKind,
     string TargetId,
-    string CommandStatus,
+    string CommandExecutionStatus,
+    string CommandResultJudgement,
     bool? Passed,
     DateTimeOffset MeasuredAtUtc);
 

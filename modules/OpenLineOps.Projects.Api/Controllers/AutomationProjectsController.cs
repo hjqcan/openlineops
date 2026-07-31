@@ -4,6 +4,7 @@ using OpenLineOps.Api.Abstractions;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Projects.Api.Models;
 using OpenLineOps.Projects.Application.Projects;
+using OpenLineOps.Projects.Application.ProjectWorkspaces;
 using OpenLineOps.Projects.Application.Releases;
 using ApiAddApplicationRequest = OpenLineOps.Projects.Api.Models.AddProjectApplicationRequest;
 using ApiCreateProjectRequest = OpenLineOps.Projects.Api.Models.CreateAutomationProjectRequest;
@@ -18,18 +19,22 @@ using AppLinkTopologyRequest = OpenLineOps.Projects.Application.Projects.LinkPro
 namespace OpenLineOps.Projects.Api.Controllers;
 
 [ApiController]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.EngineeringPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Projects)]
 [Route(OpenLineOpsApiRoutes.AutomationProjects)]
 public sealed class AutomationProjectsController : ControllerBase
 {
     private readonly IAutomationProjectService _projectService;
+    private readonly IAutomationProjectWorkspaceService _workspaceService;
     private readonly IProjectReleasePublisher _releasePublisher;
 
     public AutomationProjectsController(
         IAutomationProjectService projectService,
+        IAutomationProjectWorkspaceService workspaceService,
         IProjectReleasePublisher releasePublisher)
     {
         _projectService = projectService;
+        _workspaceService = workspaceService;
         _releasePublisher = releasePublisher;
     }
 
@@ -110,9 +115,18 @@ public sealed class AutomationProjectsController : ControllerBase
                 cancellationToken)
             .ConfigureAwait(false);
 
-        return result.IsFailure
-            ? ToProblem(result.Error)
-            : Ok(ToResponse(result.Value));
+        if (result.IsFailure)
+        {
+            return ToProblem(result.Error);
+        }
+
+        var workspaceResult = await _workspaceService
+            .SaveManifestAsync(projectId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return workspaceResult.IsFailure
+            ? ToProblem(workspaceResult.Error)
+            : Ok(ToResponse(workspaceResult.Value.Project));
     }
 
     [HttpPut("{projectId}/applications/{applicationId}/topology")]

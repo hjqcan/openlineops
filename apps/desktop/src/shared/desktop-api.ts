@@ -1,17 +1,26 @@
 export interface DesktopConfig {
   apiBaseUrl: string;
+  apiAccessToken: string;
+  apiActorId: string;
   logPath: string;
   isPackaged: boolean;
+  publicEvidenceMode: boolean;
 }
 
 export interface BackendStatus {
   isRunning: boolean;
   pid: number | null;
   health: 'Healthy' | 'Unreachable';
-  apiBaseUrl: string;
+  apiBaseUrl: string | null;
   startedAtUtc: string | null;
+  startedAtUnixMilliseconds: number | null;
   lastExitCode: number | null;
   recentLogs: string[];
+}
+
+export interface BackendStatusChanged {
+  sequence: number;
+  status: BackendStatus;
 }
 
 export interface ApiRequestOptions {
@@ -50,21 +59,47 @@ export interface SelectProjectFileOptions {
   buttonLabel?: string;
 }
 
-export interface SelectExternalProgramFilesOptions {
-  title?: string;
-  defaultPath?: string;
-  buttonLabel?: string;
-  multiple?: boolean;
-}
-
-export interface SelectFilesResult {
-  canceled: boolean;
-  paths: string[];
-}
-
-export interface ExternalProgramUploadFile {
-  sourcePath: string;
+export interface ExternalProgramDirectoryInventoryFile {
+  relativePath: string;
   resourceRelativePath: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
+export interface ExternalProgramDirectorySelectionResult {
+  canceled: boolean;
+  selectionId: string | null;
+  directoryName: string | null;
+  totalBytes: number | null;
+  files: ExternalProgramDirectoryInventoryFile[];
+}
+
+export interface TraceArtifactSaveOptions {
+  storageKey: string;
+  fileName: string;
+  expectedSizeBytes: number;
+  expectedSha256: string;
+}
+
+export interface TraceArtifactSaveResult {
+  canceled: boolean;
+  path: string | null;
+  sizeBytes: number | null;
+  sha256: string | null;
+}
+
+export interface ApplicationExtensionImportResult<T = unknown> {
+  canceled: boolean;
+  portableId: string | null;
+  fileName: string | null;
+  sizeBytes: number | null;
+  response: ApiResponse<T> | null;
+}
+
+export interface DesktopCloseCoordinatorBinding {
+  readonly windowId: number;
+  readonly webContentsId: number;
+  readonly rendererGeneration: number;
 }
 
 export interface OpenLineOpsDesktopApi {
@@ -72,17 +107,37 @@ export interface OpenLineOpsDesktopApi {
   getBackendStatus(): Promise<BackendStatus>;
   startBackend(): Promise<BackendStatus>;
   stopBackend(): Promise<BackendStatus>;
+  setActiveProjectFile(projectFilePath: string | null): Promise<void>;
+  onBackendStatusChanged(listener: (change: BackendStatusChanged) => void): () => void;
   onCloseRequested(listener: (requestId: number) => void): () => void;
+  onCloseRequestExpired(listener: (requestId: number) => void): () => void;
+  getCloseCoordinatorBinding(): Promise<DesktopCloseCoordinatorBinding>;
+  setCloseCoordinatorReady(
+    binding: DesktopCloseCoordinatorBinding,
+    ready: boolean
+  ): void;
+  acknowledgeCloseRequest(requestId: number): void;
   respondToCloseRequest(requestId: number, allowClose: boolean): void;
   selectDirectory(options?: SelectDirectoryOptions): Promise<SelectDirectoryResult>;
   selectProjectFile(options?: SelectProjectFileOptions): Promise<SelectDirectoryResult>;
   selectApplicationProjectFile(options?: SelectProjectFileOptions): Promise<SelectDirectoryResult>;
-  selectExternalProgramFiles(options?: SelectExternalProgramFilesOptions): Promise<SelectFilesResult>;
-  uploadExternalProgram<T = unknown>(
-    path: string,
-    definition: unknown | null,
-    files: ExternalProgramUploadFile[],
-    headers?: Record<string, string>
+  selectExternalProgramDirectory(
+    projectId: string,
+    applicationId: string,
+    resourceId: string
+  ): Promise<ExternalProgramDirectorySelectionResult>;
+  releaseExternalProgramDirectorySelection(selectionId: string): Promise<void>;
+  importExternalProgramDirectory<T = unknown>(
+    projectId: string,
+    applicationId: string,
+    definition: unknown,
+    selectionId: string,
+    write?: EditorDocumentWriteOptions
   ): Promise<ApiResponse<T>>;
+  importApplicationExtension<T = unknown>(
+    projectId: string,
+    applicationId: string
+  ): Promise<ApplicationExtensionImportResult<T>>;
+  saveTraceArtifact(options: TraceArtifactSaveOptions): Promise<TraceArtifactSaveResult>;
   apiRequest<T = unknown>(path: string, options?: ApiRequestOptions): Promise<ApiResponse<T>>;
 }

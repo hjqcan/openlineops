@@ -1,3 +1,4 @@
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Resources;
@@ -35,6 +36,7 @@ public sealed record RuntimeCommandExecutionContext
         string projectId,
         string applicationId,
         string projectSnapshotId,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
         IEnumerable<ResourceLeaseFenceEvidence> resourceLeaseFences)
     {
         SessionId = sessionId.Value == Guid.Empty
@@ -97,6 +99,9 @@ public sealed record RuntimeCommandExecutionContext
         ProjectId = Required(projectId, nameof(projectId));
         ApplicationId = Required(applicationId, nameof(applicationId));
         ProjectSnapshotId = Required(projectSnapshotId, nameof(projectSnapshotId));
+        ArgumentNullException.ThrowIfNull(productionInputs);
+        ProductionInputs = ProductionContextDocument.Read(
+            ProductionContextDocument.Write(productionInputs));
         ArgumentNullException.ThrowIfNull(resourceLeaseFences);
         var fences = resourceLeaseFences.ToArray();
         if (fences.Length == 0
@@ -171,6 +176,8 @@ public sealed record RuntimeCommandExecutionContext
     public string ApplicationId { get; }
 
     public string ProjectSnapshotId { get; }
+
+    public IReadOnlyDictionary<string, ProductionContextValue> ProductionInputs { get; }
 
     public IReadOnlyList<ResourceLeaseFenceEvidence> ResourceLeaseFences { get; }
 

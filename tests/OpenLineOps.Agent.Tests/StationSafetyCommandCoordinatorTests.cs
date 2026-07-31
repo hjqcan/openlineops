@@ -12,7 +12,7 @@ public sealed class StationSafetyCommandCoordinatorTests
         new(2026, 7, 11, 9, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public async Task EmergencyStopDuplicateAfterRestartReturnsOriginalAcknowledgementWithoutActuatorReplay()
+    public async Task EmergencyStopDuplicateAfterRestartCorrelatesPersistedOutcomeWithoutActuatorReplay()
     {
         var path = DatabasePath();
         var executionCount = 0;
@@ -37,12 +37,19 @@ public sealed class StationSafetyCommandCoordinatorTests
                 var restarted = new StationSafetyCommandCoordinator(
                     restartedStore,
                     new FixedClock(Now.AddHours(1)));
+                var replay = request with { MessageId = Guid.NewGuid() };
                 var duplicate = await restarted.HandleEmergencyStopAsync(
-                    request with { MessageId = Guid.NewGuid() },
+                    replay,
                     (_, _) => throw new InvalidOperationException("The actuator must not be replayed."));
 
-                Assert.Equal(first, duplicate);
-                Assert.Equal(request.MessageId, duplicate.RequestMessageId);
+                Assert.Equal(
+                    first with
+                    {
+                        MessageId = duplicate.MessageId,
+                        RequestMessageId = replay.MessageId
+                    },
+                    duplicate);
+                Assert.NotEqual(first.MessageId, duplicate.MessageId);
                 Assert.Equal(1, executionCount);
             }
         }
@@ -53,7 +60,7 @@ public sealed class StationSafetyCommandCoordinatorTests
     }
 
     [Fact]
-    public async Task SafeStopDuplicateAfterRestartReturnsOriginalAcknowledgementWithoutActuatorReplay()
+    public async Task SafeStopDuplicateAfterRestartCorrelatesPersistedOutcomeWithoutActuatorReplay()
     {
         var path = DatabasePath();
         var executionCount = 0;
@@ -81,12 +88,19 @@ public sealed class StationSafetyCommandCoordinatorTests
                 var restarted = new StationSafetyCommandCoordinator(
                     restartedStore,
                     new FixedClock(Now.AddHours(1)));
+                var replay = request with { MessageId = Guid.NewGuid() };
                 var duplicate = await restarted.HandleSafeStopAsync(
-                    request with { MessageId = Guid.NewGuid() },
+                    replay,
                     (_, _) => throw new InvalidOperationException("The actuator must not be replayed."));
 
-                Assert.Equal(first, duplicate);
-                Assert.Equal(request.MessageId, duplicate.RequestMessageId);
+                Assert.Equal(
+                    first with
+                    {
+                        MessageId = duplicate.MessageId,
+                        RequestMessageId = replay.MessageId
+                    },
+                    duplicate);
+                Assert.NotEqual(first.MessageId, duplicate.MessageId);
                 Assert.Equal(1, executionCount);
             }
         }
@@ -122,14 +136,15 @@ public sealed class StationSafetyCommandCoordinatorTests
                 var restarted = new StationSafetyCommandCoordinator(
                     restartedStore,
                     new FixedClock(Now.AddMinutes(5)));
+                var replay = request with { MessageId = Guid.NewGuid() };
                 var acknowledgement = await restarted.HandleEmergencyStopAsync(
-                    request with { MessageId = Guid.NewGuid() },
+                    replay,
                     (_, _) => throw new InvalidOperationException("The actuator must not be replayed."));
 
                 Assert.False(acknowledgement.Accepted);
                 Assert.Equal("Agent.SafetyRecoveryRequired", acknowledgement.FailureCode);
                 Assert.Contains("not replayed", acknowledgement.FailureReason, StringComparison.Ordinal);
-                Assert.Equal(request.MessageId, acknowledgement.RequestMessageId);
+                Assert.Equal(replay.MessageId, acknowledgement.RequestMessageId);
                 Assert.Equal(1, executionCount);
             }
         }
@@ -197,17 +212,24 @@ public sealed class StationSafetyCommandCoordinatorTests
                 var restarted = new StationSafetyCommandCoordinator(
                     store,
                     new FixedClock(Now.AddMinutes(1)));
+                var replay = request with
+                {
+                    MessageId = Guid.NewGuid(),
+                    RequestedAtUtc = Now.AddMinutes(1)
+                };
                 var duplicate = await restarted.HandleJobCancelAsync(
-                    request with
-                    {
-                        MessageId = Guid.NewGuid(),
-                        RequestedAtUtc = Now.AddMinutes(1)
-                    },
+                    replay,
                     (_, _) => throw new InvalidOperationException(
                         "A persisted Station job cancellation must not be replayed."));
 
-                Assert.Equal(first, duplicate);
-                Assert.Equal(request.MessageId, duplicate.RequestMessageId);
+                Assert.Equal(
+                    first with
+                    {
+                        MessageId = duplicate.MessageId,
+                        RequestMessageId = replay.MessageId
+                    },
+                    duplicate);
+                Assert.NotEqual(first.MessageId, duplicate.MessageId);
                 Assert.Equal(request.JobId, duplicate.JobId);
                 Assert.Equal(1, executionCount);
             }

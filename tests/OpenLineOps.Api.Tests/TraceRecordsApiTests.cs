@@ -1,34 +1,46 @@
 using System.Net;
-using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using OpenLineOps.Application.Abstractions.Results;
+using OpenLineOps.Traceability.Application.Records;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class TraceRecordsApiTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
     private static readonly DateTimeOffset BaseTimeUtc =
         new(2026, 6, 29, 8, 0, 0, TimeSpan.Zero);
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private readonly OpenLineOpsApiWebApplicationFactory _factory;
     private readonly HttpClient _client;
 
-    public TraceRecordsApiTests(WebApplicationFactory<Program> factory)
+    public TraceRecordsApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
-        _client = factory.CreateClient(
+        _factory = factory;
+        _client = factory.CreateAuthenticatedClient(
             new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
     }
 
     [Fact]
-    public async Task CreateProductionRunTraceReturnsOperationEvidenceAndCanQueryGetAndExport()
+    public async Task ProjectedProductionRunTraceCanBeQueriedRetrievedAndExported()
     {
         var suffix = Guid.NewGuid().ToString("N");
         var unitIdentity = $"SMX-API-{suffix}";
         var productionRunId = Guid.NewGuid();
-        using var response = await _client.PostAsJsonAsync(
-            "/api/traceability/records",
-            CreateTraceRequest(productionRunId, unitIdentity, "lot-api-main", BaseTimeUtc.AddMinutes(3)));
+        var projected = await ProjectTraceAsync(
+            _factory,
+            CreateTraceRequest(
+                productionRunId,
+                unitIdentity,
+                "lot-api-main",
+                BaseTimeUtc.AddMinutes(3)));
+        Assert.True(projected.IsSuccess, projected.Error.Message);
+
+        using var response = await _client.GetAsync($"/api/traceability/records/{productionRunId}");
         using var body = await ReadJsonAsync(response);
 
-        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(productionRunId, body.RootElement.GetProperty("traceRecordId").GetGuid());
         Assert.Equal(productionRunId, body.RootElement.GetProperty("productionRunId").GetGuid());
         Assert.Equal(
@@ -36,6 +48,12 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
             body.RootElement.GetProperty("productionUnitIdentityValue").GetString());
         Assert.Equal("Completed", body.RootElement.GetProperty("executionStatus").GetString());
         Assert.Equal("Completed", body.RootElement.GetProperty("disposition").GetString());
+        Assert.Equal(
+            ApiTestAuthentication.StandardActorId,
+            body.RootElement.GetProperty("actorId").GetString());
+        Assert.Equal(
+            ApiTestAuthentication.StandardActorId,
+            body.RootElement.GetProperty("auditEntries")[0].GetProperty("actorId").GetString());
         var operation = body.RootElement.GetProperty("operations")[0];
         Assert.Equal("operation-api-trace", operation.GetProperty("operationId").GetString());
         Assert.Equal("station-system-api-trace", operation.GetProperty("stationSystemId").GetString());
@@ -87,7 +105,7 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
     }
 
     [Fact]
-    public async Task DuplicateProductionRunTraceReturnsConflictAndDoesNotCreateSecondRecord()
+    public async Task ProjectionRejectsDuplicateProductionRunEvidence()
     {
         var productionRunId = Guid.NewGuid();
         var request = CreateTraceRequest(
@@ -95,11 +113,12 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
             $"UNIT-DUPLICATE-{Guid.NewGuid():N}",
             $"lot-duplicate-{Guid.NewGuid():N}",
             BaseTimeUtc.AddMinutes(4));
-        using var first = await _client.PostAsJsonAsync("/api/traceability/records", request);
-        using var duplicate = await _client.PostAsJsonAsync("/api/traceability/records", request);
+        var first = await ProjectTraceAsync(_factory, request);
+        var duplicate = await ProjectTraceAsync(_factory, request);
 
-        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
-        Assert.Equal(HttpStatusCode.Conflict, duplicate.StatusCode);
+        Assert.True(first.IsSuccess, first.Error.Message);
+        Assert.True(duplicate.IsFailure);
+        Assert.Equal("Conflict.Traceability.RecordAlreadyExists", duplicate.Error.Code);
     }
 
     [Fact]
@@ -109,14 +128,14 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
         var lotId = $"lot-api-page-{suffix}";
         foreach (var (identity, minute) in new[] { ("3", 3), ("1", 1), ("2", 2) })
         {
-            using var response = await _client.PostAsJsonAsync(
-                "/api/traceability/records",
+            var projected = await ProjectTraceAsync(
+                _factory,
                 CreateTraceRequest(
                     Guid.NewGuid(),
                     $"UNIT-PAGE-{identity}-{suffix}",
                     lotId,
                     BaseTimeUtc.AddMinutes(minute)));
-            Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+            Assert.True(projected.IsSuccess, projected.Error.Message);
         }
 
         using var pageOneResponse = await _client.GetAsync(
@@ -142,15 +161,15 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
     [InlineData("Completed", "Slot", "completed", "Image", "Error")]
     [InlineData("Completed", "Slot", "Completed", "image", "Error")]
     [InlineData("Failed", "Slot", "Failed", "Image", "error")]
-    public async Task CreateRejectsCaseChangedNestedRuntimeEvidenceTokens(
+    public async Task ProjectionRejectsCaseChangedNestedRuntimeEvidenceTokens(
         string runtimeSessionStatus,
         string targetKind,
         string commandStatus,
         string artifactKind,
         string incidentSeverity)
     {
-        using var response = await _client.PostAsJsonAsync(
-            "/api/traceability/records",
+        var projected = await ProjectTraceAsync(
+            _factory,
             CreateTraceRequest(
                 Guid.NewGuid(),
                 $"UNIT-CASE-{Guid.NewGuid():N}",
@@ -161,10 +180,9 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
                 commandStatus: commandStatus,
                 artifactKind: artifactKind,
                 incidentSeverity: incidentSeverity));
-        var content = await response.Content.ReadAsStringAsync();
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Contains("case-sensitive", content, StringComparison.Ordinal);
+        Assert.True(projected.IsFailure);
+        Assert.Contains("case-sensitive", projected.Error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -177,20 +195,19 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
     }
 
     [Fact]
-    public async Task CreateRejectsCaseChangedCommandResultJudgement()
+    public async Task ProjectionRejectsCaseChangedCommandResultJudgement()
     {
-        using var response = await _client.PostAsJsonAsync(
-            "/api/traceability/records",
+        var projected = await ProjectTraceAsync(
+            _factory,
             CreateTraceRequest(
                 Guid.NewGuid(),
                 $"UNIT-JUDGEMENT-{Guid.NewGuid():N}",
                 $"lot-judgement-{Guid.NewGuid():N}",
                 BaseTimeUtc.AddMinutes(5),
                 resultJudgement: "passed"));
-        var content = await response.Content.ReadAsStringAsync();
 
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        Assert.Contains("case-sensitive", content, StringComparison.Ordinal);
+        Assert.True(projected.IsFailure);
+        Assert.Contains("case-sensitive", projected.Error.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -233,6 +250,13 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
         var executionStatus = executionFailed ? "Failed" : "Completed";
         var operationJudgement = executionFailed ? "Unknown" : judgement;
         var rootJudgement = executionFailed ? "Unknown" : judgement;
+        var canonicalCommandJudgement = resultJudgement ?? commandStatus switch
+        {
+            "Completed" => judgement,
+            "Canceled" => "Aborted",
+            "Failed" or "TimedOut" or "Rejected" => "Unknown",
+            _ => null
+        };
         return new
         {
             productionRunId,
@@ -247,7 +271,7 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
             productionUnitIdentityValue,
             lotId,
             carrierId = "carrier-api-trace",
-            actorId = "operator-api",
+            actorId = ApiTestAuthentication.StandardActorId,
             executionStatus,
             judgement = rootJudgement,
             disposition = executionFailed
@@ -298,13 +322,8 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
                             targetId = "slot.fixture-api.1",
                             targetCapabilityId = "capability.inspect",
                             commandName = "Inspect",
-                            status = commandStatus,
-                            resultJudgement = resultJudgement ?? commandStatus switch
-                            {
-                                "Completed" => judgement,
-                                "Failed" or "TimedOut" or "Canceled" or "Rejected" => "Unknown",
-                                _ => null
-                            },
+                            executionStatus = commandStatus,
+                            resultJudgement = canonicalCommandJudgement,
                             createdAtUtc = completedAtUtc.AddSeconds(-20),
                             deadlineAtUtc = completedAtUtc.AddSeconds(10),
                             acceptedAtUtc = completedAtUtc.AddSeconds(-19),
@@ -328,7 +347,8 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
                             actionId = "action.inspect.width",
                             targetKind,
                             targetId = "slot.fixture-api.1",
-                            commandStatus,
+                            commandExecutionStatus = commandStatus,
+                            commandResultJudgement = canonicalCommandJudgement,
                             passed = executionFailed ? (bool?)null : judgement == "Passed",
                             measuredAtUtc = completedAtUtc.AddSeconds(-10)
                         }
@@ -337,6 +357,7 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
                     {
                         new
                         {
+                            artifactRecordId = Guid.NewGuid(),
                             name = "vision-image",
                             kind = artifactKind,
                             storageKey = "trace/SMX-API/vision.png",
@@ -393,13 +414,31 @@ public sealed class TraceRecordsApiTests : IClassFixture<WebApplicationFactory<P
             {
                 new
                 {
-                    actorId = "operator-api",
+                    auditEntryId = Guid.NewGuid(),
+                    actorId = ApiTestAuthentication.StandardActorId,
                     action = executionFailed ? "ProductionRun.Failed" : "ProductionRun.Completed",
                     detail = "API integration test trace.",
                     occurredAtUtc = completedAtUtc
                 }
             }
         };
+    }
+
+    internal static async Task<Result<TraceRecordDetails>> ProjectTraceAsync(
+        OpenLineOpsApiWebApplicationFactory factory,
+        object persistedEvidence)
+    {
+        var json = JsonSerializer.Serialize(
+            persistedEvidence,
+            persistedEvidence.GetType(),
+            JsonOptions);
+        var projectionRequest = JsonSerializer.Deserialize<CreateTraceRecordRequest>(
+            json,
+            JsonOptions)
+            ?? throw new InvalidOperationException("Trace projection fixture could not be read.");
+        await using var scope = factory.Services.CreateAsyncScope();
+        var service = scope.ServiceProvider.GetRequiredService<ITraceRecordService>();
+        return await service.CreateAsync(projectionRequest);
     }
 
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response)

@@ -4,7 +4,7 @@ namespace OpenLineOps.Plugins.Infrastructure.Lifecycle;
 
 public static class ExternalPluginPackageSignaturePayload
 {
-    public const string FormatVersion = "OpenLineOps.PluginPackageSignature.v1";
+    public const string PayloadIdentity = "OpenLineOps.PluginPackageSignature";
 
     public static string Create(
         PluginPackageDescriptor package,
@@ -16,7 +16,7 @@ public static class ExternalPluginPackageSignaturePayload
 
         return string.Join(
             "\n",
-            FormatVersion,
+            PayloadIdentity,
             $"contractVersion={package.Manifest.ContractVersion}",
             $"entryAssembly={package.Manifest.EntryAssembly}",
             $"entryAssemblyPath={Path.GetFileName(entryAssemblyPath)}",

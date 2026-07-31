@@ -1,3 +1,4 @@
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Plugin.Abstractions;
 using OpenLineOps.Plugins.Application.Discovery;
 using OpenLineOps.Plugins.Application.Validation;
@@ -9,7 +10,7 @@ public sealed class PluginLifecycleManager : IPluginLifecycleManager
     private readonly IPluginPackageCatalog _packageCatalog;
     private readonly IPluginManifestValidator _manifestValidator;
     private readonly IPluginInstanceActivator _pluginActivator;
-    private readonly Dictionary<string, IOpenLineOpsPlugin> _activePlugins = new(StringComparer.Ordinal);
+    private readonly Dictionary<PluginPackageExecutionIdentity, IOpenLineOpsPlugin> _activePlugins = [];
 
     public PluginLifecycleManager(
         IPluginPackageCatalog packageCatalog,
@@ -22,13 +23,14 @@ public sealed class PluginLifecycleManager : IPluginLifecycleManager
     }
 
     public async ValueTask<IReadOnlyCollection<PluginLifecycleRecord>> StartAsync(
+        ProjectApplicationWorkspaceScope scope,
         IServiceProvider services,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(services);
 
         var packages = await _packageCatalog
-            .DiscoverAsync(cancellationToken)
+            .DiscoverAsync(scope, cancellationToken)
             .ConfigureAwait(false);
         List<PluginLifecycleRecord> records = [];
 
@@ -44,7 +46,7 @@ public sealed class PluginLifecycleManager : IPluginLifecycleManager
                 continue;
             }
 
-            records.Add(await StartPluginAsync(package, services, cancellationToken).ConfigureAwait(false));
+            records.Add(await StartPluginAsync(scope, package, services, cancellationToken).ConfigureAwait(false));
         }
 
         return records;
@@ -78,6 +80,7 @@ public sealed class PluginLifecycleManager : IPluginLifecycleManager
     }
 
     private async ValueTask<PluginLifecycleRecord> StartPluginAsync(
+        ProjectApplicationWorkspaceScope scope,
         PluginPackageDescriptor package,
         IServiceProvider services,
         CancellationToken cancellationToken)
@@ -86,7 +89,7 @@ public sealed class PluginLifecycleManager : IPluginLifecycleManager
         try
         {
             activationResult = await _pluginActivator
-                .ActivateAsync(package, cancellationToken)
+                .ActivateAsync(scope, package, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (Exception exception)
@@ -110,7 +113,14 @@ public sealed class PluginLifecycleManager : IPluginLifecycleManager
                 .InitializeAsync(services, cancellationToken)
                 .ConfigureAwait(false);
 
-            return await HandleInitializationStatusAsync(plugin, status).ConfigureAwait(false);
+            return await HandleInitializationStatusAsync(
+                    new PluginPackageExecutionIdentity(
+                        scope.ProjectId,
+                        scope.ApplicationId,
+                        package.RuntimeIdentity),
+                    plugin,
+                    status)
+                .ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -123,19 +133,20 @@ public sealed class PluginLifecycleManager : IPluginLifecycleManager
     }
 
     private async ValueTask<PluginLifecycleRecord> HandleInitializationStatusAsync(
+        PluginPackageExecutionIdentity executionIdentity,
         IOpenLineOpsPlugin plugin,
         PluginInitializationStatus status)
     {
         if (status == PluginInitializationStatus.Initialized)
         {
-            _activePlugins[plugin.Manifest.Id] = plugin;
+            _activePlugins[executionIdentity] = plugin;
 
             return PluginLifecycleRecord.Initialized(plugin.Manifest);
         }
 
         if (status == PluginInitializationStatus.Degraded)
         {
-            _activePlugins[plugin.Manifest.Id] = plugin;
+            _activePlugins[executionIdentity] = plugin;
 
             return PluginLifecycleRecord.Degraded(plugin.Manifest);
         }

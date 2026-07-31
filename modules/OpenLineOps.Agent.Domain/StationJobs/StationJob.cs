@@ -1,7 +1,7 @@
 using System.Text.Json;
 using OpenLineOps.Domain.Abstractions.Entities;
 using OpenLineOps.Runtime.Contracts;
-using ProductionExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus;
+using RuntimeExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus;
 
 namespace OpenLineOps.Agent.Domain.StationJobs;
 
@@ -49,6 +49,75 @@ public sealed class StationJob : AggregateRoot<StationJobId>
             snapshot.ConfigurationSnapshotId,
             nameof(snapshot.ConfigurationSnapshotId));
         RecipeSnapshotId = Required(snapshot.RecipeSnapshotId, nameof(snapshot.RecipeSnapshotId));
+        StationExecutionGateRevision = Optional(
+            snapshot.StationExecutionGateRevision,
+            nameof(snapshot.StationExecutionGateRevision));
+        StationExecutionGateEvidence = Optional(
+            snapshot.StationExecutionGateEvidence,
+            nameof(snapshot.StationExecutionGateEvidence));
+        StationExecutionGateEvidenceSha256 = OptionalSha256(
+            snapshot.StationExecutionGateEvidenceSha256,
+            nameof(snapshot.StationExecutionGateEvidenceSha256));
+        StationExecutionGateEvidenceVersion = snapshot.StationExecutionGateEvidenceVersion;
+        StationExecutionGateAuthorizedAtUtc = OptionalUtc(
+            snapshot.StationExecutionGateAuthorizedAtUtc,
+            nameof(snapshot.StationExecutionGateAuthorizedAtUtc));
+        StationExecutionGateExpiresAtUtc = OptionalUtc(
+            snapshot.StationExecutionGateExpiresAtUtc,
+            nameof(snapshot.StationExecutionGateExpiresAtUtc));
+        StationAgentControlLeaseOwnerAgentId = Optional(
+            snapshot.StationAgentControlLeaseOwnerAgentId,
+            nameof(snapshot.StationAgentControlLeaseOwnerAgentId));
+        StationAgentControlLeaseOwnerInstanceId = Optional(
+            snapshot.StationAgentControlLeaseOwnerInstanceId,
+            nameof(snapshot.StationAgentControlLeaseOwnerInstanceId));
+        StationAgentControlLeaseFencingToken =
+            snapshot.StationAgentControlLeaseFencingToken;
+        StationAgentControlLeaseExpiresAtUtc = OptionalUtc(
+            snapshot.StationAgentControlLeaseExpiresAtUtc,
+            nameof(snapshot.StationAgentControlLeaseExpiresAtUtc));
+        var hasStationGateEvidence = StationExecutionGateEvidence is not null;
+        var hasAgentControlLease = StationAgentControlLeaseOwnerAgentId is not null;
+        var isCurrentStationGateEvidence = hasStationGateEvidence
+            && StationExecutionGateEvidenceVersion
+                == StationExecutionGateClaimCanonicalizer.CurrentVersion
+            && StationExecutionGateRevision is not null
+            && hasAgentControlLease
+            && StationAgentControlLeaseOwnerInstanceId is not null
+            && IsCanonicalOwnerInstanceId(StationAgentControlLeaseOwnerInstanceId)
+            && StationAgentControlLeaseFencingToken > 0
+            && StationAgentControlLeaseExpiresAtUtc is not null
+            && string.Equals(
+                StationAgentControlLeaseOwnerAgentId,
+                AgentId,
+                StringComparison.Ordinal)
+            && StationAgentControlLeaseExpiresAtUtc >= StationExecutionGateExpiresAtUtc;
+        var isLegacyStationGateEvidence = hasStationGateEvidence
+            && StationExecutionGateEvidenceVersion
+                == StationExecutionGateClaimCanonicalizer
+                    .LegacyVersionWithoutAgentControlLease
+            && StationExecutionGateRevision is null
+            && !hasAgentControlLease
+            && StationAgentControlLeaseOwnerInstanceId is null
+            && StationAgentControlLeaseFencingToken == 0
+            && StationAgentControlLeaseExpiresAtUtc is null;
+        if (hasStationGateEvidence != (StationExecutionGateEvidenceSha256 is not null)
+            || hasStationGateEvidence != (StationExecutionGateAuthorizedAtUtc is not null)
+            || hasStationGateEvidence != (StationExecutionGateExpiresAtUtc is not null)
+            || hasAgentControlLease != (StationAgentControlLeaseOwnerInstanceId is not null)
+            || hasAgentControlLease != (StationAgentControlLeaseExpiresAtUtc is not null)
+            || hasStationGateEvidence
+                && !isCurrentStationGateEvidence
+                && !isLegacyStationGateEvidence
+            || !hasStationGateEvidence && StationExecutionGateEvidenceVersion != 0
+            || !hasStationGateEvidence && StationExecutionGateRevision is not null
+            || !hasStationGateEvidence && hasAgentControlLease
+            || !hasStationGateEvidence && StationAgentControlLeaseFencingToken != 0
+            || StationExecutionGateExpiresAtUtc <= StationExecutionGateAuthorizedAtUtc)
+        {
+            throw new InvalidDataException(
+                "Station execution gate evidence and fingerprint are inconsistent.");
+        }
         ResourceFences = ValidateFences(
             snapshot.ResourceFences,
             StationId,
@@ -71,6 +140,15 @@ public sealed class StationJob : AggregateRoot<StationJobId>
         FailureCode = Optional(snapshot.FailureCode, nameof(snapshot.FailureCode));
         FailureReason = Optional(snapshot.FailureReason, nameof(snapshot.FailureReason));
         RequestedAtUtc = Utc(snapshot.RequestedAtUtc, nameof(snapshot.RequestedAtUtc));
+        if (hasStationGateEvidence
+            && !StationExecutionGateClaimCanonicalizer.HasValidSha256(
+                CreateStationExecutionGateClaim(),
+                StationExecutionGateEvidenceSha256!))
+        {
+            throw new InvalidDataException(
+                "Station execution gate fingerprint does not match persisted execution evidence.");
+        }
+
         AcceptedAtUtc = OptionalUtc(snapshot.AcceptedAtUtc, nameof(snapshot.AcceptedAtUtc));
         StartedAtUtc = OptionalUtc(snapshot.StartedAtUtc, nameof(snapshot.StartedAtUtc));
         LastProgressAtUtc = OptionalUtc(snapshot.LastProgressAtUtc, nameof(snapshot.LastProgressAtUtc));
@@ -104,6 +182,16 @@ public sealed class StationJob : AggregateRoot<StationJobId>
     public string FlowVersionId { get; }
     public string ConfigurationSnapshotId { get; }
     public string RecipeSnapshotId { get; }
+    public string? StationExecutionGateRevision { get; }
+    public string? StationExecutionGateEvidence { get; }
+    public string? StationExecutionGateEvidenceSha256 { get; }
+    public int StationExecutionGateEvidenceVersion { get; }
+    public DateTimeOffset? StationExecutionGateAuthorizedAtUtc { get; }
+    public DateTimeOffset? StationExecutionGateExpiresAtUtc { get; }
+    public string? StationAgentControlLeaseOwnerAgentId { get; }
+    public string? StationAgentControlLeaseOwnerInstanceId { get; }
+    public long StationAgentControlLeaseFencingToken { get; }
+    public DateTimeOffset? StationAgentControlLeaseExpiresAtUtc { get; }
     public IReadOnlyList<StationResourceFenceEvidence> ResourceFences { get; }
     public string InputsJson { get; }
     public StationJobStatus Status { get; private set; }
@@ -176,7 +264,17 @@ public sealed class StationJob : AggregateRoot<StationJobId>
             null,
             null,
             null,
-            null));
+            null,
+            request.StationExecutionGateRevision,
+            request.StationExecutionGateEvidence,
+            request.StationExecutionGateEvidenceSha256,
+            request.StationExecutionGateEvidenceVersion,
+            request.StationExecutionGateAuthorizedAtUtc,
+            request.StationExecutionGateExpiresAtUtc,
+            request.StationAgentControlLeaseOwnerAgentId,
+            request.StationAgentControlLeaseOwnerInstanceId,
+            request.StationAgentControlLeaseFencingToken,
+            request.StationAgentControlLeaseExpiresAtUtc));
     }
 
     public static StationJob Restore(StationJobSnapshot snapshot)
@@ -204,7 +302,7 @@ public sealed class StationJob : AggregateRoot<StationJobId>
                 $"Station job {Id} cannot start with an expired resource fence.");
         }
         Status = StationJobStatus.Running;
-        ExecutionStatus = ProductionExecutionStatus.Running;
+        ExecutionStatus = RuntimeExecutionStatus.Running;
     }
 
     public void ReportProgress(int percent, string phase, DateTimeOffset progressedAtUtc)
@@ -226,8 +324,8 @@ public sealed class StationJob : AggregateRoot<StationJobId>
     {
         ArgumentNullException.ThrowIfNull(completion);
         RequireStatus(StationJobStatus.Running);
-        if (completion.ExecutionStatus is ProductionExecutionStatus.Pending
-            or ProductionExecutionStatus.Running)
+        if (completion.ExecutionStatus is RuntimeExecutionStatus.Pending
+            or RuntimeExecutionStatus.Running)
         {
             throw new ArgumentException("Station job completion requires a terminal execution status.", nameof(completion));
         }
@@ -245,16 +343,16 @@ public sealed class StationJob : AggregateRoot<StationJobId>
         FailureCode = Optional(completion.FailureCode, nameof(completion.FailureCode));
         FailureReason = Optional(completion.FailureReason, nameof(completion.FailureReason));
         CompletedAtUtc = completedAtUtc;
-        ProgressPercent = completion.ExecutionStatus == ProductionExecutionStatus.Completed
+        ProgressPercent = completion.ExecutionStatus == RuntimeExecutionStatus.Completed
             ? 100
             : ProgressPercent;
         Status = completion.ExecutionStatus switch
         {
-            ProductionExecutionStatus.Completed => StationJobStatus.Completed,
-            ProductionExecutionStatus.Failed => StationJobStatus.Failed,
-            ProductionExecutionStatus.TimedOut => StationJobStatus.TimedOut,
-            ProductionExecutionStatus.Canceled => StationJobStatus.Canceled,
-            ProductionExecutionStatus.Rejected => StationJobStatus.Rejected,
+            RuntimeExecutionStatus.Completed => StationJobStatus.Completed,
+            RuntimeExecutionStatus.Failed => StationJobStatus.Failed,
+            RuntimeExecutionStatus.TimedOut => StationJobStatus.TimedOut,
+            RuntimeExecutionStatus.Canceled => StationJobStatus.Canceled,
+            RuntimeExecutionStatus.Rejected => StationJobStatus.Rejected,
             _ => throw new ArgumentOutOfRangeException(nameof(completion))
         };
         ValidateTerminalResult();
@@ -265,7 +363,7 @@ public sealed class StationJob : AggregateRoot<StationJobId>
         RequireStatus(StationJobStatus.Accepted);
         var atUtc = Utc(rejectedAtUtc, nameof(rejectedAtUtc));
         EnsureNotBefore(atUtc, AcceptedAtUtc!.Value, nameof(rejectedAtUtc));
-        ExecutionStatus = ProductionExecutionStatus.Rejected;
+        ExecutionStatus = RuntimeExecutionStatus.Rejected;
         Judgement = ResultJudgement.Unknown;
         OutputsJson = "{}";
         FailureCode = Required(code, nameof(code));
@@ -288,7 +386,7 @@ public sealed class StationJob : AggregateRoot<StationJobId>
             atUtc,
             LastProgressAtUtc ?? StartedAtUtc ?? AcceptedAtUtc!.Value,
             nameof(canceledAtUtc));
-        ExecutionStatus = ProductionExecutionStatus.Canceled;
+        ExecutionStatus = RuntimeExecutionStatus.Canceled;
         Judgement = ResultJudgement.Aborted;
         OutputsJson = "{}";
         FailureCode = "Agent.ExecutionCanceled";
@@ -306,7 +404,7 @@ public sealed class StationJob : AggregateRoot<StationJobId>
         }
 
         Status = StationJobStatus.RecoveryRequired;
-        ExecutionStatus = ProductionExecutionStatus.Failed;
+        ExecutionStatus = RuntimeExecutionStatus.Failed;
         Judgement = ResultJudgement.Unknown;
         FailureCode = "Agent.RecoveryRequired";
         FailureReason = Required(reason, nameof(reason));
@@ -357,7 +455,17 @@ public sealed class StationJob : AggregateRoot<StationJobId>
         AcceptedAtUtc,
         StartedAtUtc,
         LastProgressAtUtc,
-        CompletedAtUtc);
+        CompletedAtUtc,
+        StationExecutionGateRevision,
+        StationExecutionGateEvidence,
+        StationExecutionGateEvidenceSha256,
+        StationExecutionGateEvidenceVersion,
+        StationExecutionGateAuthorizedAtUtc,
+        StationExecutionGateExpiresAtUtc,
+        StationAgentControlLeaseOwnerAgentId,
+        StationAgentControlLeaseOwnerInstanceId,
+        StationAgentControlLeaseFencingToken,
+        StationAgentControlLeaseExpiresAtUtc);
 
     private void ValidateState()
     {
@@ -388,23 +496,23 @@ public sealed class StationJob : AggregateRoot<StationJobId>
         }
 
         var hasFailure = FailureCode is not null && FailureReason is not null;
-        if (ExecutionStatus == ProductionExecutionStatus.Completed
+        if (ExecutionStatus == RuntimeExecutionStatus.Completed
             && (hasFailure || Judgement == ResultJudgement.Unknown))
         {
             throw new InvalidDataException(
                 "Completed station execution requires a product judgement and cannot contain a system failure.");
         }
 
-        if (ExecutionStatus == ProductionExecutionStatus.Canceled
+        if (ExecutionStatus == RuntimeExecutionStatus.Canceled
             && (!hasFailure || Judgement != ResultJudgement.Aborted))
         {
             throw new InvalidDataException(
                 "Canceled station execution requires Aborted judgement and failure evidence.");
         }
 
-        if (ExecutionStatus is ProductionExecutionStatus.Failed
-                or ProductionExecutionStatus.TimedOut
-                or ProductionExecutionStatus.Rejected
+        if (ExecutionStatus is RuntimeExecutionStatus.Failed
+                or RuntimeExecutionStatus.TimedOut
+                or RuntimeExecutionStatus.Rejected
             && (!hasFailure || Judgement != ResultJudgement.Unknown))
         {
             throw new InvalidDataException(
@@ -443,12 +551,70 @@ public sealed class StationJob : AggregateRoot<StationJobId>
             ? value
             : throw new ArgumentException($"{parameterName} must be a lowercase SHA-256.", parameterName);
 
+    private static string? OptionalSha256(string? value, string parameterName) =>
+        value is null ? null : Sha256(value, parameterName);
+
     private static string CanonicalJson(string value, string parameterName)
     {
         Required(value, parameterName);
         using var document = JsonDocument.Parse(value);
         return JsonSerializer.Serialize(document.RootElement);
     }
+
+    private StationExecutionGateClaim CreateStationExecutionGateClaim() => new(
+        Id.Value,
+        IdempotencyKey,
+        AgentId,
+        StationId,
+        StationSystemId,
+        ProductionRunId,
+        ProductionUnitId,
+        RuntimeSessionId,
+        OperationRunId.Value,
+        OperationAttempt,
+        ProductModelId,
+        ProductionUnitIdentityInputKey,
+        ProductionUnitIdentityValue,
+        LotId,
+        CarrierId,
+        ProjectId,
+        ApplicationId,
+        ProjectSnapshotId,
+        ProductionLineDefinitionId,
+        TopologyId,
+        ActorId,
+        PackageContentSha256,
+        OperationId,
+        FlowDefinitionId,
+        FlowVersionId,
+        ConfigurationSnapshotId,
+        RecipeSnapshotId,
+        ResourceFences.Select(static fence => new StationExecutionGateResourceFenceClaim(
+            fence.ResourceKind,
+            fence.ResourceId,
+            fence.FencingToken,
+            fence.ExpiresAtUtc)).ToArray(),
+        InputsJson,
+        RequestedAtUtc,
+        StationExecutionGateRevision,
+        StationAgentControlLeaseOwnerAgentId is null
+            ? null
+            : new StationAgentControlLeaseDispatchAuthority(
+                StationAgentControlLeaseOwnerAgentId,
+                StationAgentControlLeaseOwnerInstanceId!,
+                StationAgentControlLeaseFencingToken,
+                StationAgentControlLeaseExpiresAtUtc!.Value),
+        StationExecutionGateEvidenceVersion,
+        StationExecutionGateAuthorizedAtUtc!.Value,
+        StationExecutionGateExpiresAtUtc!.Value,
+        StationExecutionGateEvidence!);
+
+    private static bool IsCanonicalOwnerInstanceId(string value) =>
+        Guid.TryParseExact(value, "D", out var parsed)
+        && parsed != Guid.Empty
+        && string.Equals(parsed.ToString("D"), value, StringComparison.Ordinal)
+        && value[14] == '4'
+        && value[19] is '8' or '9' or 'a' or 'b';
 
     private static DateTimeOffset Utc(DateTimeOffset value, string parameterName) =>
         value.Offset == TimeSpan.Zero
@@ -541,7 +707,17 @@ public sealed record StationJobRequest(
     string RecipeSnapshotId,
     IReadOnlyList<StationResourceFenceEvidence> ResourceFences,
     string InputsJson,
-    DateTimeOffset RequestedAtUtc);
+    DateTimeOffset RequestedAtUtc,
+    string? StationExecutionGateRevision = null,
+    string? StationExecutionGateEvidence = null,
+    string? StationExecutionGateEvidenceSha256 = null,
+    int StationExecutionGateEvidenceVersion = 0,
+    DateTimeOffset? StationExecutionGateAuthorizedAtUtc = null,
+    DateTimeOffset? StationExecutionGateExpiresAtUtc = null,
+    string? StationAgentControlLeaseOwnerAgentId = null,
+    string? StationAgentControlLeaseOwnerInstanceId = null,
+    long StationAgentControlLeaseFencingToken = 0,
+    DateTimeOffset? StationAgentControlLeaseExpiresAtUtc = null);
 
 public sealed record StationJobCompletion(
     ExecutionStatus ExecutionStatus,
@@ -605,4 +781,14 @@ public sealed record StationJobSnapshot(
     DateTimeOffset? AcceptedAtUtc,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset? LastProgressAtUtc,
-    DateTimeOffset? CompletedAtUtc);
+    DateTimeOffset? CompletedAtUtc,
+    string? StationExecutionGateRevision = null,
+    string? StationExecutionGateEvidence = null,
+    string? StationExecutionGateEvidenceSha256 = null,
+    int StationExecutionGateEvidenceVersion = 0,
+    DateTimeOffset? StationExecutionGateAuthorizedAtUtc = null,
+    DateTimeOffset? StationExecutionGateExpiresAtUtc = null,
+    string? StationAgentControlLeaseOwnerAgentId = null,
+    string? StationAgentControlLeaseOwnerInstanceId = null,
+    long StationAgentControlLeaseFencingToken = 0,
+    DateTimeOffset? StationAgentControlLeaseExpiresAtUtc = null);

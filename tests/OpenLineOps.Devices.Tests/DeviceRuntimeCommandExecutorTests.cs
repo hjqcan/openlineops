@@ -2,6 +2,7 @@ using OpenLineOps.Devices.Application.Execution;
 using OpenLineOps.Devices.Domain.Identifiers;
 using OpenLineOps.Devices.Infrastructure.Execution;
 using OpenLineOps.Runtime.Application.Commands;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
@@ -92,6 +93,7 @@ public sealed class DeviceRuntimeCommandExecutorTests
             "project-main",
             "application-main",
             "project-snapshot-main",
+            new Dictionary<string, ProductionContextValue>(),
             [new ResourceLeaseFenceEvidence(
                 new ResourceRequirement(ResourceKind.Station, "station-scan"),
                 1,

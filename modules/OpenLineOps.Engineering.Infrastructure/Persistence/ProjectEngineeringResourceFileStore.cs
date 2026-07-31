@@ -1,13 +1,12 @@
-using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 
 namespace OpenLineOps.Engineering.Infrastructure.Persistence;
 
 internal static class ProjectEngineeringResourceFileStore
 {
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> WriteLocks =
-        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ProjectWorkspaceWriteLockPool WriteLocks = new();
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -25,14 +24,27 @@ internal static class ProjectEngineeringResourceFileStore
         var bytes = JsonSerializer.SerializeToUtf8Bytes(document, JsonOptions);
         var directory = Path.GetDirectoryName(path)
             ?? throw new InvalidOperationException($"Engineering resource path '{path}' has no parent directory.");
-        Directory.CreateDirectory(directory);
+        ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+            directory,
+            "Project engineering resource directory");
 
-        var writeLock = WriteLocks.GetOrAdd(path, static _ => new SemaphoreSlim(1, 1));
-        await writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var writeLock = await WriteLocks.AcquireAsync(path, cancellationToken).ConfigureAwait(false);
         var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        Exception? operationFailure = null;
+        Exception? cleanupFailure = null;
 
         try
         {
+            ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+                directory,
+                "Project engineering resource directory");
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                path,
+                "Project engineering resource");
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                temporaryPath,
+                "Temporary project engineering resource");
+
             await using (var stream = new FileStream(
                 temporaryPath,
                 FileMode.CreateNew,
@@ -45,24 +57,56 @@ internal static class ProjectEngineeringResourceFileStore
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
 
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                temporaryPath,
+                "Temporary project engineering resource");
+            ProjectWorkspacePathGuard.CreateOrdinaryDirectory(
+                directory,
+                "Project engineering resource directory");
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                path,
+                "Project engineering resource");
             File.Move(temporaryPath, path, overwrite: true);
+            if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    path,
+                    "Project engineering resource"))
+            {
+                throw new InvalidDataException(
+                    $"Project engineering resource '{path}' was not committed as an ordinary file.");
+            }
         }
-        finally
+        catch (Exception exception)
         {
-            if (File.Exists(temporaryPath))
+            operationFailure = exception;
+        }
+
+        try
+        {
+            if (ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    temporaryPath,
+                    "Temporary project engineering resource"))
             {
                 File.Delete(temporaryPath);
             }
-
-            writeLock.Release();
         }
+        catch (Exception exception)
+        {
+            cleanupFailure = exception;
+        }
+
+        ProjectWorkspaceFileOperation.ThrowFailures(
+            "Project engineering resource commit and temporary-file cleanup both failed.",
+            operationFailure,
+            cleanupFailure);
     }
 
     public static async Task<T?> LoadJsonAsync<T>(
         string path,
         CancellationToken cancellationToken)
     {
-        if (!File.Exists(path))
+        if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                path,
+                "Project engineering resource"))
         {
             return default;
         }

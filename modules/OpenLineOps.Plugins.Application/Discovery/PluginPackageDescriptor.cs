@@ -55,3 +55,38 @@ public sealed record PluginPackageRuntimeIdentity(
             && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
     }
 }
+
+public sealed record PluginPackageExecutionIdentity
+{
+    public PluginPackageExecutionIdentity(
+        string projectId,
+        string applicationId,
+        PluginPackageRuntimeIdentity packageIdentity)
+    {
+        ProjectId = RequireCanonical(projectId, nameof(projectId));
+        ApplicationId = RequireCanonical(applicationId, nameof(applicationId));
+        PackageIdentity = packageIdentity is { IsComplete: true }
+            ? packageIdentity
+            : throw new ArgumentException(
+                "Plugin package runtime identity must be complete.",
+                nameof(packageIdentity));
+    }
+
+    public string ProjectId { get; }
+
+    public string ApplicationId { get; }
+
+    public PluginPackageRuntimeIdentity PackageIdentity { get; }
+
+    public string PluginId => PackageIdentity.PluginId;
+
+    private static string RequireCanonical(string value, string parameterName)
+    {
+        return !string.IsNullOrWhiteSpace(value)
+               && string.Equals(value, value.Trim(), StringComparison.Ordinal)
+            ? value
+            : throw new ArgumentException(
+                $"{parameterName} must be canonical non-empty text.",
+                parameterName);
+    }
+}

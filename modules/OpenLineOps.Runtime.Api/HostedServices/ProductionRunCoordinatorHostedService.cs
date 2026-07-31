@@ -55,7 +55,9 @@ public sealed class ProductionRunCoordinatorHostedService(
                     await using var discoveryScope = scopeFactory.CreateAsyncScope();
                     var repository = discoveryScope.ServiceProvider
                         .GetRequiredService<IProductionRunRepository>();
-                    var active = await repository.ListActiveAsync(cancellationToken: stoppingToken)
+                    var active = await repository.ListActiveAsync(
+                            ProductionRunActiveQuery.All,
+                            stoppingToken)
                         .ConfigureAwait(false);
                     foreach (var runId in active
                                  .Where(entry =>

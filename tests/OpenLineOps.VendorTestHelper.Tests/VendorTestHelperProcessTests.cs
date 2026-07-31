@@ -1,13 +1,18 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace OpenLineOps.VendorTestHelper.Tests;
 
 public sealed class VendorTestHelperProcessTests
 {
     private const int ProcessTimeoutMilliseconds = 15_000;
+    private const string ChildProcessIdFileName = "child-process-id.txt";
+    private const string ForceChildPidPublicationFailureEnvironmentVariable =
+        "OPENLINEOPS_VENDOR_TEST_HELPER_FORCE_CHILD_PID_PUBLICATION_FAILURE";
 
     [Theory]
     [InlineData("Passed")]
@@ -172,25 +177,106 @@ public sealed class VendorTestHelperProcessTests
             mode,
             "--delay-milliseconds",
             "300000");
-        var standardOutput = process.StandardOutput.ReadToEndAsync();
-        var standardError = process.StandardError.ReadToEndAsync();
-        var childProcessIdPath = Path.Combine(invocation.OutputDirectory, "child-process-id.txt");
-        await WaitForFileAsync(childProcessIdPath);
-        var childProcessIdText = await File.ReadAllTextAsync(childProcessIdPath, Encoding.UTF8);
-        var childProcessId = int.Parse(childProcessIdText, NumberStyles.None, CultureInfo.InvariantCulture);
-        Assert.True(IsProcessRunning(childProcessId));
+        Process? childProcess = null;
+        try
+        {
+            var standardOutput = process.StandardOutput.ReadToEndAsync();
+            var standardError = process.StandardError.ReadToEndAsync();
+            var processIdPath = Path.Combine(invocation.OutputDirectory, "vendor-process-id.txt");
+            var childProcessIdPath = Path.Combine(invocation.OutputDirectory, ChildProcessIdFileName);
+            await WaitForFileAsync(processIdPath);
+            await WaitForFileAsync(childProcessIdPath);
+            var processIdText = await File.ReadAllTextAsync(processIdPath, Encoding.UTF8);
+            var reportedProcessId = int.Parse(
+                processIdText,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture);
+            var childProcessIdText = await File.ReadAllTextAsync(childProcessIdPath, Encoding.UTF8);
+            var childProcessId = int.Parse(
+                childProcessIdText,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture);
+            Assert.Equal(process.Id, reportedProcessId);
+            childProcess = Process.GetProcessById(childProcessId);
+            Assert.False(childProcess.HasExited);
 
-        await File.WriteAllTextAsync(
-            Path.Combine(invocation.OutputDirectory, "cancel.request"),
-            "cancel",
-            Encoding.UTF8);
-        await WaitForExitAsync(process);
-        await WaitForProcessExitAsync(childProcessId);
+            await File.WriteAllTextAsync(
+                Path.Combine(invocation.OutputDirectory, "cancel.request"),
+                "cancel",
+                Encoding.UTF8);
+            await WaitForExitAsync(process);
+            await WaitForExitAsync(childProcess);
 
-        Assert.Equal(130, process.ExitCode);
-        Assert.Empty(await standardOutput);
-        Assert.Contains("acknowledged cancellation", await standardError, StringComparison.Ordinal);
-        Assert.False(IsProcessRunning(childProcessId));
+            Assert.Equal(130, process.ExitCode);
+            Assert.Empty(await standardOutput);
+            Assert.Contains("acknowledged cancellation", await standardError, StringComparison.Ordinal);
+            Assert.True(process.HasExited);
+            Assert.True(childProcess.HasExited);
+            Assert.Empty(Directory.EnumerateFiles(
+                invocation.OutputDirectory,
+                $".{ChildProcessIdFileName}.*.tmp"));
+        }
+        finally
+        {
+            await TerminateProcessTreeIfRunningAsync(process);
+            if (childProcess is not null)
+            {
+                await TerminateProcessTreeIfRunningAsync(childProcess);
+                childProcess.Dispose();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ChildPidPublicationFailureStillRemovesTheStartedChild()
+    {
+        await using var invocation = await VendorInvocation.CreateAsync(operationAttempt: 1);
+        Process? childProcess = null;
+
+        try
+        {
+            var result = await RunHelperAsync(
+                invocation,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    [ForceChildPidPublicationFailureEnvironmentVariable] = "1"
+                },
+                "--mode",
+                "SpawnChildDelay",
+                "--delay-milliseconds",
+                "300000");
+
+            Assert.Equal(23, result.ExitCode);
+            Assert.Empty(result.StandardOutput);
+            Assert.Contains("simulated child PID publication failure", result.StandardError, StringComparison.Ordinal);
+            var match = Regex.Match(
+                result.StandardError,
+                @"Vendor helper started child process (?<pid>\d+)\.",
+                RegexOptions.CultureInvariant);
+            Assert.True(match.Success, result.StandardError);
+            var childProcessId = int.Parse(
+                match.Groups["pid"].Value,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture);
+            childProcess = TryGetProcessById(childProcessId);
+            if (childProcess is not null)
+            {
+                await WaitForExitAsync(childProcess);
+            }
+
+            Assert.True(childProcess is null || childProcess.HasExited);
+            Assert.Empty(Directory.EnumerateFiles(
+                invocation.OutputDirectory,
+                $".{ChildProcessIdFileName}.*.tmp"));
+        }
+        finally
+        {
+            if (childProcess is not null)
+            {
+                await TerminateProcessTreeIfRunningAsync(childProcess);
+                childProcess.Dispose();
+            }
+        }
     }
 
     private static async Task AssertEvidenceAsync(VendorInvocation invocation)
@@ -217,7 +303,15 @@ public sealed class VendorTestHelperProcessTests
         VendorInvocation invocation,
         params string[] arguments)
     {
-        using var process = StartHelper(invocation, arguments);
+        return await RunHelperAsync(invocation, additionalEnvironment: null, arguments);
+    }
+
+    private static async Task<ProcessResult> RunHelperAsync(
+        VendorInvocation invocation,
+        IReadOnlyDictionary<string, string>? additionalEnvironment,
+        params string[] arguments)
+    {
+        using var process = StartHelper(invocation, additionalEnvironment, arguments);
         var standardOutput = process.StandardOutput.ReadToEndAsync();
         var standardError = process.StandardError.ReadToEndAsync();
         await WaitForExitAsync(process);
@@ -226,6 +320,14 @@ public sealed class VendorTestHelperProcessTests
 
     private static Process StartHelper(
         VendorInvocation invocation,
+        params string[] arguments)
+    {
+        return StartHelper(invocation, additionalEnvironment: null, arguments);
+    }
+
+    private static Process StartHelper(
+        VendorInvocation invocation,
+        IReadOnlyDictionary<string, string>? additionalEnvironment,
         params string[] arguments)
     {
         var executableName = OperatingSystem.IsWindows()
@@ -247,6 +349,14 @@ public sealed class VendorTestHelperProcessTests
         };
         startInfo.Environment["OPENLINEOPS_INVOCATION_FILE"] = invocation.InvocationFilePath;
         startInfo.Environment["OPENLINEOPS_OUTPUT_DIRECTORY"] = invocation.OutputDirectory;
+        if (additionalEnvironment is not null)
+        {
+            foreach (var (name, value) in additionalEnvironment)
+            {
+                startInfo.Environment[name] = value;
+            }
+        }
+
         foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
@@ -265,11 +375,7 @@ public sealed class VendorTestHelperProcessTests
         }
         catch (OperationCanceledException) when (timeout.IsCancellationRequested)
         {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync();
-            }
+            await TerminateProcessTreeIfRunningAsync(process);
 
             throw new TimeoutException("Vendor helper test process did not exit before the test timeout.");
         }
@@ -284,25 +390,51 @@ public sealed class VendorTestHelperProcessTests
         }
     }
 
-    private static async Task WaitForProcessExitAsync(int processId)
-    {
-        using var timeout = new CancellationTokenSource(ProcessTimeoutMilliseconds);
-        while (IsProcessRunning(processId))
-        {
-            await Task.Delay(25, timeout.Token);
-        }
-    }
-
-    private static bool IsProcessRunning(int processId)
+    private static Process? TryGetProcessById(int processId)
     {
         try
         {
-            using var process = Process.GetProcessById(processId);
-            return !process.HasExited;
+            return Process.GetProcessById(processId);
         }
         catch (ArgumentException)
         {
-            return false;
+            return null;
+        }
+    }
+
+    private static async Task TerminateProcessTreeIfRunningAsync(Process process)
+    {
+        if (HasExited(process))
+        {
+            return;
+        }
+
+        try
+        {
+            process.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException) when (HasExited(process))
+        {
+        }
+        catch (Win32Exception) when (HasExited(process))
+        {
+        }
+
+        if (!HasExited(process))
+        {
+            await process.WaitForExitAsync().ConfigureAwait(false);
+        }
+    }
+
+    private static bool HasExited(Process process)
+    {
+        try
+        {
+            return process.HasExited;
+        }
+        catch (InvalidOperationException)
+        {
+            return true;
         }
     }
 
@@ -375,14 +507,32 @@ public sealed class VendorTestHelperProcessTests
                 productionUnitIdentity);
         }
 
-        public ValueTask DisposeAsync()
+        public async ValueTask DisposeAsync()
         {
+            const int maximumAttempts = 40;
+            for (var attempt = 1; attempt < maximumAttempts; attempt++)
+            {
+                if (!Directory.Exists(RootDirectory))
+                {
+                    return;
+                }
+
+                try
+                {
+                    Directory.Delete(RootDirectory, recursive: true);
+                    return;
+                }
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException)
+                {
+                    await Task.Delay(50).ConfigureAwait(false);
+                }
+            }
+
             if (Directory.Exists(RootDirectory))
             {
                 Directory.Delete(RootDirectory, recursive: true);
             }
-
-            return ValueTask.CompletedTask;
         }
     }
 }

@@ -87,11 +87,19 @@ public static class ReleaseManifestGenerator
     {
         var fileInfo = new FileInfo(filePath);
         var relativePath = ToRelativePath(artifactsDirectory, filePath);
+        var kind = ReleaseArtifactKinds.FromRelativePath(relativePath);
+        if (string.Equals(
+                kind,
+                ReleaseArtifactKinds.DeviceSessionsPlugin,
+                StringComparison.Ordinal))
+        {
+            DeviceSessionsPluginArtifactVerifier.Verify(filePath);
+        }
 
         return new ReleaseArtifactEntry(
             RelativePath: relativePath,
             FileName: fileInfo.Name,
-            Kind: ReleaseArtifactKinds.FromRelativePath(relativePath),
+            Kind: kind,
             SizeBytes: fileInfo.Length,
             Sha256: ComputeSha256(filePath));
     }

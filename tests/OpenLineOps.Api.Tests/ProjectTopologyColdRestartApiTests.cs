@@ -52,7 +52,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
 
         using (var firstFactory = new ScriptWorkerWebApplicationFactory(
                    _stationPackageDirectory))
-        using (var client = firstFactory.CreateClient())
+        using (var client = firstFactory.CreateAuthenticatedClient())
         {
             using var createWorkspace = await client.PostAsJsonAsync(
                 "/api/automation-project-workspaces",
@@ -134,7 +134,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 applicationA,
                 customBlockType,
                 "Application A Fixture Action",
-                "application A fixture action v1",
+                "application A fixture action initial",
                 expectedVersion: 1);
             await RegisterApplicationBlockAsync(
                 client,
@@ -273,7 +273,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
 
         using (var secondFactory = new ScriptWorkerWebApplicationFactory(
                    _stationPackageDirectory))
-        using (var client = secondFactory.CreateClient())
+        using (var client = secondFactory.CreateAuthenticatedClient())
         {
             using var openWorkspace = await client.PostAsJsonAsync(
                 "/api/automation-project-workspaces/open",
@@ -781,8 +781,14 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                     new { key = "voltage.max", value = recipeParameterValue }
                 }
             });
-        using var publishRecipeResponse = await client.PostAsync(
-            $"{engineeringBase}/recipes/{recipeId}/publish",
+        using var validateRecipeResponse = await client.PostAsync(
+            $"{engineeringBase}/recipes/{recipeId}/validate",
+            content: null);
+        using var approveRecipeResponse = await client.PostAsync(
+            $"{engineeringBase}/recipes/{recipeId}/approve",
+            content: null);
+        using var releaseRecipeResponse = await client.PostAsync(
+            $"{engineeringBase}/recipes/{recipeId}/release",
             content: null);
         using var stationResponse = await client.PostAsJsonAsync(
             $"{engineeringBase}/station-profiles",
@@ -824,7 +830,9 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
 
         Assert.Equal(HttpStatusCode.Created, workspaceResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, recipeResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, publishRecipeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, validateRecipeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, approveRecipeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, releaseRecipeResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, stationResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, projectResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, snapshotResponse.StatusCode);
@@ -863,6 +871,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                         stationSystemId = "station.main",
                         flowDefinitionId = processDefinitionId,
                         configurationSnapshotId,
+                        inputMappings = Array.Empty<object>(),
                         resources = new[]
                         {
                             new
@@ -882,8 +891,25 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                         }
                     }
                 },
-                transitions = Array.Empty<object>(),
-                lineControllerAuthorizations = Array.Empty<object>()
+                transitions = new[]
+                {
+                    new
+                    {
+                        transitionId = "operation.main-completed",
+                        sourceOperationId = "operation.main",
+                        targetOperationId = (string?)null,
+                        terminalDisposition = "Completed",
+                        kind = "Sequence"
+                    }
+                },
+                lineControllerAuthorizations = Array.Empty<object>(),
+                routeLayout = new
+                {
+                    operationPositions = new[]
+                    {
+                        new { operationId = "operation.main", x = 120, y = 80 }
+                    }
+                }
             });
         var body = await response.Content.ReadAsStringAsync();
 
@@ -957,7 +983,6 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
     {
         var productionRunId = Guid.NewGuid();
         var productionUnitId = Guid.NewGuid();
-        const string actorId = "scoped-engineering-test";
         var identityValue = $"UNIT-{applicationId}";
         using var registerUnitResponse = await client.PostAsJsonAsync(
             "/api/production-units",
@@ -968,7 +993,6 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 identityKey = "serialNumber",
                 identityValue,
                 lotId = (string?)null,
-                actorId,
                 occurredAtUtc = DateTimeOffset.UtcNow
             });
         Assert.Equal(HttpStatusCode.Created, registerUnitResponse.StatusCode);
@@ -990,7 +1014,6 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 stationId = contextBody.RootElement.GetProperty("entryStationId").GetString(),
                 lineId = productionLineDefinitionId,
                 stationSystemId = "station.main",
-                actorId,
                 occurredAtUtc = DateTimeOffset.UtcNow
             });
         Assert.Equal(HttpStatusCode.OK, arriveUnitResponse.StatusCode);
@@ -1002,8 +1025,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                 projectId,
                 projectSnapshotId,
                 productionRunId = productionRunId.ToString("D"),
-                productionUnitId = productionUnitId.ToString("D"),
-                actorId
+                productionUnitId = productionUnitId.ToString("D")
             });
         using var startBody = await ReadJsonAsync(startResponse);
 
@@ -1013,7 +1035,9 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.Equal(applicationId, startBody.RootElement.GetProperty("applicationId").GetString());
         Assert.Equal(topologyId, startBody.RootElement.GetProperty("topologyId").GetString());
         Assert.Equal(productionRunId, startBody.RootElement.GetProperty("productionRunId").GetGuid());
-        Assert.Equal(actorId, startBody.RootElement.GetProperty("actorId").GetString());
+        Assert.Equal(
+            ApiTestAuthentication.StandardActorId,
+            startBody.RootElement.GetProperty("actorId").GetString());
         Assert.Equal(identityValue, startBody.RootElement
             .GetProperty("productionUnitIdentity")
             .GetProperty("value")
@@ -1077,7 +1101,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.Equal(recipeId, recipe.RootElement.GetProperty("recipeId").GetString());
         Assert.Equal(recipeVersionId, recipe.RootElement.GetProperty("versionId").GetString());
         Assert.Equal($"{applicationName} Recipe", recipe.RootElement.GetProperty("displayName").GetString());
-        Assert.Equal("Published", recipe.RootElement.GetProperty("status").GetString());
+        Assert.Equal("Released", recipe.RootElement.GetProperty("status").GetString());
         Assert.NotEqual(default, recipe.RootElement.GetProperty("createdAtUtc").GetDateTimeOffset());
         Assert.NotEqual(default, recipe.RootElement.GetProperty("publishedAtUtc").GetDateTimeOffset());
         var parameter = Assert.Single(recipe.RootElement.GetProperty("parameters").EnumerateArray());
@@ -1185,17 +1209,33 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         {
             base.ConfigureWebHost(builder);
             var repositoryRoot = FindRepositoryRoot();
-            var workerProjectPath = Path.Combine(
+            var workerProjectDirectory = Path.Combine(
                 repositoryRoot,
                 "src",
-                "OpenLineOps.ScriptWorker",
-                "OpenLineOps.ScriptWorker.csproj");
+                "OpenLineOps.ScriptWorker");
+            var testFrameworkDirectory = new DirectoryInfo(AppContext.BaseDirectory);
+            var buildConfiguration = testFrameworkDirectory.Parent?.Name
+                ?? throw new InvalidOperationException(
+                    "Could not resolve the test build configuration from the output directory.");
+            var workerAssemblyPath = Path.Combine(
+                workerProjectDirectory,
+                "bin",
+                buildConfiguration,
+                testFrameworkDirectory.Name,
+                "OpenLineOps.ScriptWorker.dll");
+            if (!File.Exists(workerAssemblyPath))
+            {
+                throw new FileNotFoundException(
+                    "The ScriptWorker must be built in the same configuration as the API tests.",
+                    workerAssemblyPath);
+            }
+
             builder.UseSetting(
                 "OpenLineOps:Runtime:Scripting:Python:WorkerFileName",
                 "dotnet");
             builder.UseSetting(
                 "OpenLineOps:Runtime:Scripting:Python:WorkerArguments",
-                $"run --project \"{workerProjectPath}\" --no-launch-profile --no-build");
+                $"\"{workerAssemblyPath}\"");
             builder.UseSetting(
                 "OpenLineOps:Runtime:Scripting:Python:WorkerWorkingDirectory",
                 repositoryRoot);

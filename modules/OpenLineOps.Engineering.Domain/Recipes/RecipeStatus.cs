@@ -3,6 +3,9 @@ namespace OpenLineOps.Engineering.Domain.Recipes;
 public enum RecipeStatus
 {
     Draft = 0,
-    Published = 1,
-    Retired = 2
+    Validated = 1,
+    Approved = 2,
+    Released = 3,
+    Published = Released,
+    Retired = 4
 }

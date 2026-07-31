@@ -516,16 +516,42 @@ public sealed class FileSystemProjectEngineeringConfigurationRepository :
             throw InvalidResource(path, "recipe parameters collection is empty");
         }
 
-        if (string.Equals(snapshot.Status, "Published", StringComparison.Ordinal))
+        var isReleased = string.Equals(snapshot.Status, "Released", StringComparison.Ordinal)
+            || string.Equals(snapshot.Status, "Published", StringComparison.Ordinal);
+        if (isReleased)
         {
-            if (snapshot.PublishedAtUtc is null)
+            if (snapshot.ReleasedAtUtc is null && snapshot.PublishedAtUtc is null)
             {
-                throw InvalidResource(path, "published recipe has no publication timestamp");
+                throw InvalidResource(path, "released recipe has no release timestamp");
             }
         }
-        else if (!string.Equals(snapshot.Status, "Draft", StringComparison.Ordinal))
+        else if (!string.Equals(snapshot.Status, "Draft", StringComparison.Ordinal)
+            && !string.Equals(snapshot.Status, "Validated", StringComparison.Ordinal)
+            && !string.Equals(snapshot.Status, "Approved", StringComparison.Ordinal)
+            && !string.Equals(snapshot.Status, "Retired", StringComparison.Ordinal))
         {
             throw InvalidResource(path, $"recipe status '{snapshot.Status}' is not supported");
+        }
+
+        if (!string.Equals(snapshot.Status, "Draft", StringComparison.Ordinal)
+            && snapshot.ValidatedAtUtc is null
+            && !string.Equals(snapshot.Status, "Published", StringComparison.Ordinal))
+        {
+            throw InvalidResource(path, $"{snapshot.Status} recipe has no validation timestamp");
+        }
+
+        if ((string.Equals(snapshot.Status, "Approved", StringComparison.Ordinal)
+                || string.Equals(snapshot.Status, "Released", StringComparison.Ordinal)
+                || string.Equals(snapshot.Status, "Retired", StringComparison.Ordinal))
+            && (snapshot.ApprovedAtUtc is null || string.IsNullOrWhiteSpace(snapshot.ApprovedBy)))
+        {
+            throw InvalidResource(path, $"{snapshot.Status} recipe has no approval evidence");
+        }
+
+        if (string.Equals(snapshot.Status, "Retired", StringComparison.Ordinal)
+            && snapshot.RetiredAtUtc is null)
+        {
+            throw InvalidResource(path, "retired recipe has no retirement timestamp");
         }
 
         var keys = new HashSet<string>(StringComparer.Ordinal);
@@ -537,7 +563,23 @@ public sealed class FileSystemProjectEngineeringConfigurationRepository :
             }
 
             Require(path, parameter.Key, "recipe parameter key");
-            Require(path, parameter.Value, "recipe parameter value");
+            Require(path, parameter.Type, "recipe parameter type");
+            if (parameter.Required)
+            {
+                Require(path, parameter.Value, "recipe parameter value");
+            }
+
+            if (!Enum.TryParse<RecipeParameterType>(
+                parameter.Type,
+                ignoreCase: false,
+                out var parameterType)
+                || !Enum.IsDefined(parameterType))
+            {
+                throw InvalidResource(
+                    path,
+                    $"recipe parameter '{parameter.Key}' has unsupported type '{parameter.Type}'");
+            }
+
             if (!keys.Add(parameter.Key))
             {
                 throw InvalidResource(path, $"recipe parameter key '{parameter.Key}' is duplicated");

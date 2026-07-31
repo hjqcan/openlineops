@@ -51,9 +51,11 @@ public static class AutomationProjectFileConvention
 
         ValidateCanonicalRelativePath(relativePath);
 
-        var root = Path.GetFullPath(projectRootPath.Trim())
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var rootPrefix = root + Path.DirectorySeparatorChar;
+        var root = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(projectRootPath.Trim()));
+        var rootPrefix = Path.EndsInDirectorySeparator(root)
+            ? root
+            : root + Path.DirectorySeparatorChar;
         var fullPath = Path.GetFullPath(Path.Combine(
             root,
             relativePath.Replace('/', Path.DirectorySeparatorChar)));
@@ -76,7 +78,7 @@ public static class AutomationProjectFileConvention
         var segments = projectFilePath.Split('/');
         if (segments.Length != 3
             || !string.Equals(segments[0], ApplicationsDirectoryName, StringComparison.Ordinal)
-            || !segments[2].EndsWith(ApplicationProjectFileExtension, StringComparison.OrdinalIgnoreCase))
+            || !segments[2].EndsWith(ApplicationProjectFileExtension, StringComparison.Ordinal))
         {
             throw new InvalidDataException(
                 $"Application project path '{projectFilePath}' must be applications/<folder>/<name>{ApplicationProjectFileExtension}.");

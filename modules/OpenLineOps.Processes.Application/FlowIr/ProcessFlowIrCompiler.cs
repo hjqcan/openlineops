@@ -5,6 +5,7 @@ using OpenLineOps.Processes.Domain.Definitions;
 using OpenLineOps.Processes.Domain.Nodes;
 using OpenLineOps.Processes.Domain.Transitions;
 using OpenLineOps.Processes.Domain.Validation;
+using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Application.Scripting;
 
 namespace OpenLineOps.Processes.Application.FlowIr;
@@ -128,7 +129,16 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             node.Id.Value,
             FlowIrNodeKind.Blockly,
             node.DisplayName,
-            workspace.Actions,
+            workspace.Actions
+                .Select(action => action with
+                {
+                    OperationalPolicy = CreateOperationalPolicy(
+                        action.Kind,
+                        action.RequiredCapability,
+                        action.CommandName,
+                        action.Target)
+                })
+                .ToImmutableArray(),
             new FlowIrSourceTrace(
                 definition.Id.Value,
                 definition.VersionId.Value,
@@ -162,6 +172,9 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
         FlowIrSourceTrace source)
     {
         var capability = node.RequiredCapability!.Value;
+        var target = new FlowIrTargetReference(
+            ToFlowIrTargetKind(node.TargetKind!.Value),
+            node.TargetId!);
 
         return new FlowIrAction(
             CreateActionId(node),
@@ -169,28 +182,32 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             node.DisplayName,
             capability,
             node.CommandName!,
-            new FlowIrTargetReference(
-                ToFlowIrTargetKind(node.TargetKind!.Value),
-                node.TargetId!),
+            target,
             node.InputPayload,
             CreateExecutionPolicy(node.CommandTimeout!.Value),
             PythonScript: null,
-            source);
+            source,
+            CreateOperationalPolicy(
+                FlowIrActionKind.DeviceCommand,
+                capability,
+                node.CommandName!,
+                target));
     }
 
     private static FlowIrAction ToPythonScriptAction(
         ProcessNode node,
         FlowIrSourceTrace source)
     {
+        var target = new FlowIrTargetReference(
+            FlowIrTargetReferenceKind.Capability,
+            RuntimeScriptCommand.PythonCapability);
         return new FlowIrAction(
             CreateActionId(node),
             FlowIrActionKind.PythonScript,
             node.DisplayName,
             RuntimeScriptCommand.PythonCapability,
             RuntimeScriptCommand.PythonCommandName,
-            new FlowIrTargetReference(
-                FlowIrTargetReferenceKind.Capability,
-                RuntimeScriptCommand.PythonCapability),
+            target,
             node.InputPayload,
             CreateExecutionPolicy(node.ScriptTimeout!.Value),
             new FlowIrPythonScript(
@@ -198,7 +215,12 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
                 node.ScriptSourceCode!,
                 node.ScriptSourceHash!,
                 node.ScriptVersion!),
-            source);
+            source,
+            CreateOperationalPolicy(
+                FlowIrActionKind.PythonScript,
+                RuntimeScriptCommand.PythonCapability,
+                RuntimeScriptCommand.PythonCommandName,
+                target));
     }
 
     private static FlowIrExecutionPolicy CreateExecutionPolicy(TimeSpan timeout)
@@ -207,6 +229,48 @@ public sealed class ProcessFlowIrCompiler : IProcessFlowIrCompiler
             checked(timeout.Ticks / TimeSpan.TicksPerMillisecond),
             RetryLimit: 0,
             FlowIrCancellationMode.Cooperative);
+    }
+
+    private static FlowIrOperationalPolicy CreateOperationalPolicy(
+        FlowIrActionKind actionKind,
+        string capability,
+        string commandName,
+        FlowIrTargetReference target)
+    {
+        var isInternalIdempotentAction =
+            string.Equals(capability, RuntimeFlowCommand.Capability, StringComparison.Ordinal)
+            && (string.Equals(
+                    commandName,
+                    RuntimeFlowCommand.WaitCommandName,
+                    StringComparison.Ordinal)
+                || string.Equals(
+                    commandName,
+                    RuntimeFlowCommand.ResultPatchCommandName,
+                    StringComparison.Ordinal));
+        var idempotencyClass = isInternalIdempotentAction
+            ? FlowIrIdempotencyClass.Idempotent
+            : actionKind == FlowIrActionKind.PythonScript
+                ? FlowIrIdempotencyClass.Conditional
+                : FlowIrIdempotencyClass.NonIdempotent;
+        var recoveryPolicy = idempotencyClass == FlowIrIdempotencyClass.Idempotent
+            ? FlowIrRecoveryPolicy.AutomaticReplay
+            : FlowIrRecoveryPolicy.ManualAuthorization;
+        var resourceLocks = isInternalIdempotentAction
+            ? ImmutableArray<FlowIrResourceLock>.Empty
+            :
+            [
+                new FlowIrResourceLock(
+                    $"{target.Kind}:{target.Reference}",
+                    FlowIrResourceLockMode.Exclusive)
+            ];
+
+        return new FlowIrOperationalPolicy(
+            idempotencyClass,
+            recoveryPolicy,
+            FlowIrFailurePolicy.Terminate,
+            resourceLocks,
+            [new FlowIrEvidenceRequirement("execution-outcome", MinimumCount: 1)],
+            Enum.GetValues<FlowIrStationMode>().ToImmutableArray());
     }
 
     private static ApplicationError? ValidateTimeouts(ProcessDefinition definition)

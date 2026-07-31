@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../shared/OpenLineOps.Api.Abstractions/OpenLineOps.Api.Abstractions.csproj" />
+    <ProjectReference Include="../../shared/OpenLineOps.Application.Abstractions/OpenLineOps.Application.Abstractions.csproj" />
+    <ProjectReference Include="../OpenLineOps.Maintenance.Application/OpenLineOps.Maintenance.Application.csproj" />
+    <ProjectReference Include="../OpenLineOps.Maintenance.Domain/OpenLineOps.Maintenance.Domain.csproj" />
+    <ProjectReference Include="../OpenLineOps.Maintenance.Infrastructure/OpenLineOps.Maintenance.Infrastructure.csproj" />
+    <ProjectReference Include="../OpenLineOps.Runtime.Application/OpenLineOps.Runtime.Application.csproj" />
+  </ItemGroup>
+
+</Project>

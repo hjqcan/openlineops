@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using OpenLineOps.ProcessIsolation;
+using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.StationRuntime.TestHelper;
 
@@ -28,19 +29,18 @@ internal static class Program
 
         var options = ParseOptions(args.AsSpan(1));
         using var request = JsonDocument.Parse(await File.ReadAllTextAsync(options["request-file"]));
-        var inputs = request.RootElement.GetProperty("inputs");
-        var mode = inputs.GetProperty("mode").GetString();
+        var inputs = ProductionContextDocument.Read(
+            request.RootElement.GetProperty("inputs"));
+        var mode = inputs["mode"].CanonicalValue;
         if (!string.Equals(mode, "spawn-child", StringComparison.Ordinal))
         {
             return 65;
         }
 
-        var pidFile = inputs.GetProperty("pidFile").GetString()
-            ?? throw new InvalidDataException("pidFile is required.");
-        if (inputs.TryGetProperty("runtimePidFile", out var runtimePidFileElement))
+        var pidFile = inputs["pidFile"].CanonicalValue;
+        if (inputs.TryGetValue("runtimePidFile", out var runtimePidFileValue))
         {
-            var runtimePidFile = runtimePidFileElement.GetString()
-                                 ?? throw new InvalidDataException("runtimePidFile must be a string.");
+            var runtimePidFile = runtimePidFileValue.CanonicalValue;
             await File.WriteAllTextAsync(
                 runtimePidFile,
                 Environment.ProcessId.ToString(CultureInfo.InvariantCulture));

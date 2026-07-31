@@ -1,4 +1,7 @@
+using System.Net;
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenLineOps.Agent.Application.StationJobs;
@@ -13,6 +16,11 @@ namespace OpenLineOps.Agent.Tests;
 
 public sealed class StationArtifactTransferTests : IDisposable
 {
+    private static readonly string AgentToken = Convert.ToBase64String(
+            SHA256.HashData("station-artifact-test-token"u8))
+        .TrimEnd('=')
+        .Replace('+', '-')
+        .Replace('/', '_');
     private static readonly DateTimeOffset Now =
         new(2026, 7, 11, 12, 0, 0, TimeSpan.Zero);
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -29,7 +37,6 @@ public sealed class StationArtifactTransferTests : IDisposable
     public async Task OfflineCompletionUploadsIdempotentlyAndCleansOnlyAfterBrokerAcknowledgement()
     {
         var localRoot = Path.Combine(_root, "local");
-        var exchangeRoot = Path.Combine(_root, "exchange");
         var jobId = new StationJobId(Guid.NewGuid());
         var artifactContent = "{\"outcome\":\"Passed\"}"u8.ToArray();
         var sha256 = Convert.ToHexStringLower(SHA256.HashData(artifactContent));
@@ -52,8 +59,16 @@ public sealed class StationArtifactTransferTests : IDisposable
         var store = new InMemoryStationJobStore();
         Assert.True(await store.TryAddAsync(CreateAcceptedJob(jobId), Guid.NewGuid(), [outbox]));
         var publisher = new FailOncePublisher();
-        var transfer = new FailOnceReleaseTransfer(new FileSystemStationArtifactTransfer(
-            new FileSystemStationArtifactTransferOptions(localRoot, exchangeRoot)));
+        var uploadHandler = new ReceiptUploadHandler(AgentToken);
+        var transfer = new FailOnceReleaseTransfer(new HttpStationArtifactTransfer(
+            new HttpStationArtifactTransferOptions(
+                localRoot,
+                new Uri("http://127.0.0.1:51981/"),
+                AgentToken,
+                "agent-a",
+                "station-a",
+                TimeSpan.FromSeconds(10)),
+            new HttpClient(uploadHandler)));
         var clock = new MutableClock(Now);
         var dispatcher = new StationJobOutboxDispatcher(store, publisher, transfer, clock);
 
@@ -61,7 +76,7 @@ public sealed class StationArtifactTransferTests : IDisposable
         Assert.True(File.Exists(localPath));
         var retry = Assert.Single(await store.ListPendingOutboxAsync(10, Now.AddSeconds(1)));
         Assert.Equal(1, retry.AttemptCount);
-        Assert.Single(Directory.EnumerateFiles(exchangeRoot, sha256, SearchOption.AllDirectories));
+        Assert.Equal(1, uploadHandler.UploadCount);
 
         clock.UtcNow = Now.AddSeconds(1);
         Assert.Equal(1, await dispatcher.DispatchAsync(10));
@@ -72,8 +87,19 @@ public sealed class StationArtifactTransferTests : IDisposable
             JsonOptions);
         Assert.NotNull(published);
         var publishedArtifact = Assert.Single(published.Artifacts);
-        Assert.Equal($"sha256/{sha256[..2]}/{sha256}", publishedArtifact.StorageKey);
+        var expectedReceipt = StationArtifactReceiptIdentity.Create(
+            "agent-a",
+            "station-a",
+            jobId.Value,
+            pendingArtifact.Name,
+            pendingArtifact.Kind,
+            pendingArtifact.MediaType,
+            pendingArtifact.SizeBytes,
+            pendingArtifact.Sha256);
+        Assert.Equal(expectedReceipt.StorageKey, publishedArtifact.StorageKey);
+        Assert.Equal(expectedReceipt.ReceiptId, publishedArtifact.ReceiptId);
         Assert.Equal(sha256, publishedArtifact.Sha256);
+        Assert.Equal(2, uploadHandler.UploadCount);
 
         Assert.Equal(0, await dispatcher.DispatchAsync(10));
         Assert.False(File.Exists(localPath));
@@ -86,14 +112,21 @@ public sealed class StationArtifactTransferTests : IDisposable
     public async Task TransferRejectsTamperedLocalArtifactBeforeExchangePublication()
     {
         var localRoot = Path.Combine(_root, "tampered-local");
-        var exchangeRoot = Path.Combine(_root, "tampered-exchange");
         var jobId = new StationJobId(Guid.NewGuid());
         var localKey = $"{jobId.Value:N}/result.csv";
         var path = Path.Combine(localRoot, localKey.Replace('/', Path.DirectorySeparatorChar));
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllTextAsync(path, "tampered");
-        var transfer = new FileSystemStationArtifactTransfer(
-            new FileSystemStationArtifactTransferOptions(localRoot, exchangeRoot));
+        var uploadHandler = new ReceiptUploadHandler(AgentToken);
+        var transfer = new HttpStationArtifactTransfer(
+            new HttpStationArtifactTransferOptions(
+                localRoot,
+                new Uri("http://127.0.0.1:51982/"),
+                AgentToken,
+                "agent-a",
+                "station-a",
+                TimeSpan.FromSeconds(10)),
+            new HttpClient(uploadHandler));
         var artifact = new PendingStationJobArtifact(
             "result.csv",
             "VendorReport",
@@ -105,7 +138,46 @@ public sealed class StationArtifactTransferTests : IDisposable
         await Assert.ThrowsAsync<InvalidDataException>(async () =>
             await transfer.PublishAsync(jobId, artifact));
 
-        Assert.Empty(Directory.EnumerateFiles(exchangeRoot, "*", SearchOption.AllDirectories));
+        Assert.Equal(0, uploadHandler.UploadCount);
+    }
+
+    [Fact]
+    public void TransferOptionsDiagnosticTextRedactsBearerToken()
+    {
+        var options = new HttpStationArtifactTransferOptions(
+            Path.Combine(_root, "diagnostic"),
+            new Uri("https://coordinator.test/"),
+            AgentToken,
+            "agent-a",
+            "station-a",
+            TimeSpan.FromSeconds(30));
+
+        var diagnosticText = options.ToString();
+
+        Assert.DoesNotContain(AgentToken, diagnosticText, StringComparison.Ordinal);
+        Assert.Contains("[REDACTED]", diagnosticText, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("agent a", "station-a")]
+    [InlineData("代理", "station-a")]
+    [InlineData("agent-a", "station a")]
+    [InlineData("agent-a", "工站")]
+    [InlineData("agent/a", "station-a")]
+    [InlineData("agent-a", "station/a")]
+    public void ReceiptIdentityRejectsValuesApiCredentialsCannotRepresent(
+        string agentId,
+        string stationId)
+    {
+        Assert.Throws<ArgumentException>(() => StationArtifactReceiptIdentity.Create(
+            agentId,
+            stationId,
+            Guid.NewGuid(),
+            "artifact.bin",
+            "VendorReport",
+            null,
+            0,
+            new string('a', 64)));
     }
 
     public void Dispose()
@@ -257,5 +329,67 @@ public sealed class StationArtifactTransferTests : IDisposable
     private sealed class MutableClock(DateTimeOffset utcNow) : IClock
     {
         public DateTimeOffset UtcNow { get; set; } = utcNow;
+    }
+
+    private sealed class ReceiptUploadHandler(string expectedToken) : HttpMessageHandler
+    {
+        public int UploadCount { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal(HttpMethod.Post, request.Method);
+            Assert.Equal("/api/traceability/artifacts", request.RequestUri!.AbsolutePath);
+            Assert.Equal(
+                new AuthenticationHeaderValue("Bearer", expectedToken),
+                request.Headers.Authorization);
+            Assert.Equal("application/octet-stream", request.Content!.Headers.ContentType!.MediaType);
+            var content = await request.Content.ReadAsByteArrayAsync(cancellationToken);
+            var agentId = RequiredHeader(request, StationArtifactUploadProtocol.AgentIdHeader);
+            var stationId = RequiredHeader(request, StationArtifactUploadProtocol.StationIdHeader);
+            var jobId = Guid.ParseExact(
+                RequiredHeader(request, StationArtifactUploadProtocol.JobIdHeader),
+                "D");
+            var name = StationArtifactUploadProtocol.DecodeArtifactName(
+                RequiredHeader(request, StationArtifactUploadProtocol.ArtifactNameHeader));
+            var declaredSize = long.Parse(
+                RequiredHeader(request, StationArtifactUploadProtocol.ArtifactSizeHeader),
+                System.Globalization.CultureInfo.InvariantCulture);
+            var declaredSha256 = RequiredHeader(
+                request,
+                StationArtifactUploadProtocol.ArtifactSha256Header);
+            var kind = StationArtifactUploadProtocol.DecodeArtifactKind(
+                RequiredHeader(request, StationArtifactUploadProtocol.ArtifactKindHeader));
+            var mediaType = request.Headers.TryGetValues(
+                    StationArtifactUploadProtocol.ArtifactMediaTypeHeader,
+                    out var mediaValues)
+                ? StationArtifactUploadProtocol.DecodeMediaType(Assert.Single(mediaValues))
+                : null;
+            Assert.Equal(declaredSize, content.LongLength);
+            Assert.Equal(
+                declaredSha256,
+                Convert.ToHexStringLower(SHA256.HashData(content)));
+            var receipt = StationArtifactReceiptIdentity.Create(
+                agentId,
+                stationId,
+                jobId,
+                name,
+                kind,
+                mediaType,
+                declaredSize,
+                declaredSha256);
+            UploadCount++;
+            return new HttpResponseMessage(HttpStatusCode.Created)
+            {
+                Content = new StringContent(
+                    JsonSerializer.Serialize(receipt, JsonOptions),
+                    Encoding.UTF8,
+                    "application/json")
+            };
+        }
+
+        private static string RequiredHeader(HttpRequestMessage request, string name) =>
+            Assert.Single(request.Headers.GetValues(name));
     }
 }

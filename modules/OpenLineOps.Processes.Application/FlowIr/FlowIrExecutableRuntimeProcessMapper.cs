@@ -150,7 +150,35 @@ public sealed class FlowIrExecutableRuntimeProcessMapper : IFlowIrExecutableRunt
             new RuntimeActionId(action.ActionId),
             new RuntimeTargetReference(
                 action.Target.Kind.ToString(),
-                action.Target.Reference));
+                action.Target.Reference))
+        {
+            OperationalPolicy = ToRuntimeOperationalPolicy(action.OperationalPolicy),
+            RetryLimit = action.Execution.RetryLimit
+        };
+    }
+
+    private static ExecutableRuntimeActionPolicy? ToRuntimeOperationalPolicy(
+        FlowIrOperationalPolicy? policy)
+    {
+        return policy is null
+            ? null
+            : new ExecutableRuntimeActionPolicy(
+                (RuntimeActionIdempotencyClass)policy.IdempotencyClass,
+                (RuntimeActionRecoveryPolicy)policy.RecoveryPolicy,
+                (RuntimeActionFailurePolicy)policy.FailurePolicy,
+                policy.ResourceLocks
+                    .Select(resource => new RuntimeActionResourceLock(
+                        resource.ResourceId,
+                        (RuntimeActionResourceLockMode)resource.Mode))
+                    .ToArray(),
+                policy.EvidenceRequirements
+                    .Select(evidence => new RuntimeActionEvidenceRequirement(
+                        evidence.EvidenceKind,
+                        evidence.MinimumCount))
+                    .ToArray(),
+                policy.AllowedStationModes
+                    .Select(mode => (RuntimeActionStationMode)mode)
+                    .ToArray());
     }
 
     private static IEnumerable<ExecutableRuntimeTransition> CreateBlocklyInternalTransitions(

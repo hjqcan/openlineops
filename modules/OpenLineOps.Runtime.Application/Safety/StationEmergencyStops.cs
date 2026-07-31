@@ -144,10 +144,9 @@ public sealed class StationEmergencyStopProductionRunLinker(
     {
         ArgumentNullException.ThrowIfNull(scope);
         var active = await repository.ListActiveAsync(
-                productionLineDefinitionId: null,
-                stationSystemId: scope.StationSystemId,
-                slotId: null,
-                cancellationToken: cancellationToken)
+                new ProductionRunActiveQuery(
+                    stationSystemId: scope.StationSystemId),
+                cancellationToken)
             .ConfigureAwait(false);
         return active
             .Where(entry => string.Equals(

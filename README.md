@@ -65,7 +65,11 @@ This project is in early platform development.
   fencing leases, persists typed operation output, and supports multiple units
   moving through different Stations concurrently. `ProductionUnit`,
   `ProductionLot`, `Carrier`, material genealogy, location, and Slot occupancy
-  are formal Runtime aggregates.
+  are formal Runtime aggregates. Trace records are read/export-only projections
+  of persisted terminal Production Run evidence; callers cannot submit raw Trace
+  documents. A separate read-only Product Material Lifecycle projection rebuilds
+  the complete persisted timeline through the latest unload, transfer, Carrier,
+  Slot, genealogy, or disposition event without mutating the immutable Run Trace.
 - Headless execution: `OpenLineOps.Runner` submits and waits for one asynchronous
   `ProductionRun` against an existing immutable Project Snapshot without opening
   Studio. The Windows Agent has durable SQLite inbox/outbox/checkpoints, signed
@@ -77,9 +81,11 @@ This project is in early platform development.
   [Windows Station Agent Deployment](docs/station-agent-deployment.md).
 - Open source packaging: source, API, self-contained `win-x64` Agent plus Station
   Runtime, self-contained headless Runner, desktop, plugin-host, script-worker,
-  and sample-plugin artifacts; complete inner and outer SHA-256 inventories;
+  sample-plugin, and industrial device-sessions-plugin artifacts; complete
+  inner and outer SHA-256 inventories;
   release provenance and dependency metadata; shared Windows signing and strict
-  executable inspection; publication evidence; and CI artifact upload.
+  executable inspection; same-run, commit-bound PostgreSQL/RabbitMQ TRX
+  publication evidence; and CI artifact upload.
 
 ## Repository Map
 
@@ -124,6 +130,11 @@ Run the local API:
 ```powershell
 dotnet run --project src/OpenLineOps.Api/OpenLineOps.Api.csproj --urls http://localhost:5135
 ```
+
+The API deliberately has no default credential and will fail closed until
+`OpenLineOps:Security:Callers` is provisioned. See
+[`docs/coordinator-api-security.md`](docs/coordinator-api-security.md); packaged
+Studio provisions its local credentials automatically.
 
 An independently launched API intentionally has no signing-key fallback. Before
 publishing a Project Snapshot, configure all four
@@ -214,6 +225,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-no-technical-debt
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-open-source-metadata.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-third-party-license-metadata.ps1
 dotnet build samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj
+dotnet build samples/plugins/OpenLineOps.SamplePlugins.QualityGate/OpenLineOps.SamplePlugins.QualityGate.csproj
 ```
 
 After dependency changes, regenerate the third-party notice before running the
@@ -234,7 +246,7 @@ npm run package:win:ci
 Set-Location ..\..
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-release-artifact-gate.ps1 -Configuration Debug -Version 0.0.0-local
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/stage-release-artifacts.ps1 -Configuration Release -Version 0.0.0-local -NoRestore -SkipDesktopBuild
-dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
+dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin --require-kind device-sessions-plugin
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/inspect-release-candidate.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-release-candidate-inspection.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-windows-signing-readiness.ps1
@@ -259,7 +271,14 @@ npm audit --audit-level=high --registry=https://registry.npmjs.org
 - Infrastructure projects implement persistence, plugin loading, external processes, storage, and vendor integration.
 - API projects expose HTTP and SignalR contracts and should not contain domain decisions.
 - Electron never reads backend databases directly. It talks to the backend through HTTP, SignalR, and explicit preload APIs.
-- Plugins must declare manifests and capabilities and must pass compatibility validation before activation.
+- Plugins must declare manifests and capabilities. Studio imports each package into
+  the owning Application's `plugins/<portable-id>/` directory and atomically records
+  its id, version, manifest path, and full-tree SHA-256 in `.oloapp`; there is no
+  global plugin directory or implicit discovery. Missing or tampered packages fail
+  validation and publication.
+- Third-party plugin code executes through the separately deployed
+  `OpenLineOps.PluginHost`, never inside the API process. Headless API and Agent
+  packages must ship that host or configure its exact path.
 - Python scripting uses the in-repository `lib/pythonscript` component only for explicit `PythonScript` nodes. Blockly is a separate primary node kind and compiles declarative Runtime Action Contracts directly to static Flow IR. Custom and plugin-generated blocks cannot execute Python templates. Publication freezes exact block-contract and provider-package content hashes, and runtime resolves only those release artifacts.
 
 ## Documentation
@@ -275,6 +294,8 @@ npm audit --audit-level=high --registry=https://registry.npmjs.org
 - Devices persistence: `docs/devices-persistence.md`
 - EventBus transaction coordination: `docs/eventbus-transaction-coordination.md`
 - Operations PostgreSQL deployment: `docs/operations-postgresql-deployment.md`
+- Coordinator production deployment: `docs/coordinator-deployment.md`
+- Windows Station Agent deployment: `docs/station-agent-deployment.md`
 - Python scripting integration: `docs/python-scripting-integration.md`
 - Release packaging: `docs/release-packaging.md`
 - Third-party notices: `THIRD-PARTY-NOTICES.md`

@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
@@ -19,22 +21,22 @@ using OpenLineOps.Topology.Domain.Topology;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplicationFactory<Program>>, IDisposable
+public sealed class ProductionLineDefinitionsApiTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>, IDisposable
 {
     private static readonly DateTimeOffset CreatedAtUtc =
         new(2026, 7, 10, 9, 0, 0, TimeSpan.Zero);
 
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly OpenLineOpsApiWebApplicationFactory _factory;
     private readonly HttpClient _client;
     private readonly string _projectRoot = Path.Combine(
         Path.GetTempPath(),
         "openlineops-production-api-tests",
         Guid.NewGuid().ToString("N"));
 
-    public ProductionLineDefinitionsApiTests(WebApplicationFactory<Program> factory)
+    public ProductionLineDefinitionsApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
         _factory = factory;
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        _client = factory.CreateAuthenticatedClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
         });
@@ -69,6 +71,7 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
                     stationSystemId = "station.eol",
                     flowDefinitionId = "flow.load",
                     configurationSnapshotId = "configuration.load",
+                    inputMappings = Array.Empty<object>(),
                     resources = StationResources("load")
                 },
                 new
@@ -78,6 +81,7 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
                     stationSystemId = "station.eol",
                     flowDefinitionId = "flow.test",
                     configurationSnapshotId = "configuration.test",
+                    inputMappings = Array.Empty<object>(),
                     resources = StationResources("test")
                 }
             },
@@ -87,7 +91,22 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
                 {
                     transitionId = "load-test",
                     sourceOperationId = "operation.load",
-                    targetOperationId = "operation.test",
+                    targetOperationId = (string?)"operation.test",
+                    terminalDisposition = (string?)null,
+                    kind = "Sequence",
+                    requiredJudgement = (string?)null,
+                    maxTraversals = (int?)null,
+                    parallelGroupId = (string?)null,
+                    outputKey = (string?)null,
+                    expectedOutputKind = (string?)null,
+                    expectedOutputValue = (string?)null
+                },
+                new
+                {
+                    transitionId = "test-completed",
+                    sourceOperationId = "operation.test",
+                    targetOperationId = (string?)null,
+                    terminalDisposition = (string?)"Completed",
                     kind = "Sequence",
                     requiredJudgement = (string?)null,
                     maxTraversals = (int?)null,
@@ -97,7 +116,15 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
                     expectedOutputValue = (string?)null
                 }
             },
-            lineControllerAuthorizations = Array.Empty<object>()
+            lineControllerAuthorizations = Array.Empty<object>(),
+            routeLayout = new
+            {
+                operationPositions = new[]
+                {
+                    new { operationId = "operation.load", x = 120, y = 80 },
+                    new { operationId = "operation.test", x = 400, y = 80 }
+                }
+            }
         };
 
         using var createResponse = await _client.PostAsJsonAsync(route, request);
@@ -113,6 +140,10 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
         Assert.Equal(
             "operation.test",
             created.RootElement.GetProperty("transitions")[0].GetProperty("targetOperationId").GetString());
+        Assert.Equal(
+            400,
+            created.RootElement.GetProperty("routeLayout").GetProperty("operationPositions")[1]
+                .GetProperty("x").GetInt32());
         using var getResponse = await _client.GetAsync($"{route}/line.main");
         Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
         using var restored = JsonDocument.Parse(await getResponse.Content.ReadAsStringAsync());
@@ -121,6 +152,91 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
         Assert.Equal(
             "configuration.test",
             restored.RootElement.GetProperty("operations")[1].GetProperty("configurationSnapshotId").GetString());
+    }
+
+    [Fact]
+    public async Task RouteLayoutUsesTheSameRevisionAndRejectsStaleWrites()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var projectId = $"project.production.layout-revision.{suffix}";
+        var applicationId = $"application.production.layout-revision.{suffix}";
+        await SeedApplicationAsync(projectId, applicationId);
+        var route = $"/api/automation-projects/{projectId}/applications/{applicationId}/production-lines";
+        var request = ValidLineRequestNode("line.layout-revision");
+
+        using var createResponse = await _client.PostAsync(route, JsonContent(request));
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+        var created = JsonNode.Parse(await createResponse.Content.ReadAsStringAsync())!.AsObject();
+        var originalRevision = created["revision"]!.GetValue<string>();
+        request["routeLayout"]!["operationPositions"]![0]!["x"] = 720;
+
+        using var replaceRequest = new HttpRequestMessage(
+            HttpMethod.Put,
+            $"{route}/line.layout-revision")
+        {
+            Content = JsonContent(request)
+        };
+        replaceRequest.Headers.TryAddWithoutValidation("If-Match", $"\"{originalRevision}\"");
+        using var replaceResponse = await _client.SendAsync(replaceRequest);
+        Assert.Equal(HttpStatusCode.OK, replaceResponse.StatusCode);
+        var replaced = JsonNode.Parse(await replaceResponse.Content.ReadAsStringAsync())!.AsObject();
+        var nextRevision = replaced["revision"]!.GetValue<string>();
+        Assert.NotEqual(originalRevision, nextRevision);
+        Assert.Equal(720, replaced["routeLayout"]!["operationPositions"]![0]!["x"]!.GetValue<int>());
+
+        request["routeLayout"]!["operationPositions"]![0]!["x"] = 900;
+        using var staleRequest = new HttpRequestMessage(
+            HttpMethod.Put,
+            $"{route}/line.layout-revision")
+        {
+            Content = JsonContent(request)
+        };
+        staleRequest.Headers.TryAddWithoutValidation("If-Match", $"\"{originalRevision}\"");
+        using var staleResponse = await _client.SendAsync(staleRequest);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, staleResponse.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("empty")]
+    [InlineData("extra")]
+    [InlineData("case-ambiguous")]
+    [InlineData("out-of-bounds")]
+    public async Task ApiRejectsStrictlyInvalidRouteLayouts(string mutation)
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var projectId = $"project.production.invalid-layout.{suffix}";
+        var applicationId = $"application.production.invalid-layout.{suffix}";
+        await SeedApplicationAsync(projectId, applicationId);
+        var route = $"/api/automation-projects/{projectId}/applications/{applicationId}/production-lines";
+        var request = ValidLineRequestNode($"line.invalid-layout-{mutation}");
+        var positions = request["routeLayout"]!["operationPositions"]!.AsArray();
+        switch (mutation)
+        {
+            case "missing":
+                request.Remove("routeLayout");
+                break;
+            case "empty":
+                positions.Clear();
+                break;
+            case "extra":
+                positions.Add(new JsonObject
+                {
+                    ["operationId"] = "operation.extra",
+                    ["x"] = 680,
+                    ["y"] = 80
+                });
+                break;
+            case "case-ambiguous":
+                positions[1]!["operationId"] = "OPERATION.LOAD";
+                break;
+            case "out-of-bounds":
+                positions[0]!["x"] = 100_001;
+                break;
+        }
+
+        using var response = await _client.PostAsync(route, JsonContent(request));
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Theory]
@@ -159,6 +275,7 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
                     stationSystemId = "station.eol",
                     flowDefinitionId = "flow.load",
                     configurationSnapshotId,
+                    inputMappings = Array.Empty<object>(),
                     resources = StationResources("invalid")
                 }
             },
@@ -169,6 +286,61 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    [Theory]
+    [InlineData("FixedPoint", "3.50")]
+    [InlineData("DateTimeUtc", "2026-07-15T12:34:56.1234567Z")]
+    public async Task ApiRejectsNonUniqueProductionContextConditionValues(
+        string expectedOutputKind,
+        string expectedOutputValue)
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var projectId = $"project.production.invalid-context-value.{suffix}";
+        var applicationId = $"application.production.invalid-context-value.{suffix}";
+        await SeedApplicationAsync(projectId, applicationId);
+        var route = $"/api/automation-projects/{projectId}/applications/{applicationId}/production-lines";
+        var request = ConditionalLineRequestNode(
+            "line.invalid-context-value",
+            expectedOutputKind,
+            expectedOutputValue);
+
+        using var response = await _client.PostAsync(route, JsonContent(request));
+        var responseBody = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("not canonical", responseBody, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("FixedPoint", "3.5")]
+    [InlineData("DateTimeUtc", "2026-07-15T12:34:56.1234567+00:00")]
+    public async Task ApiAcceptsUniqueCanonicalProductionContextConditionValues(
+        string expectedOutputKind,
+        string expectedOutputValue)
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var projectId = $"project.production.canonical-context-value.{suffix}";
+        var applicationId = $"application.production.canonical-context-value.{suffix}";
+        await SeedApplicationAsync(projectId, applicationId);
+        var route = $"/api/automation-projects/{projectId}/applications/{applicationId}/production-lines";
+        var request = ConditionalLineRequestNode(
+            "line.canonical-context-value",
+            expectedOutputKind,
+            expectedOutputValue);
+
+        using var response = await _client.PostAsync(route, JsonContent(request));
+        var responseBody = await response.Content.ReadAsStringAsync();
+
+        Assert.True(
+            response.StatusCode == HttpStatusCode.Created,
+            $"Production Line create returned {(int)response.StatusCode}: {responseBody}");
+        using var created = JsonDocument.Parse(responseBody);
+        var condition = created.RootElement.GetProperty("transitions")
+            .EnumerateArray()
+            .Single(transition => transition.GetProperty("kind").GetString() == "Condition");
+        Assert.Equal(expectedOutputKind, condition.GetProperty("expectedOutputKind").GetString());
+        Assert.Equal(expectedOutputValue, condition.GetProperty("expectedOutputValue").GetString());
+    }
+
     private static object[] StationResources(string suffix) =>
         [new
         {
@@ -177,6 +349,110 @@ public sealed class ProductionLineDefinitionsApiTests : IClassFixture<WebApplica
             topologyTargetId = "station.eol",
             resolution = "Fixed"
         }];
+
+    private static JsonObject ValidLineRequestNode(string lineDefinitionId) => new()
+    {
+        ["lineDefinitionId"] = lineDefinitionId,
+        ["displayName"] = "Layout Production Line",
+        ["topologyId"] = "topology.main",
+        ["productModel"] = new JsonObject
+        {
+            ["productModelId"] = "product.model-a",
+            ["modelCode"] = "MODEL-A",
+            ["identityInputKey"] = "serialNumber"
+        },
+        ["entryOperationId"] = "operation.load",
+        ["operations"] = new JsonArray
+        {
+            OperationNode("operation.load", "Load", "flow.load", "configuration.load", "load"),
+            OperationNode("operation.test", "Test", "flow.test", "configuration.test", "test")
+        },
+        ["transitions"] = new JsonArray
+        {
+            TransitionNode("load-test", "operation.load", "operation.test", null),
+            TransitionNode("test-completed", "operation.test", null, "Completed")
+        },
+        ["lineControllerAuthorizations"] = new JsonArray(),
+        ["routeLayout"] = new JsonObject
+        {
+            ["operationPositions"] = new JsonArray
+            {
+                new JsonObject { ["operationId"] = "operation.load", ["x"] = 120, ["y"] = 80 },
+                new JsonObject { ["operationId"] = "operation.test", ["x"] = 400, ["y"] = 80 }
+            }
+        }
+    };
+
+    private static JsonObject OperationNode(
+        string operationId,
+        string displayName,
+        string flowDefinitionId,
+        string configurationSnapshotId,
+        string resourceSuffix) => new()
+        {
+            ["operationId"] = operationId,
+            ["displayName"] = displayName,
+            ["stationSystemId"] = "station.eol",
+            ["flowDefinitionId"] = flowDefinitionId,
+            ["configurationSnapshotId"] = configurationSnapshotId,
+            ["inputMappings"] = new JsonArray(),
+            ["resources"] = new JsonArray
+        {
+            new JsonObject
+            {
+                ["bindingId"] = $"resource.station.{resourceSuffix}",
+                ["kind"] = "Station",
+                ["topologyTargetId"] = "station.eol",
+                ["resolution"] = "Fixed"
+            }
+        }
+        };
+
+    private static JsonObject ConditionalLineRequestNode(
+        string lineDefinitionId,
+        string expectedOutputKind,
+        string expectedOutputValue)
+    {
+        var request = ValidLineRequestNode(lineDefinitionId);
+        var transitions = request["transitions"]!.AsArray();
+        var condition = transitions[0]!.AsObject();
+        condition["kind"] = "Condition";
+        condition["outputKey"] = "inspection.value";
+        condition["expectedOutputKind"] = expectedOutputKind;
+        condition["expectedOutputValue"] = expectedOutputValue;
+        transitions.Insert(
+            1,
+            TransitionNode(
+                "load-test-fallback",
+                "operation.load",
+                "operation.test",
+                null));
+        return request;
+    }
+
+    private static JsonObject TransitionNode(
+        string transitionId,
+        string sourceOperationId,
+        string? targetOperationId,
+        string? terminalDisposition) => new()
+        {
+            ["transitionId"] = transitionId,
+            ["sourceOperationId"] = sourceOperationId,
+            ["targetOperationId"] = targetOperationId,
+            ["terminalDisposition"] = terminalDisposition,
+            ["kind"] = "Sequence",
+            ["requiredJudgement"] = null,
+            ["maxTraversals"] = null,
+            ["parallelGroupId"] = null,
+            ["outputKey"] = null,
+            ["expectedOutputKind"] = null,
+            ["expectedOutputValue"] = null
+        };
+
+    private static StringContent JsonContent(JsonObject content) => new(
+        content.ToJsonString(),
+        Encoding.UTF8,
+        "application/json");
 
     public void Dispose()
     {

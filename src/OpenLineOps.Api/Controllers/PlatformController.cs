@@ -9,6 +9,7 @@ namespace OpenLineOps.Api.Controllers;
 [ApiController]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Platform)]
 [Route(OpenLineOpsApiRoutes.Platform)]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 public sealed class PlatformController : ControllerBase
 {
     [HttpGet]

@@ -1,0 +1,26 @@
+{
+  "id": "openlineops.samples.quality-gate",
+  "name": "Quality Gate Sample",
+  "version": "1.0.0",
+  "kind": "ProcessNode",
+  "entryAssembly": "OpenLineOps.SamplePlugins.QualityGate.dll",
+  "entryType": "OpenLineOps.SamplePlugins.QualityGate.QualityGatePlugin",
+  "contractVersion": "1.0.0",
+  "minimumPlatformVersion": "1.0.0",
+  "runtimeIdentifier": "any",
+  "abiVersion": "openlineops.plugin-abi/1",
+  "capabilities": [
+    "production.quality-gate"
+  ],
+  "processCommands": [
+    {
+      "id": "quality-gate.evaluate",
+      "capability": "production.quality-gate",
+      "commandName": "Evaluate",
+      "inputSchema": "application/json",
+      "outputSchema": "application/json",
+      "timeoutMilliseconds": 5000,
+      "maxRetries": 0
+    }
+  ]
+}

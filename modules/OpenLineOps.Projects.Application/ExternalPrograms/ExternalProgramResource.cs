@@ -1,4 +1,6 @@
+using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
+using System.Text;
 using System.Text.Json;
 using OpenLineOps.Runtime.Contracts;
 
@@ -6,6 +8,9 @@ namespace OpenLineOps.Projects.Application.ExternalPrograms;
 
 public static class ExternalProgramResourceContract
 {
+    private static readonly SearchValues<char> InvalidPortablePathCharacters =
+        SearchValues.Create("<>\"|?*");
+
     public const string ResourceDirectoryName = "external-programs";
     public const string DescriptorFileName = "resource.json";
     public const string FilesDirectoryName = "files";
@@ -13,6 +18,11 @@ public static class ExternalProgramResourceContract
     public const string Schema = "openlineops.external-program-resource";
     public const string InvocationSchema = "openlineops.external-program-invocation";
     public const string ResourceIdProperty = "externalProgramResourceId";
+    public const string ProductionInputSourcePrefix = "$production.";
+    public const int MaximumFrozenFileCount = 256;
+    public const int MaximumFrozenDirectoryCount = 1_024;
+    public const long MaximumFrozenFileBytes = 512L * 1024 * 1024;
+    public const long MaximumFrozenTotalBytes = 2L * 1024 * 1024 * 1024;
 
     private static readonly HashSet<string> SupportedInputSources = new(StringComparer.Ordinal)
     {
@@ -48,11 +58,12 @@ public static class ExternalProgramResourceContract
         if (!IsCanonical(value)
             || value.Length > 96
             || value is "." or ".."
+            || !char.IsAsciiLetterOrDigit(value[0])
             || value.Any(character => !char.IsAsciiLetterOrDigit(character)
                 && character is not '.' and not '-' and not '_'))
         {
             throw new ArgumentException(
-                "External program resource id must be canonical portable text using letters, digits, dot, dash, or underscore.",
+                "External program resource id must start with an ASCII letter or digit and use only letters, digits, dot, dash, or underscore.",
                 parameterName);
         }
 
@@ -65,6 +76,8 @@ public static class ExternalProgramResourceContract
         string? requiredFirstSegment = null)
     {
         if (!IsCanonical(value)
+            || value.Length > 1_024
+            || !value.IsNormalized(NormalizationForm.FormC)
             || Path.IsPathRooted(value)
             || value.Contains('\\')
             || value.Contains(':'))
@@ -75,7 +88,12 @@ public static class ExternalProgramResourceContract
         }
 
         var segments = value.Split('/');
-        if (segments.Any(segment => !IsCanonical(segment) || segment is "." or "..")
+        if (segments.Any(segment => !IsCanonical(segment)
+                || segment.Length > 255
+                || segment is "." or ".."
+                || segment.EndsWith('.')
+                || segment.AsSpan().ContainsAny(InvalidPortablePathCharacters)
+                || IsWindowsReservedPathSegment(segment))
             || requiredFirstSegment is not null
             && !string.Equals(segments[0], requiredFirstSegment, StringComparison.Ordinal))
         {
@@ -89,8 +107,87 @@ public static class ExternalProgramResourceContract
         return string.Join('/', segments);
     }
 
+    public static bool IsSupportedApplicationExecutableEntryPoint(string? value)
+    {
+        if (value is null || !value.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            _ = CanonicalRelativePath(value, nameof(value), FilesDirectoryName);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    public static long AccumulateFrozenFileBytes(
+        int currentFileCount,
+        long accumulatedBytes,
+        long nextFileBytes)
+    {
+        if (currentFileCount < 0
+            || currentFileCount >= MaximumFrozenFileCount
+            || accumulatedBytes < 0
+            || accumulatedBytes > MaximumFrozenTotalBytes
+            || nextFileBytes < 0
+            || nextFileBytes > MaximumFrozenFileBytes
+            || nextFileBytes > MaximumFrozenTotalBytes - accumulatedBytes)
+        {
+            throw new InvalidDataException("External program file inventory exceeds the supported limits.");
+        }
+
+        return accumulatedBytes + nextFileBytes;
+    }
+
+    private static bool IsWindowsReservedPathSegment(string segment)
+    {
+        var stem = segment.Split('.')[0];
+        return stem.Equals("CON", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("PRN", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("AUX", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("NUL", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("CLOCK$", StringComparison.OrdinalIgnoreCase)
+            || IsNumberedWindowsDeviceName(stem, "COM")
+            || IsNumberedWindowsDeviceName(stem, "LPT");
+    }
+
+    private static bool IsNumberedWindowsDeviceName(string stem, string prefix)
+    {
+        return stem.Length == prefix.Length + 1
+            && stem.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            && stem[^1] is >= '1' and <= '9' or '\u00b9' or '\u00b2' or '\u00b3';
+    }
+
     public static bool IsSupportedInputSource(string? source) =>
-        source is not null && SupportedInputSources.Contains(source);
+        source is not null
+        && (SupportedInputSources.Contains(source)
+            || TryGetProductionInputKey(source, out _));
+
+    public static bool TryGetProductionInputKey(
+        string? source,
+        [NotNullWhen(true)] out string? inputKey)
+    {
+        inputKey = null;
+        if (!IsCanonical(source)
+            || !source.StartsWith(ProductionInputSourcePrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var candidate = source[ProductionInputSourcePrefix.Length..];
+        if (!IsCanonical(candidate) || candidate.Length > 256)
+        {
+            return false;
+        }
+
+        inputKey = candidate;
+        return true;
+    }
 
     public static bool IsSupportedArgumentTemplate(
         string? template,

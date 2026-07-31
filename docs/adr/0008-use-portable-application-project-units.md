@@ -20,10 +20,10 @@ reuse fragile. Copying an application would require rewriting its topology,
 layouts, flows, Blockly workspaces, Python source, configuration, and custom
 blocks before another project could open it.
 
-SmartMatriX `.ak` files demonstrate useful product concepts, but their serialized
-CLR object graph also mixes object identity, absolute paths, and runtime state.
-OpenLineOps needs a text-based, reviewable, schema-versioned format with explicit
-aggregate boundaries instead of reproducing that object graph.
+Serialized monolithic project object graphs mix implementation types, object
+identity, absolute paths, and runtime state. OpenLineOps instead requires a
+text-based, reviewable, schema-versioned format with explicit aggregate
+boundaries.
 
 ## Decision Drivers
 
@@ -155,8 +155,8 @@ composable child project visible in Project Explorer.
 - Keep release artifacts under the root project because snapshots and active
   release selection are project-level concerns; frozen release-internal paths
   are not the editable application portability contract.
-- Treat SmartMatriX `.ak` only as prior-art reference, never as an accepted
-  OpenLineOps project input or persistence model.
+- Accept only the documented OpenLineOps project and application formats as
+  project input or persistent source.
 - Validate standalone `.oloapp` identity before adding its reference to the
   target project.
 

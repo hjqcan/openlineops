@@ -7,8 +7,16 @@ namespace OpenLineOps.Runtime.Domain.Runs;
 
 public sealed class OperationRun
 {
+    private const string PreExecutionCancellationFailureCode =
+        "Runtime.ProductionRunStopped";
+    internal const string ReworkSupersededFailureCode =
+        "Runtime.OperationSupersededByRework";
+    internal const string ReworkSupersededFailureReason =
+        "Pending Operation attempt was superseded by an upstream Rework wave.";
+
     private readonly Dictionary<string, ProductionContextValue> _outputs;
     private readonly Dictionary<ResourceRequirement, long> _fencingTokens;
+    private readonly Dictionary<string, string> _sourceOperationRunBindings;
 
     private OperationRun(
         OperationRunDefinition definition,
@@ -24,8 +32,11 @@ public sealed class OperationRun
         int completedStepCount,
         int commandCount,
         int incidentCount,
+        Guid? recoveryDecisionId,
+        OperationExecutionEvidence? executionEvidence,
         IReadOnlyDictionary<string, ProductionContextValue>? outputs,
-        IReadOnlyDictionary<ResourceRequirement, long>? fencingTokens)
+        IReadOnlyDictionary<ResourceRequirement, long>? fencingTokens,
+        IReadOnlyDictionary<string, string> sourceOperationRunBindings)
     {
         Definition = definition ?? throw new ArgumentNullException(nameof(definition));
         OperationRunId = ProductionRunText.Required(operationRunId, nameof(operationRunId));
@@ -54,8 +65,35 @@ public sealed class OperationRun
         CompletedStepCount = completedStepCount;
         CommandCount = commandCount;
         IncidentCount = incidentCount;
+        if (recoveryDecisionId == Guid.Empty)
+        {
+            throw new ArgumentException("Recovery Decision id cannot be empty.", nameof(recoveryDecisionId));
+        }
+
+        RecoveryDecisionId = recoveryDecisionId;
+        ExecutionEvidence = executionEvidence;
         _outputs = outputs?.ToDictionary() ?? [];
         _fencingTokens = fencingTokens?.ToDictionary() ?? [];
+        ArgumentNullException.ThrowIfNull(sourceOperationRunBindings);
+        _sourceOperationRunBindings = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (operationId, boundOperationRunId) in sourceOperationRunBindings)
+        {
+            var canonicalOperationId = ProductionRunText.Required(
+                operationId,
+                "source Operation id");
+            var canonicalOperationRunId = ProductionRunText.Required(
+                boundOperationRunId,
+                "source Operation Run id");
+            if (string.Equals(canonicalOperationId, OperationId, StringComparison.Ordinal)
+                || !_sourceOperationRunBindings.TryAdd(
+                    canonicalOperationId,
+                    canonicalOperationRunId))
+            {
+                throw new ArgumentException(
+                    "Source Operation Run bindings must be unique and cannot bind the current Operation.",
+                    nameof(sourceOperationRunBindings));
+            }
+        }
         ValidateState();
     }
 
@@ -99,9 +137,16 @@ public sealed class OperationRun
 
     public int IncidentCount { get; private set; }
 
+    public Guid? RecoveryDecisionId { get; private set; }
+
+    public OperationExecutionEvidence? ExecutionEvidence { get; private set; }
+
     public IReadOnlyDictionary<string, ProductionContextValue> Outputs => _outputs;
 
     public IReadOnlyDictionary<ResourceRequirement, long> FencingTokens => _fencingTokens;
+
+    public IReadOnlyDictionary<string, string> SourceOperationRunBindings =>
+        _sourceOperationRunBindings;
 
     public bool IsTerminal => ExecutionStatus is ExecutionStatus.Completed
         or ExecutionStatus.Failed
@@ -111,7 +156,10 @@ public sealed class OperationRun
 
     private OperationRunDefinition Definition { get; }
 
-    internal static OperationRun Create(OperationRunDefinition definition, int attempt)
+    internal static OperationRun Create(
+        OperationRunDefinition definition,
+        int attempt,
+        IReadOnlyDictionary<string, string> sourceOperationRunBindings)
     {
         return new OperationRun(
             definition,
@@ -128,7 +176,10 @@ public sealed class OperationRun
             0,
             0,
             null,
-            null);
+            null,
+            null,
+            null,
+            sourceOperationRunBindings);
     }
 
     internal static OperationRun Restore(OperationRunSnapshot snapshot)
@@ -148,8 +199,11 @@ public sealed class OperationRun
             snapshot.CompletedStepCount,
             snapshot.CommandCount,
             snapshot.IncidentCount,
+            snapshot.RecoveryDecisionId,
+            snapshot.ExecutionEvidence,
             snapshot.Outputs,
-            snapshot.FencingTokens);
+            snapshot.FencingTokens,
+            snapshot.SourceOperationRunBindings);
     }
 
     internal RuntimeOperationResult Start(
@@ -197,6 +251,42 @@ public sealed class OperationRun
 
     internal RuntimeOperationResult Complete(
         ResultJudgement judgement,
+        OperationExecutionEvidence executionEvidence,
+        IReadOnlyDictionary<string, ProductionContextValue>? outputs,
+        int completedStepCount,
+        int commandCount,
+        int incidentCount,
+        DateTimeOffset completedAtUtc)
+    {
+        return CompleteCore(
+            judgement,
+            executionEvidence,
+            recoveryDecisionId: null,
+            outputs,
+            completedStepCount,
+            commandCount,
+            incidentCount,
+            completedAtUtc);
+    }
+
+    internal RuntimeOperationResult CompleteByReconciliation(
+        Guid recoveryDecisionId,
+        ResultJudgement judgement,
+        IReadOnlyDictionary<string, ProductionContextValue>? outputs,
+        DateTimeOffset completedAtUtc) => CompleteCore(
+            judgement,
+            executionEvidence: null,
+            recoveryDecisionId,
+            outputs,
+            CompletedStepCount,
+            CommandCount,
+            IncidentCount,
+            completedAtUtc);
+
+    private RuntimeOperationResult CompleteCore(
+        ResultJudgement judgement,
+        OperationExecutionEvidence? executionEvidence,
+        Guid? recoveryDecisionId,
         IReadOnlyDictionary<string, ProductionContextValue>? outputs,
         int completedStepCount,
         int commandCount,
@@ -217,12 +307,32 @@ public sealed class OperationRun
                 $"Operation Run {OperationRunId} received an unsupported result judgement.");
         }
 
-        SetMetrics(completedStepCount, commandCount, incidentCount);
-        _outputs.Clear();
-        foreach (var output in outputs ?? new Dictionary<string, ProductionContextValue>())
+        ValidateMetrics(completedStepCount, commandCount, incidentCount);
+        var canonicalOutputs = CanonicalOutputs(outputs);
+        if (recoveryDecisionId == Guid.Empty)
         {
-            var key = ProductionRunText.Required(output.Key, "output key");
-            _outputs.Add(key, output.Value ?? throw new ArgumentException("Operation output cannot be null."));
+            throw new ArgumentException("Recovery Decision id cannot be empty.", nameof(recoveryDecisionId));
+        }
+
+        if (recoveryDecisionId is null)
+        {
+            ArgumentNullException.ThrowIfNull(executionEvidence);
+            ValidateExecutionEvidence(
+                executionEvidence,
+                ExecutionStatus.Completed,
+                completedStepCount,
+                commandCount,
+                incidentCount,
+                completedAtUtc);
+        }
+
+        SetMetrics(completedStepCount, commandCount, incidentCount);
+        RecoveryDecisionId = recoveryDecisionId;
+        ExecutionEvidence = executionEvidence;
+        _outputs.Clear();
+        foreach (var output in canonicalOutputs)
+        {
+            _outputs.Add(output.Key, output.Value);
         }
 
         ExecutionStatus = ExecutionStatus.Completed;
@@ -233,6 +343,7 @@ public sealed class OperationRun
 
     internal RuntimeOperationResult Fail(
         ExecutionStatus terminalStatus,
+        OperationExecutionEvidence executionEvidence,
         string code,
         string reason,
         int completedStepCount,
@@ -250,12 +361,25 @@ public sealed class OperationRun
                 $"Operation Run {OperationRunId} cannot transition from {ExecutionStatus} to {terminalStatus}.");
         }
 
+        ValidateMetrics(completedStepCount, commandCount, incidentCount);
+        ArgumentNullException.ThrowIfNull(executionEvidence);
+        ValidateExecutionEvidence(
+            executionEvidence,
+            terminalStatus,
+            completedStepCount,
+            commandCount,
+            incidentCount,
+            completedAtUtc);
+        var failureCode = ProductionRunText.Required(code, nameof(code));
+        var failureReason = ProductionRunText.Required(reason, nameof(reason));
         SetMetrics(completedStepCount, commandCount, incidentCount);
+        RecoveryDecisionId = null;
+        ExecutionEvidence = executionEvidence;
         ExecutionStatus = terminalStatus;
         Judgement = ResultJudgement.Unknown;
         CompletedAtUtc = completedAtUtc;
-        FailureCode = ProductionRunText.Required(code, nameof(code));
-        FailureReason = ProductionRunText.Required(reason, nameof(reason));
+        FailureCode = failureCode;
+        FailureReason = failureReason;
         return RuntimeOperationResult.Accepted();
     }
 
@@ -266,14 +390,73 @@ public sealed class OperationRun
             return;
         }
 
+        if (ExecutionStatus != ExecutionStatus.Pending)
+        {
+            throw new InvalidOperationException(
+                $"Started Operation Run {OperationRunId} requires execution or Recovery Decision evidence before cancellation.");
+        }
+
+        CancelCore(
+            PreExecutionCancellationFailureCode,
+            reason,
+            canceledAtUtc,
+            recoveryDecisionId: null);
+    }
+
+    internal void CancelSupersededByRework(DateTimeOffset canceledAtUtc)
+    {
+        if (ExecutionStatus != ExecutionStatus.Pending)
+        {
+            throw new InvalidOperationException(
+                $"Only a Pending Operation Run can be superseded by Rework; {OperationRunId} is {ExecutionStatus}.");
+        }
+
+        CancelCore(
+            ReworkSupersededFailureCode,
+            ReworkSupersededFailureReason,
+            canceledAtUtc,
+            recoveryDecisionId: null);
+    }
+
+    internal void CancelByRecovery(
+        Guid recoveryDecisionId,
+        string reason,
+        DateTimeOffset canceledAtUtc)
+    {
+        if (IsTerminal)
+        {
+            return;
+        }
+
+        if (recoveryDecisionId == Guid.Empty)
+        {
+            throw new ArgumentException("Recovery Decision id cannot be empty.", nameof(recoveryDecisionId));
+        }
+
+        CancelCore(
+            PreExecutionCancellationFailureCode,
+            reason,
+            canceledAtUtc,
+            recoveryDecisionId);
+    }
+
+    private void CancelCore(
+        string failureCode,
+        string reason,
+        DateTimeOffset canceledAtUtc,
+        Guid? recoveryDecisionId)
+    {
+        RecoveryDecisionId = recoveryDecisionId;
+
         ExecutionStatus = ExecutionStatus.Canceled;
         Judgement = ResultJudgement.Aborted;
         CompletedAtUtc = canceledAtUtc;
-        FailureCode = "Runtime.ProductionRunStopped";
+        FailureCode = ProductionRunText.Required(failureCode, nameof(failureCode));
         FailureReason = ProductionRunText.Required(reason, nameof(reason));
     }
 
     internal RuntimeOperationResult CancelAfterExecution(
+        OperationExecutionEvidence executionEvidence,
         string code,
         string reason,
         int completedStepCount,
@@ -303,10 +486,24 @@ public sealed class OperationRun
         }
 
         var failureCode = ProductionRunText.Required(code, nameof(code));
-        _ = ProductionRunText.Required(reason, nameof(reason));
+        var failureReason = ProductionRunText.Required(reason, nameof(reason));
+        ArgumentNullException.ThrowIfNull(executionEvidence);
+        ValidateExecutionEvidence(
+            executionEvidence,
+            ExecutionStatus.Canceled,
+            completedStepCount,
+            commandCount,
+            incidentCount,
+            canceledAtUtc);
         SetMetrics(completedStepCount, commandCount, incidentCount);
-        Cancel(reason, canceledAtUtc);
-        FailureCode = failureCode;
+        RecoveryDecisionId = null;
+        ExecutionEvidence = executionEvidence;
+        CancelCore(
+            failureCode,
+            failureReason,
+            canceledAtUtc,
+            recoveryDecisionId: null);
+        ExecutionEvidence = executionEvidence;
         return RuntimeOperationResult.Accepted();
     }
 
@@ -324,13 +521,24 @@ public sealed class OperationRun
         CompletedStepCount,
         CommandCount,
         IncidentCount,
+        RecoveryDecisionId,
+        ExecutionEvidence,
         new Dictionary<string, ProductionContextValue>(_outputs, StringComparer.Ordinal),
-        new Dictionary<ResourceRequirement, long>(_fencingTokens));
+        new Dictionary<ResourceRequirement, long>(_fencingTokens),
+        new Dictionary<string, string>(_sourceOperationRunBindings, StringComparer.Ordinal));
 
     private static string CreateOperationRunId(string operationId, int attempt) =>
         $"{operationId}@{attempt:D4}";
 
     private void SetMetrics(int completedStepCount, int commandCount, int incidentCount)
+    {
+        ValidateMetrics(completedStepCount, commandCount, incidentCount);
+        CompletedStepCount = completedStepCount;
+        CommandCount = commandCount;
+        IncidentCount = incidentCount;
+    }
+
+    private static void ValidateMetrics(int completedStepCount, int commandCount, int incidentCount)
     {
         if (completedStepCount < 0 || commandCount < 0 || incidentCount < 0)
         {
@@ -338,11 +546,84 @@ public sealed class OperationRun
                 nameof(completedStepCount),
                 "Operation execution metrics cannot be negative.");
         }
-
-        CompletedStepCount = completedStepCount;
-        CommandCount = commandCount;
-        IncidentCount = incidentCount;
     }
+
+    private static Dictionary<string, ProductionContextValue> CanonicalOutputs(
+        IReadOnlyDictionary<string, ProductionContextValue>? outputs)
+    {
+        var canonical = new Dictionary<string, ProductionContextValue>(StringComparer.Ordinal);
+        foreach (var output in outputs ?? new Dictionary<string, ProductionContextValue>())
+        {
+            var key = ProductionRunText.Required(output.Key, "output key");
+            canonical.Add(
+                key,
+                output.Value ?? throw new ArgumentException("Operation output cannot be null."));
+        }
+
+        return canonical;
+    }
+
+    private void ValidateExecutionEvidence(
+        OperationExecutionEvidence evidence,
+        ExecutionStatus terminalStatus,
+        int completedStepCount,
+        int commandCount,
+        int incidentCount,
+        DateTimeOffset completedAtUtc)
+    {
+        var expectedStatus = terminalStatus switch
+        {
+            ExecutionStatus.Completed => "Completed",
+            ExecutionStatus.Canceled => evidence.RuntimeSessionStatus is "Canceled" or "Stopped"
+                ? evidence.RuntimeSessionStatus
+                : null,
+            ExecutionStatus.Failed or ExecutionStatus.TimedOut or ExecutionStatus.Rejected => "Failed",
+            _ => null
+        };
+        var expectedFences = _fencingTokens
+            .OrderBy(
+                static pair => $"{pair.Key.Kind}:{pair.Key.ResourceId}",
+                StringComparer.Ordinal)
+            .Select(static pair => (pair.Key.Kind.ToString(), pair.Key.ResourceId, pair.Value))
+            .ToArray();
+        var evidenceFences = evidence.ResourceFences
+            .OrderBy(static fence => $"{fence.ResourceKind}:{fence.ResourceId}", StringComparer.Ordinal)
+            .Select(static fence => (fence.ResourceKind, fence.ResourceId, fence.FencingToken))
+            .ToArray();
+        if (RuntimeSessionId?.Value != evidence.RuntimeSessionId
+            || !string.Equals(OperationRunId, evidence.OperationRunId, StringComparison.Ordinal)
+            || !string.Equals(OperationId, evidence.OperationId, StringComparison.Ordinal)
+            || Attempt != evidence.OperationAttempt
+            || !string.Equals(StationSystemId, evidence.StationSystemId, StringComparison.Ordinal)
+            || !string.Equals(StationId.Value, evidence.StationId, StringComparison.Ordinal)
+            || !string.Equals(ProcessDefinitionId.Value, evidence.ProcessDefinitionId, StringComparison.Ordinal)
+            || !string.Equals(ProcessVersionId.Value, evidence.ProcessVersionId, StringComparison.Ordinal)
+            || !string.Equals(ConfigurationSnapshotId.Value, evidence.ConfigurationSnapshotId, StringComparison.Ordinal)
+            || !string.Equals(RecipeSnapshotId.Value, evidence.RecipeSnapshotId, StringComparison.Ordinal)
+            || completedAtUtc != evidence.CompletedAtUtc
+            || completedStepCount != evidence.Steps.Count(step =>
+                string.Equals(step.Status, "Completed", StringComparison.Ordinal))
+            || commandCount != evidence.Commands.Count
+            || incidentCount != evidence.Incidents.Count
+            || !string.Equals(expectedStatus, evidence.RuntimeSessionStatus, StringComparison.Ordinal)
+            || !expectedFences.SequenceEqual(evidenceFences)
+            || !string.Equals(
+                evidence.FixtureId,
+                FindResource(ResourceKind.Fixture),
+                StringComparison.Ordinal)
+            || !string.Equals(
+                evidence.DeviceId,
+                FindResource(ResourceKind.Device),
+                StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"Operation Run {OperationRunId} execution evidence does not exactly match its terminal result.",
+                nameof(evidence));
+        }
+    }
+
+    private string? FindResource(ResourceKind kind) => Definition.ResourceRequirements
+        .FirstOrDefault(requirement => requirement.Kind == kind)?.ResourceId;
 
     private void ValidateState()
     {
@@ -351,9 +632,42 @@ public sealed class OperationRun
         {
             Require(RuntimeSessionId is null && StartedAtUtc is null && CompletedAtUtc is null,
                 "Pending Operation Run contains execution timestamps.");
-            Require(FailureCode is null && FailureReason is null && _outputs.Count == 0
-                && _fencingTokens.Count == 0,
+            Require(FailureCode is null && FailureReason is null && ExecutionEvidence is null
+                && RecoveryDecisionId is null
+                && _outputs.Count == 0 && _fencingTokens.Count == 0,
                 "Pending Operation Run contains execution evidence.");
+            return;
+        }
+
+        if (ExecutionStatus == ExecutionStatus.Canceled
+            && RuntimeSessionId is null
+            && StartedAtUtc is null)
+        {
+            Require(CompletedAtUtc is { } completedAtUtc
+                    && completedAtUtc != default
+                    && completedAtUtc.Offset == TimeSpan.Zero,
+                "Operation Run canceled before execution requires a non-default UTC completion timestamp.");
+            Require(Judgement == ResultJudgement.Aborted,
+                "Operation Run canceled before execution must be judged Aborted.");
+            var ordinaryCancellation = string.Equals(
+                    FailureCode,
+                    PreExecutionCancellationFailureCode,
+                    StringComparison.Ordinal)
+                && FailureReason is not null;
+            var reworkSupersession = string.Equals(
+                    FailureCode,
+                    ReworkSupersededFailureCode,
+                    StringComparison.Ordinal)
+                && string.Equals(
+                    FailureReason,
+                    ReworkSupersededFailureReason,
+                    StringComparison.Ordinal);
+            Require(ordinaryCancellation || reworkSupersession,
+                "Operation Run canceled before execution requires canonical cancellation evidence.");
+            Require(CompletedStepCount == 0 && CommandCount == 0 && IncidentCount == 0
+                && ExecutionEvidence is null
+                && _outputs.Count == 0 && _fencingTokens.Count == 0,
+                "Operation Run canceled before execution cannot contain execution evidence.");
             return;
         }
 
@@ -365,12 +679,33 @@ public sealed class OperationRun
             "Started Operation Run must retain every static and resolved material resource fencing token.");
         if (ExecutionStatus == ExecutionStatus.Running)
         {
-            Require(CompletedAtUtc is null && FailureCode is null && FailureReason is null,
+            Require(CompletedAtUtc is null && FailureCode is null && FailureReason is null
+                    && ExecutionEvidence is null && RecoveryDecisionId is null,
                 "Running Operation Run contains terminal state.");
             return;
         }
 
         Require(CompletedAtUtc is not null, "Terminal Operation Run requires a completion timestamp.");
+        Require(
+            RecoveryDecisionId is not null
+                ? ExecutionEvidence is null
+                : ExecutionEvidence is not null,
+            "A started terminal Operation Run requires frozen execution evidence or an explicit Recovery Decision.");
+        if (ExecutionEvidence is not null)
+        {
+            Require(
+                RuntimeSessionId?.Value == ExecutionEvidence.RuntimeSessionId
+                && string.Equals(OperationRunId, ExecutionEvidence.OperationRunId, StringComparison.Ordinal)
+                && string.Equals(OperationId, ExecutionEvidence.OperationId, StringComparison.Ordinal)
+                && Attempt == ExecutionEvidence.OperationAttempt
+                && string.Equals(StationSystemId, ExecutionEvidence.StationSystemId, StringComparison.Ordinal)
+                && CompletedAtUtc == ExecutionEvidence.CompletedAtUtc
+                && CompletedStepCount == ExecutionEvidence.Steps.Count(step =>
+                    string.Equals(step.Status, "Completed", StringComparison.Ordinal))
+                && CommandCount == ExecutionEvidence.Commands.Count
+                && IncidentCount == ExecutionEvidence.Incidents.Count,
+                "Terminal Operation Run execution evidence differs from its frozen result.");
+        }
         if (ExecutionStatus == ExecutionStatus.Completed)
         {
             Require(FailureCode is null && FailureReason is null,

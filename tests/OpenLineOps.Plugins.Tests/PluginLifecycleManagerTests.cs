@@ -7,6 +7,8 @@ namespace OpenLineOps.Plugins.Tests;
 
 public sealed class PluginLifecycleManagerTests
 {
+    private static readonly ProjectApplicationWorkspaceScope Scope = PluginTestScope.Create();
+
     [Fact]
     public async Task StartAsyncInitializesValidPluginsAndKeepsFailureIsolated()
     {
@@ -17,13 +19,13 @@ public sealed class PluginLifecycleManagerTests
             Package(failedManifest));
         var initializedPlugin = new FakePlugin(initializedManifest, PluginInitializationStatus.Initialized);
         var failedPlugin = new FakePlugin(failedManifest, PluginInitializationStatus.Failed);
-        var activator = new ScriptedPluginActivator(initializedPlugin, failedPlugin);
+        var activator = new ScriptedPluginInstanceActivator(initializedPlugin, failedPlugin);
         var manager = new PluginLifecycleManager(
             catalog,
             new PluginManifestValidator(),
             activator);
 
-        var records = await manager.StartAsync(new EmptyServiceProvider());
+        var records = await manager.StartAsync(Scope, new EmptyServiceProvider());
 
         Assert.Equal(2, records.Count);
         Assert.Contains(records, record =>
@@ -47,13 +49,13 @@ public sealed class PluginLifecycleManagerTests
             "Invalid.dll",
             "Invalid.Plugin",
             []);
-        var activator = new ScriptedPluginActivator();
+        var activator = new ScriptedPluginInstanceActivator();
         var manager = new PluginLifecycleManager(
             new InMemoryPluginPackageCatalog(Package(invalidManifest)),
             new PluginManifestValidator(),
             activator);
 
-        var records = await manager.StartAsync(new EmptyServiceProvider());
+        var records = await manager.StartAsync(Scope, new EmptyServiceProvider());
 
         var record = Assert.Single(records);
         Assert.Equal(PluginLifecycleState.Invalid, record.State);
@@ -71,9 +73,9 @@ public sealed class PluginLifecycleManagerTests
         var manager = new PluginLifecycleManager(
             new InMemoryPluginPackageCatalog(Package(initializedManifest), Package(degradedManifest)),
             new PluginManifestValidator(),
-            new ScriptedPluginActivator(initializedPlugin, degradedPlugin));
+            new ScriptedPluginInstanceActivator(initializedPlugin, degradedPlugin));
 
-        var startRecords = await manager.StartAsync(new EmptyServiceProvider());
+        var startRecords = await manager.StartAsync(Scope, new EmptyServiceProvider());
         var stopRecords = await manager.StopAsync();
 
         Assert.Contains(startRecords, record => record.State == PluginLifecycleState.Initialized);
@@ -86,7 +88,13 @@ public sealed class PluginLifecycleManagerTests
 
     private static PluginPackageDescriptor Package(PluginManifest manifest)
     {
-        return new PluginPackageDescriptor(manifest, "plugins/test", "plugins/test/manifest.json");
+        return new PluginPackageDescriptor(
+            manifest,
+            "plugins/test",
+            "plugins/test/manifest.json",
+            new string('a', 64),
+            new string('b', 64),
+            new string('c', 64));
     }
 
     private static PluginManifest CreateManifest(string id, string capability)
@@ -113,19 +121,21 @@ public sealed class PluginLifecycleManagerTests
         params PluginPackageDescriptor[] packages) : IPluginPackageCatalog
     {
         public ValueTask<IReadOnlyCollection<PluginPackageDescriptor>> DiscoverAsync(
+            ProjectApplicationWorkspaceScope scope,
             CancellationToken cancellationToken = default)
         {
             return ValueTask.FromResult<IReadOnlyCollection<PluginPackageDescriptor>>(packages);
         }
     }
 
-    private sealed class ScriptedPluginActivator(params IOpenLineOpsPlugin[] plugins) : IPluginInstanceActivator
+    private sealed class ScriptedPluginInstanceActivator(params IOpenLineOpsPlugin[] plugins) : IPluginInstanceActivator
     {
         private readonly Queue<IOpenLineOpsPlugin> _plugins = new(plugins);
 
         public int ActivationCount { get; private set; }
 
         public ValueTask<PluginActivationResult> ActivateAsync(
+            ProjectApplicationWorkspaceScope scope,
             PluginPackageDescriptor package,
             CancellationToken cancellationToken = default)
         {

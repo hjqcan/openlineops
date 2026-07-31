@@ -11,6 +11,7 @@ namespace OpenLineOps.Projects.Api.Controllers;
 [ApiController]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Projects)]
 [Route(OpenLineOpsApiRoutes.ProjectSnapshotProductionRunContext)]
+[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 public sealed class ProjectSnapshotProductionRunContextsController(
     IProjectReleaseProductionRunContextService contextService,
     IStationDeploymentResolver deploymentResolver) : ControllerBase

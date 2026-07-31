@@ -4,9 +4,11 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Projects.Application.Projects;
+using OpenLineOps.Runtime.Api.HostedServices;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
@@ -17,15 +19,15 @@ using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class ProductionRunsApiTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly OpenLineOpsApiWebApplicationFactory _factory;
     private readonly HttpClient _client;
 
-    public ProductionRunsApiTests(WebApplicationFactory<Program> factory)
+    public ProductionRunsApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
         _factory = factory;
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        _client = factory.CreateAuthenticatedClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
         });
@@ -40,14 +42,13 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             services.RemoveAll<IProjectReleaseProductionRunLauncher>();
             services.AddSingleton<IProjectReleaseProductionRunLauncher>(launcher);
         }));
-        using var client = factory.CreateClient();
+        using var client = factory.CreateAuthenticatedClient();
         using var response = await client.PostAsJsonAsync("/api/production-runs", new
         {
             projectId = "project.raw-plan",
             projectSnapshotId = "snapshot.raw-plan",
             productionRunId = Guid.NewGuid().ToString("D"),
             productionUnitId = Guid.NewGuid().ToString("D"),
-            actorId = "operator.raw-plan",
             operations = new[] { new { resourceId = "client.injected" } }
         });
 
@@ -65,8 +66,7 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
                 projectId = "project.removed",
                 projectSnapshotId = "snapshot.removed",
                 productionRunId = Guid.NewGuid().ToString("D"),
-                productionUnitId = Guid.NewGuid().ToString("D"),
-                actorId = "operator.removed"
+                productionUnitId = Guid.NewGuid().ToString("D")
             });
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
@@ -75,6 +75,8 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
     [Fact]
     public async Task GetByIdReturnsOperationDualAxesAndRejectsNonCanonicalIdentity()
     {
+        using var factory = CreateManualRunFactory();
+        using var client = factory.CreateAuthenticatedClient();
         var runId = ProductionRunId.New();
         var createdAtUtc = new DateTimeOffset(2026, 7, 11, 9, 0, 0, TimeSpan.Zero);
         var operationPlan = OperationPlan();
@@ -93,9 +95,9 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             operationPlan.Definition.OperationId,
             createdAtUtc,
             [operationPlan.Definition],
-            []);
-        var repository = _factory.Services.GetRequiredService<IProductionRunRepository>();
-        var materials = _factory.Services.GetRequiredService<
+            TerminalRoutes(operationPlan.Definition.OperationId));
+        var repository = factory.Services.GetRequiredService<IProductionRunRepository>();
+        var materials = factory.Services.GetRequiredService<
             OpenLineOps.Runtime.Application.Materials.IProductionMaterialRepository>();
         var unit = OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnit.Register(
             run.ProductionUnitId,
@@ -132,13 +134,14 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             operation.OperationRunId,
             ResultJudgement.Failed,
             null,
-            3,
-            4,
-            1,
-            createdAtUtc.AddSeconds(3)).Succeeded);
+            0,
+            0,
+            0,
+            createdAtUtc.AddSeconds(3),
+            CreateExecutionEvidence(run, operation, createdAtUtc.AddSeconds(3))).Succeeded);
         await repository.SaveAsync(run, 0);
 
-        using var response = await _client.GetAsync($"/api/production-runs/{runId.Value:D}");
+        using var response = await client.GetAsync($"/api/production-runs/{runId.Value:D}");
         using var document = await ReadJsonAsync(response);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -155,7 +158,7 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
         Assert.Equal(7, Assert.Single(operationResponse.GetProperty("resources").EnumerateArray())
             .GetProperty("fencingToken").GetInt64());
 
-        using var nonCanonical = await _client.GetAsync(
+        using var nonCanonical = await client.GetAsync(
             $"/api/production-runs/{runId.Value.ToString("D").ToUpperInvariant()}");
         Assert.Equal(HttpStatusCode.BadRequest, nonCanonical.StatusCode);
     }
@@ -163,6 +166,8 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
     [Fact]
     public async Task ReconcileCommandRequiresStrictEvidenceAndIsDurablyIdempotent()
     {
+        using var factory = CreateManualRunFactory();
+        using var client = factory.CreateAuthenticatedClient();
         var runId = ProductionRunId.New();
         var now = DateTimeOffset.UtcNow.AddMinutes(-1);
         var operationPlan = OperationPlan();
@@ -181,9 +186,9 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             operationPlan.Definition.OperationId,
             now,
             [operationPlan.Definition],
-            []);
-        var repository = _factory.Services.GetRequiredService<IProductionRunRepository>();
-        var materials = _factory.Services.GetRequiredService<
+            TerminalRoutes(operationPlan.Definition.OperationId));
+        var repository = factory.Services.GetRequiredService<IProductionRunRepository>();
+        var materials = factory.Services.GetRequiredService<
             OpenLineOps.Runtime.Application.Materials.IProductionMaterialRepository>();
         var unit = OpenLineOps.Runtime.Domain.ProductionUnits.ProductionUnit.Register(
             run.ProductionUnitId,
@@ -223,7 +228,6 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
         var decisionId = "a5555555-5555-5555-5555-555555555555";
         var request = new
         {
-            actorId = "operator.recovery",
             reason = "Inspection confirms completion.",
             operationId = (string?)null,
             recoveryDecision = new
@@ -242,7 +246,7 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
                 }
             }
         };
-        using var response = await _client.PostAsJsonAsync(
+        using var response = await client.PostAsJsonAsync(
             $"/api/production-runs/{runId.Value:D}/commands/Reconcile",
             request);
         using var document = await ReadJsonAsync(response);
@@ -252,17 +256,19 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
         var recovery = Assert.Single(document.RootElement.GetProperty("recoveryDecisions").EnumerateArray());
         Assert.Equal(decisionId, recovery.GetProperty("decisionId").GetGuid().ToString("D"));
         Assert.Equal("Reconcile", recovery.GetProperty("kind").GetString());
+        Assert.Equal(
+            ApiTestAuthentication.StandardActorId,
+            recovery.GetProperty("actorId").GetString());
 
-        using var duplicate = await _client.PostAsJsonAsync(
+        using var duplicate = await client.PostAsJsonAsync(
             $"/api/production-runs/{runId.Value:D}/commands/Reconcile",
             request);
         Assert.Equal(HttpStatusCode.OK, duplicate.StatusCode);
 
-        using var mismatch = await _client.PostAsJsonAsync(
+        using var mismatch = await client.PostAsJsonAsync(
             $"/api/production-runs/{runId.Value:D}/commands/Reconcile",
             new
             {
-                request.actorId,
                 reason = "Different immutable evidence.",
                 request.operationId,
                 recoveryDecision = new
@@ -278,11 +284,10 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
             });
         Assert.Equal(HttpStatusCode.Conflict, mismatch.StatusCode);
 
-        using var uppercase = await _client.PostAsJsonAsync(
+        using var uppercase = await client.PostAsJsonAsync(
             $"/api/production-runs/{runId.Value:D}/commands/Reconcile",
             new
             {
-                request.actorId,
                 request.reason,
                 request.operationId,
                 recoveryDecision = new
@@ -299,6 +304,18 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
         Assert.Equal(HttpStatusCode.BadRequest, uppercase.StatusCode);
     }
 
+    private WebApplicationFactory<Program> CreateManualRunFactory() =>
+        _factory.WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+        {
+            var coordinator = services.SingleOrDefault(descriptor =>
+                descriptor.ServiceType == typeof(IHostedService)
+                && descriptor.ImplementationType
+                == typeof(ProductionRunCoordinatorHostedService))
+                ?? throw new InvalidOperationException(
+                    "The API test host is missing its Production Run coordinator registration.");
+            services.Remove(coordinator);
+        }));
+
     private static OperationExecutionPlan OperationPlan() => new(
         "operation.main",
         "station.main",
@@ -308,7 +325,67 @@ public sealed class ProductionRunsApiTests : IClassFixture<WebApplicationFactory
         new ExecutableRuntimeProcess(
             new ProcessDefinitionId("process.main"),
             new ProcessVersionId("process-version.main"),
-            []));
+            []),
+        []);
+
+    private static RouteTransitionDefinition[] TerminalRoutes(string operationId) =>
+    [
+        new RouteTransitionDefinition(
+            $"{operationId}.failed",
+            operationId,
+            null,
+            RuntimeRouteTransitionKind.Judgement,
+            ResultJudgement.Failed,
+            terminalDisposition: ProductDisposition.Nonconforming),
+        new RouteTransitionDefinition(
+            $"{operationId}.default",
+            operationId,
+            null,
+            RuntimeRouteTransitionKind.Sequence,
+            terminalDisposition: ProductDisposition.Completed)
+    ];
+
+    private static OperationExecutionEvidence CreateExecutionEvidence(
+        ProductionRun run,
+        OperationRun operation,
+        DateTimeOffset completedAtUtc) => new(
+            OperationExecutionEvidenceOrigin.RuntimeSession,
+            operation.RuntimeSessionId!.Value.Value,
+            run.Id.Value,
+            run.ProductionUnitId.Value,
+            run.ProductionLineDefinitionId,
+            operation.OperationId,
+            operation.OperationRunId,
+            operation.Attempt,
+            operation.StationSystemId,
+            operation.StationId.Value,
+            operation.ProcessDefinitionId.Value,
+            operation.ProcessVersionId.Value,
+            operation.ConfigurationSnapshotId.Value,
+            operation.RecipeSnapshotId.Value,
+            run.ProductionUnitIdentity.ModelId,
+            run.ProductionUnitIdentity.InputKey,
+            run.ProductionUnitIdentity.Value,
+            run.LotId,
+            run.CarrierId,
+            null,
+            null,
+            run.ActorId,
+            run.ProjectId,
+            run.ApplicationId,
+            run.ProjectSnapshotId,
+            run.TopologyId,
+            "Completed",
+            completedAtUtc,
+            operation.FencingTokens.Select(pair => new OperationResourceFenceEvidence(
+                pair.Key.Kind.ToString(),
+                pair.Key.ResourceId,
+                pair.Value,
+                completedAtUtc.AddMinutes(5))).ToArray(),
+            [],
+            [],
+            [],
+            []);
 
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response) =>
         await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());

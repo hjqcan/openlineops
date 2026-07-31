@@ -1,258 +1,231 @@
-using System.Text.Json;
-using OpenLineOps.Plugin.Abstractions;
 using OpenLineOps.Plugins.Infrastructure.Discovery;
+using OpenLineOps.Projects.Infrastructure.ProjectWorkspaces;
 
 namespace OpenLineOps.Plugins.Tests;
 
 public sealed class FileSystemPluginPackageCatalogTests
 {
     [Fact]
-    public async Task DiscoverAsyncReadsOnlyCanonicalManifestFilesFromRootTree()
+    public async Task DiscoverAsyncReadsOnlyExactApplicationReferencesAndRejectsTampering()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"openlineops-plugins-{Guid.NewGuid():N}");
-        var scannerDirectory = Path.Combine(root, "scanner");
-        var exporterDirectory = Path.Combine(root, "exporter");
-        var reporterDirectory = Path.Combine(root, "reporter");
-        var sampleDirectory = Path.Combine(root, "sample");
+        using var workspace = await TestApplicationWorkspace.CreateAsync("project-a", "application-a");
+        var package = await workspace.CreatePackageAsync(
+            "vision-package",
+            "plugin.vision",
+            "1.0.0",
+            "payload-a");
+        await workspace.WriteReferencesAsync(package.Reference);
+        var catalog = new FileSystemPluginPackageCatalog(workspace.ManifestStore);
 
-        try
-        {
-            Directory.CreateDirectory(scannerDirectory);
-            Directory.CreateDirectory(exporterDirectory);
-            Directory.CreateDirectory(reporterDirectory);
-            Directory.CreateDirectory(sampleDirectory);
-            await File.WriteAllTextAsync(
-                Path.Combine(scannerDirectory, "openlineops-plugin.json"),
-                """
-                {
-                  "id": "openlineops.fake-scanner",
-                  "name": "Fake Scanner",
-                  "version": "1.0.0",
-                  "kind": "DeviceDriver",
-                  "entryAssembly": "OpenLineOps.FakeScanner.dll",
-                  "entryType": "OpenLineOps.FakeScanner.Plugin",
-                  "capabilities": [ "device.scanner" ],
-                  "contractVersion": "1.0.0",
-                  "minimumPlatformVersion": "1.0.0"
-                }
-                """);
-            await File.WriteAllTextAsync(
-                Path.Combine(exporterDirectory, "plugin.manifest.json"),
-                """
-                {
-                  "id": "openlineops.csv-exporter",
-                  "name": "CSV Exporter",
-                  "version": "1.0.0",
-                  "kind": "ReportExporter",
-                  "entryAssembly": "OpenLineOps.CsvExporter.dll",
-                  "entryType": "OpenLineOps.CsvExporter.Plugin",
-                  "capabilities": [ "report.csv" ]
-                }
-                """);
-            await File.WriteAllTextAsync(
-                Path.Combine(sampleDirectory, "manifest.json"),
-                """
-                {
-                  "id": "openlineops.samples.loopback-device",
-                  "name": "Loopback Device Sample",
-                  "version": "0.1.0",
-                  "kind": "DeviceDriver",
-                  "entryAssembly": "OpenLineOps.SamplePlugins.LoopbackDevice.dll",
-                  "entryType": "OpenLineOps.SamplePlugins.LoopbackDevice.LoopbackDevicePlugin",
-                  "capabilities": [ "device.loopback" ]
-                }
-                """);
-            await File.WriteAllTextAsync(
-                Path.Combine(reporterDirectory, "plugin.json"),
-                """
-                {
-                  "id": "openlineops.reporter",
-                  "name": "Reporter",
-                  "version": "1.0.0",
-                  "kind": "ReportExporter",
-                  "entryAssembly": "Reporter.dll",
-                  "entryType": "Reporter.Plugin",
-                  "capabilities": [ "report.test" ]
-                }
-                """);
-            await File.WriteAllTextAsync(
-                Path.Combine(scannerDirectory, "OpenLineOps.FakeScanner.dll"),
-                "scanner-binary");
-            await File.WriteAllTextAsync(
-                Path.Combine(exporterDirectory, "OpenLineOps.CsvExporter.dll"),
-                "exporter-binary");
-            await File.WriteAllTextAsync(
-                Path.Combine(sampleDirectory, "OpenLineOps.SamplePlugins.LoopbackDevice.dll"),
-                "loopback-binary");
-            await File.WriteAllTextAsync(Path.Combine(reporterDirectory, "Reporter.dll"), "reporter-binary");
+        var discovered = Assert.Single(await catalog.DiscoverAsync(workspace.Scope));
 
-            var catalog = new FileSystemPluginPackageCatalog(root);
-
-            var packages = await catalog.DiscoverAsync();
-
-            var package = Assert.Single(packages);
-            Assert.Equal("openlineops.samples.loopback-device", package.Manifest.Id);
-            Assert.Equal(PluginKind.DeviceDriver, package.Manifest.Kind);
-            Assert.Equal("device.loopback", package.Manifest.Capabilities.Single());
-            Assert.Equal(FileSystemPluginPackageCatalog.ManifestFileName, Path.GetFileName(package.ManifestPath));
-            Assert.All(packages, package =>
-            {
-                Assert.True(package.RuntimeIdentity.IsComplete);
-                Assert.Equal(64, package.PackageContentSha256.Length);
-                Assert.Equal(64, package.ManifestSha256.Length);
-                Assert.Equal(64, package.EntryAssemblySha256.Length);
-                Assert.Contains(package.Files!, file =>
-                    string.Equals(
-                        file.RelativePath,
-                        package.EntryAssemblyRelativePath,
-                        StringComparison.Ordinal));
-            });
-        }
-        finally
-        {
-            if (Directory.Exists(root))
-            {
-                Directory.Delete(root, recursive: true);
-            }
-        }
+        Assert.Equal("plugin.vision", discovered.Manifest.Id);
+        Assert.Equal(package.Reference.ContentSha256, discovered.PackageContentSha256);
+        await File.AppendAllTextAsync(Path.Combine(package.PackagePath, "plugin.dll"), "tampered");
+        await Assert.ThrowsAsync<InvalidDataException>(async () =>
+            await catalog.DiscoverAsync(workspace.Scope));
     }
 
     [Fact]
-    public async Task DiscoverAsyncReturnsEmptyCollectionWhenRootDoesNotExist()
+    public async Task DiscoverAsyncFailsWhenReferencedPackageIsMissing()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"openlineops-missing-plugins-{Guid.NewGuid():N}");
-        var catalog = new FileSystemPluginPackageCatalog(root);
+        using var workspace = await TestApplicationWorkspace.CreateAsync("project-a", "application-a");
+        await workspace.WriteReferencesAsync(new ProjectApplicationPluginPackageReference(
+            "plugin.missing",
+            "1.0.0",
+            ProjectApplicationPluginPackageReferenceContract.ManifestPath("missing"),
+            new string('a', 64)));
+        var catalog = new FileSystemPluginPackageCatalog(workspace.ManifestStore);
 
-        var packages = await catalog.DiscoverAsync();
-
-        Assert.Empty(packages);
+        await Assert.ThrowsAsync<DirectoryNotFoundException>(async () =>
+            await catalog.DiscoverAsync(workspace.Scope));
     }
 
     [Fact]
-    public async Task DiscoverAsyncFullTreeHashChangesWhenSidecarChanges()
+    public async Task CompleteApplicationCopyDiscoversWithoutPackageFileRewrite()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"openlineops-plugin-hash-{Guid.NewGuid():N}");
-        try
+        using var source = await TestApplicationWorkspace.CreateAsync("project-a", "application-copy");
+        var package = await source.CreatePackageAsync(
+            "vendor-package",
+            "plugin.vendor",
+            "4.2.0",
+            "vendor-payload");
+        await source.WriteReferencesAsync(package.Reference);
+        var sourceFiles = await SnapshotFilesAsync(source.Scope.ApplicationRootPath);
+
+        using var target = await TestApplicationWorkspace.CreateAsync("project-b", "application-copy");
+        Directory.Delete(target.Scope.ApplicationRootPath, recursive: true);
+        CopyDirectory(source.Scope.ApplicationRootPath, target.Scope.ApplicationRootPath);
+        var targetFiles = await SnapshotFilesAsync(target.Scope.ApplicationRootPath);
+        var catalog = new FileSystemPluginPackageCatalog(target.ManifestStore);
+
+        var discovered = Assert.Single(await catalog.DiscoverAsync(target.Scope));
+
+        Assert.Equal(package.Reference.ContentSha256, discovered.PackageContentSha256);
+        Assert.Equal(sourceFiles, targetFiles);
+    }
+
+    [Fact]
+    public async Task SamePluginIdWithDifferentHashesRemainsIsolatedByApplication()
+    {
+        using var first = await TestApplicationWorkspace.CreateAsync("project", "application-a");
+        using var second = await TestApplicationWorkspace.CreateAsync("project", "application-b");
+        var firstPackage = await first.CreatePackageAsync(
+            "shared-provider",
+            "plugin.shared",
+            "1.0.0",
+            "first-content");
+        var secondPackage = await second.CreatePackageAsync(
+            "shared-provider",
+            "plugin.shared",
+            "1.0.0",
+            "second-content");
+        await first.WriteReferencesAsync(firstPackage.Reference);
+        await second.WriteReferencesAsync(secondPackage.Reference);
+
+        var firstDiscovered = Assert.Single(await new FileSystemPluginPackageCatalog(first.ManifestStore)
+            .DiscoverAsync(first.Scope));
+        var secondDiscovered = Assert.Single(await new FileSystemPluginPackageCatalog(second.ManifestStore)
+            .DiscoverAsync(second.Scope));
+
+        Assert.NotEqual(firstDiscovered.PackageContentSha256, secondDiscovered.PackageContentSha256);
+        Assert.StartsWith(first.Scope.ApplicationRootPath, firstDiscovered.PackagePath, StringComparison.OrdinalIgnoreCase);
+        Assert.StartsWith(second.Scope.ApplicationRootPath, secondDiscovered.PackagePath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<string[]> SnapshotFilesAsync(string root)
+    {
+        var files = new List<string>();
+        foreach (var path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+                     .Order(StringComparer.Ordinal))
         {
-            Directory.CreateDirectory(root);
+            var bytes = await File.ReadAllBytesAsync(path);
+            files.Add($"{Path.GetRelativePath(root, path).Replace('\\', '/')}:{Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes))}");
+        }
+
+        return files.ToArray();
+    }
+
+    private static void CopyDirectory(string source, string target)
+    {
+        Directory.CreateDirectory(target);
+        foreach (var directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(Path.Combine(target, Path.GetRelativePath(source, directory)));
+        }
+
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var destination = Path.Combine(target, Path.GetRelativePath(source, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            File.Copy(file, destination);
+        }
+    }
+
+    private sealed class TestApplicationWorkspace : IDisposable
+    {
+        private TestApplicationWorkspace(string root, ProjectApplicationWorkspaceScope scope)
+        {
+            Root = root;
+            Scope = scope;
+        }
+
+        public string Root { get; }
+
+        public ProjectApplicationWorkspaceScope Scope { get; }
+
+        public FileSystemAutomationProjectManifestStore ManifestStore { get; } = new();
+
+        public static async Task<TestApplicationWorkspace> CreateAsync(
+            string projectId,
+            string applicationId)
+        {
+            var root = Path.Combine(
+                Path.GetTempPath(),
+                "openlineops-scoped-plugin-catalog",
+                Guid.NewGuid().ToString("N"));
+            var scope = new ProjectApplicationWorkspaceScope(
+                projectId,
+                applicationId,
+                root,
+                $"applications/{applicationId}/{applicationId}.oloapp");
+            Directory.CreateDirectory(scope.PluginsRootPath);
             await File.WriteAllTextAsync(
-                Path.Combine(root, "manifest.json"),
-                """
+                scope.ApplicationProjectFilePath,
+                $$"""
                 {
-                  "id": "openlineops.hash-test",
-                  "name": "Hash Test",
-                  "version": "1.0.0",
+                  "schemaVersion": "openlineops.automation-application",
+                  "formatVersion": 1,
+                  "kind": "OpenLineOps.AutomationApplication",
+                  "product": "OpenLineOps",
+                  "applicationId": "{{applicationId}}",
+                  "displayName": "{{applicationId}}",
+                  "resourceLayoutVersion": 1,
+                  "topologyId": null,
+                  "processDefinitionIds": [],
+                  "pluginPackageReferences": []
+                }
+                """);
+            return new TestApplicationWorkspace(root, scope);
+        }
+
+        public async Task<TestPackage> CreatePackageAsync(
+            string portableId,
+            string pluginId,
+            string version,
+            string payload)
+        {
+            var packagePath = Path.Combine(Scope.PluginsRootPath, portableId);
+            Directory.CreateDirectory(packagePath);
+            await File.WriteAllTextAsync(
+                Path.Combine(packagePath, "manifest.json"),
+                $$"""
+                {
+                  "id": "{{pluginId}}",
+                  "name": "{{pluginId}}",
+                  "version": "{{version}}",
                   "kind": "ProcessNode",
-                  "entryAssembly": "Plugin.dll",
-                  "entryType": "HashTest.Plugin",
-                  "capabilities": [ "process.hash" ]
+                  "entryAssembly": "plugin.dll",
+                  "entryType": "Plugin.Entry",
+                  "contractVersion": "1.0.0",
+                  "minimumPlatformVersion": "1.0.0",
+                  "runtimeIdentifier": "win-x64",
+                  "abiVersion": "openlineops.plugin-abi/1",
+                  "capabilities": ["process.test"],
+                  "processCommands": [{
+                    "id": "process.test:run",
+                    "capability": "process.test",
+                    "commandName": "Run",
+                    "timeoutMilliseconds": 30000,
+                    "maxRetries": 0
+                  }]
                 }
                 """);
-            await File.WriteAllTextAsync(Path.Combine(root, "Plugin.dll"), "binary-v1");
-            var sidecarPath = Path.Combine(root, "dependency.dat");
-            await File.WriteAllTextAsync(sidecarPath, "sidecar-v1");
-            var catalog = new FileSystemPluginPackageCatalog(root);
-
-            var first = Assert.Single(await catalog.DiscoverAsync());
-            await File.WriteAllTextAsync(sidecarPath, "sidecar-updated");
-            var second = Assert.Single(await catalog.DiscoverAsync());
-
-            Assert.NotEqual(first.PackageContentSha256, second.PackageContentSha256);
-            Assert.Equal(first.EntryAssemblySha256, second.EntryAssemblySha256);
-            Assert.Equal(first.ManifestSha256, second.ManifestSha256);
+            await File.WriteAllTextAsync(Path.Combine(packagePath, "plugin.dll"), payload);
+            var descriptor = await FileSystemPluginPackageInspector.InspectAsync(packagePath);
+            return new TestPackage(
+                packagePath,
+                new ProjectApplicationPluginPackageReference(
+                    pluginId,
+                    version,
+                    ProjectApplicationPluginPackageReferenceContract.ManifestPath(portableId),
+                    descriptor.PackageContentSha256));
         }
-        finally
+
+        public ValueTask WriteReferencesAsync(
+            params ProjectApplicationPluginPackageReference[] references) =>
+            ManifestStore.ReplaceAsync(Scope, references);
+
+        public void Dispose()
         {
-            if (Directory.Exists(root))
+            if (Directory.Exists(Root))
             {
-                Directory.Delete(root, recursive: true);
+                Directory.Delete(Root, recursive: true);
             }
         }
     }
 
-    [Fact]
-    public async Task DiscoverAsyncRejectsCaseAliasedManifestPropertyName()
-    {
-        var manifestJson = CanonicalManifestJson.Replace("\"id\":", "\"Id\":", StringComparison.Ordinal);
-
-        await AssertManifestRejectedAsync<JsonException>(manifestJson);
-    }
-
-    [Fact]
-    public async Task DiscoverAsyncRejectsUnknownManifestProperty()
-    {
-        var manifestJson = CanonicalManifestJson.Replace(
-            "\"capabilities\": [ \"device.test\" ]",
-            "\"capabilities\": [ \"device.test\" ], \"legacy\": true",
-            StringComparison.Ordinal);
-
-        await AssertManifestRejectedAsync<JsonException>(manifestJson);
-    }
-
-    [Theory]
-    [InlineData("\"devicedriver\"")]
-    [InlineData("1")]
-    public async Task DiscoverAsyncRejectsNonCanonicalPluginKind(string kindJson)
-    {
-        var manifestJson = CanonicalManifestJson.Replace(
-            "\"DeviceDriver\"",
-            kindJson,
-            StringComparison.Ordinal);
-
-        await AssertManifestRejectedAsync<JsonException>(manifestJson);
-    }
-
-    [Theory]
-    [InlineData("bin\\Plugin.dll")]
-    [InlineData("/Plugin.dll")]
-    [InlineData("./Plugin.dll")]
-    [InlineData("bin//Plugin.dll")]
-    [InlineData(" Plugin.dll")]
-    public async Task DiscoverAsyncRejectsNonCanonicalEntryAssembly(string entryAssembly)
-    {
-        var manifestJson = CanonicalManifestJson.Replace(
-            "\"Plugin.dll\"",
-            JsonSerializer.Serialize(entryAssembly),
-            StringComparison.Ordinal);
-
-        await AssertManifestRejectedAsync<InvalidDataException>(manifestJson);
-    }
-
-    private static async Task AssertManifestRejectedAsync<TException>(string manifestJson)
-        where TException : Exception
-    {
-        var root = Path.Combine(Path.GetTempPath(), $"openlineops-plugin-invalid-{Guid.NewGuid():N}");
-        try
-        {
-            Directory.CreateDirectory(root);
-            await File.WriteAllTextAsync(Path.Combine(root, "manifest.json"), manifestJson);
-            await File.WriteAllTextAsync(Path.Combine(root, "Plugin.dll"), "plugin-binary");
-
-            var catalog = new FileSystemPluginPackageCatalog(root);
-
-            await Assert.ThrowsAsync<TException>(async () =>
-            {
-                _ = await catalog.DiscoverAsync();
-            });
-        }
-        finally
-        {
-            if (Directory.Exists(root))
-            {
-                Directory.Delete(root, recursive: true);
-            }
-        }
-    }
-
-    private const string CanonicalManifestJson = """
-        {
-          "id": "openlineops.test",
-          "name": "Test Plugin",
-          "version": "1.0.0",
-          "kind": "DeviceDriver",
-          "entryAssembly": "Plugin.dll",
-          "entryType": "Test.Plugin",
-          "capabilities": [ "device.test" ]
-        }
-        """;
+    private sealed record TestPackage(
+        string PackagePath,
+        ProjectApplicationPluginPackageReference Reference);
 }

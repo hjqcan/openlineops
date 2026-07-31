@@ -1,3 +1,4 @@
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Plugin.Abstractions;
 using OpenLineOps.Plugins.Application.Discovery;
 using OpenLineOps.Plugins.Application.Validation;
@@ -18,10 +19,11 @@ public sealed class PluginDeviceCommandInventory : IPluginDeviceCommandInventory
     }
 
     public async ValueTask<IReadOnlyCollection<PluginDeviceCommandDescriptor>> ListDeviceCommandsAsync(
+        ProjectApplicationWorkspaceScope scope,
         CancellationToken cancellationToken = default)
     {
         var packages = await _packageCatalog
-            .DiscoverAsync(cancellationToken)
+            .DiscoverAsync(scope, cancellationToken)
             .ConfigureAwait(false);
         var commands = new Dictionary<string, PluginDeviceCommandDescriptor>(StringComparer.Ordinal);
 
@@ -69,6 +71,7 @@ public sealed class PluginDeviceCommandInventory : IPluginDeviceCommandInventory
     public async ValueTask<PluginDeviceCommandDescriptor?> FindDeviceCommandAsync(
         string capability,
         string commandName,
+        ProjectApplicationWorkspaceScope scope,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(capability) || string.IsNullOrWhiteSpace(commandName))
@@ -76,7 +79,7 @@ public sealed class PluginDeviceCommandInventory : IPluginDeviceCommandInventory
             return null;
         }
 
-        var commands = await ListDeviceCommandsAsync(cancellationToken).ConfigureAwait(false);
+        var commands = await ListDeviceCommandsAsync(scope, cancellationToken).ConfigureAwait(false);
 
         return commands.FirstOrDefault(candidate =>
             string.Equals(candidate.Capability, capability, StringComparison.Ordinal)

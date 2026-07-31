@@ -114,9 +114,17 @@ internal static class AutomationTopologyApiContract
             return errors;
         }
 
-        AddPatchRequired(errors, request.SystemType, request.DisplayName, request.Metadata);
+        AddPatchRequired(
+            errors,
+            request.SystemType,
+            request.DisplayName,
+            request.RequiredCapabilityIds,
+            request.ProvidedCapabilityIds,
+            request.Metadata);
         AddOptionalRequired(errors, nameof(request.SystemType), request.SystemType);
         AddOptionalRequired(errors, nameof(request.DisplayName), request.DisplayName);
+        AddOptionalCollectionItems(errors, nameof(request.RequiredCapabilityIds), request.RequiredCapabilityIds);
+        AddOptionalCollectionItems(errors, nameof(request.ProvidedCapabilityIds), request.ProvidedCapabilityIds);
         return errors;
     }
 
@@ -289,6 +297,17 @@ internal static class AutomationTopologyApiContract
         if (values is null)
         {
             errors[key] = ["Collection is required."];
+        }
+    }
+
+    private static void AddOptionalCollectionItems(
+        Dictionary<string, string[]> errors,
+        string key,
+        IReadOnlyCollection<string>? values)
+    {
+        if (values is not null && values.Any(string.IsNullOrWhiteSpace))
+        {
+            errors[key] = ["Collection values cannot be blank."];
         }
     }
 }

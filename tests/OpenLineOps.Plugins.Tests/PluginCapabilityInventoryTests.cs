@@ -7,6 +7,8 @@ namespace OpenLineOps.Plugins.Tests;
 
 public sealed class PluginCapabilityInventoryTests
 {
+    private static readonly ProjectApplicationWorkspaceScope Scope = PluginTestScope.Create();
+
     [Fact]
     public async Task ListCapabilitiesAsyncReturnsCapabilitiesFromCompatibleManifestsOnly()
     {
@@ -25,7 +27,7 @@ public sealed class PluginCapabilityInventoryTests
                     contractVersion: "2.0.0"))),
             new PluginManifestValidator());
 
-        var capabilities = await inventory.ListCapabilitiesAsync();
+        var capabilities = await inventory.ListCapabilitiesAsync(Scope);
 
         Assert.Equal(2, capabilities.Count);
         Assert.Contains(capabilities, capability =>
@@ -44,11 +46,11 @@ public sealed class PluginCapabilityInventoryTests
             new InMemoryPluginPackageCatalog(Package(CreateManifest("plugin.scanner", ["device.scanner"]))),
             new PluginManifestValidator());
 
-        Assert.True(await inventory.HasCapabilityAsync("device.scanner"));
-        Assert.False(await inventory.HasCapabilityAsync("Device.Scanner"));
-        Assert.False(await inventory.HasCapabilityAsync(" device.scanner "));
-        Assert.False(await inventory.HasCapabilityAsync("device.multimeter"));
-        Assert.False(await inventory.HasCapabilityAsync(" "));
+        Assert.True(await inventory.HasCapabilityAsync("device.scanner", Scope));
+        Assert.False(await inventory.HasCapabilityAsync("Device.Scanner", Scope));
+        Assert.False(await inventory.HasCapabilityAsync(" device.scanner ", Scope));
+        Assert.False(await inventory.HasCapabilityAsync("device.multimeter", Scope));
+        Assert.False(await inventory.HasCapabilityAsync(" ", Scope));
     }
 
     [Fact]
@@ -61,9 +63,9 @@ public sealed class PluginCapabilityInventoryTests
                 PluginKind.DeviceDriver,
                 "device.scanner"));
 
-        Assert.True(await inventory.HasCapabilityAsync("device.scanner"));
-        Assert.False(await inventory.HasCapabilityAsync("Device.Scanner"));
-        Assert.False(await inventory.HasCapabilityAsync(" device.scanner "));
+        Assert.True(await inventory.HasCapabilityAsync("device.scanner", Scope));
+        Assert.False(await inventory.HasCapabilityAsync("Device.Scanner", Scope));
+        Assert.False(await inventory.HasCapabilityAsync(" device.scanner ", Scope));
     }
 
     private static PluginPackageDescriptor Package(PluginManifest manifest)
@@ -92,6 +94,7 @@ public sealed class PluginCapabilityInventoryTests
         params PluginPackageDescriptor[] packages) : IPluginPackageCatalog
     {
         public ValueTask<IReadOnlyCollection<PluginPackageDescriptor>> DiscoverAsync(
+            ProjectApplicationWorkspaceScope scope,
             CancellationToken cancellationToken = default)
         {
             return ValueTask.FromResult<IReadOnlyCollection<PluginPackageDescriptor>>(packages);
@@ -102,6 +105,7 @@ public sealed class PluginCapabilityInventoryTests
         params PluginCapabilityDescriptor[] capabilities) : IPluginCapabilityInventory
     {
         public ValueTask<IReadOnlyCollection<PluginCapabilityDescriptor>> ListCapabilitiesAsync(
+            ProjectApplicationWorkspaceScope scope,
             CancellationToken cancellationToken = default)
         {
             return ValueTask.FromResult<IReadOnlyCollection<PluginCapabilityDescriptor>>(capabilities);

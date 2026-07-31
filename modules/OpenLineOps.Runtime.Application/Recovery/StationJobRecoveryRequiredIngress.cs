@@ -4,6 +4,7 @@ using OpenLineOps.Runtime.Application.Events;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runtime.Application.Recovery;
@@ -11,6 +12,7 @@ namespace OpenLineOps.Runtime.Application.Recovery;
 public sealed class StationJobRecoveryRequiredIngress(
     IProductionRunRepository runs,
     IResourceLeaseRepository resourceLeases,
+    IProductionRunSafetyTransitionStore safetyTransitions,
     IRuntimeDomainEventPublisher domainEvents,
     IClock clock)
 {
@@ -59,7 +61,11 @@ public sealed class StationJobRecoveryRequiredIngress(
                 var events = run.DomainEvents.ToArray();
                 try
                 {
-                    await runs.SaveAsync(run, entry.Revision, CancellationToken.None)
+                    await safetyTransitions.SaveWithLeaseHoldsAsync(
+                            run,
+                            entry.Revision,
+                            CreateLeaseHolds(run),
+                            CancellationToken.None)
                         .ConfigureAwait(false);
                 }
                 catch (ProductionRunConcurrencyException)
@@ -68,11 +74,6 @@ public sealed class StationJobRecoveryRequiredIngress(
                     continue;
                 }
 
-                await resourceLeases.HoldForRecoveryAsync(
-                        run.Id,
-                        message.OperationRunId,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
                 if (events.Length > 0)
                 {
                     await domainEvents.PublishAsync(events, CancellationToken.None)
@@ -85,10 +86,21 @@ public sealed class StationJobRecoveryRequiredIngress(
 
             await resourceLeases.HoldForRecoveryAsync(
                     run.Id,
-                    message.OperationRunId,
+                    CreateLeaseHolds(run),
                     CancellationToken.None)
                 .ConfigureAwait(false);
             return;
         }
     }
+
+    private static ProductionRunLeaseHold[] CreateLeaseHolds(ProductionRun run) =>
+        run.Operations
+            .Where(static operation => operation.ExecutionStatus == ExecutionStatus.Running)
+            .OrderBy(static operation => operation.OperationRunId, StringComparer.Ordinal)
+            .Select(static operation => new ProductionRunLeaseHold(
+                operation.OperationRunId,
+                operation.FencingTokens
+                    .Select(static pair => new ResourceLeaseHoldClaim(pair.Key, pair.Value))
+                    .ToArray()))
+            .ToArray();
 }

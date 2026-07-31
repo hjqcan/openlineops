@@ -113,6 +113,147 @@ public sealed class FileSystemTraceArtifactStorageTests
         Assert.StartsWith("Validation.Traceability.Artifact", result.Error.Code, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task StoreAsyncIsIdempotentForExactContentAndConflictsForDifferentContent()
+    {
+        using var directory = TemporaryDirectory.Create();
+        var storage = new FileSystemTraceArtifactStorage(directory.Path);
+        var original = "original immutable evidence"u8.ToArray();
+        var replacement = "different immutable evidence"u8.ToArray();
+        const string storageKey = "station/job/artifact.bin";
+
+        var first = await storage.StoreAsync(new StoreTraceArtifactRequest(
+            storageKey,
+            "artifact.bin",
+            "application/octet-stream",
+            new MemoryStream(original),
+            ComputeSha256(original),
+            original.LongLength));
+        var replay = await storage.StoreAsync(new StoreTraceArtifactRequest(
+            storageKey,
+            "artifact.bin",
+            "application/octet-stream",
+            new MemoryStream(original),
+            ComputeSha256(original),
+            original.LongLength));
+        var conflict = await storage.StoreAsync(new StoreTraceArtifactRequest(
+            storageKey,
+            "artifact.bin",
+            "application/octet-stream",
+            new MemoryStream(replacement),
+            ComputeSha256(replacement),
+            replacement.LongLength));
+
+        Assert.True(first.IsSuccess, first.Error.Message);
+        Assert.True(replay.IsSuccess, replay.Error.Message);
+        Assert.Equal(first.Value, replay.Value);
+        Assert.True(conflict.IsFailure);
+        Assert.Equal("Conflict.Traceability.ArtifactStorageKeyConflict", conflict.Error.Code);
+        Assert.True(new FileInfo(Path.Combine(directory.Path, "station/job/artifact.bin"))
+            .IsReadOnly);
+    }
+
+    [Fact]
+    public async Task StoreAsyncEnforcesMaximumForDeclaredAndStreamingContent()
+    {
+        using var directory = TemporaryDirectory.Create();
+        var storage = new FileSystemTraceArtifactStorage(directory.Path, maximumArtifactSizeBytes: 4);
+
+        var declared = await storage.StoreAsync(new StoreTraceArtifactRequest(
+            "too-large/declared.bin",
+            "declared.bin",
+            null,
+            new MemoryStream(new byte[5]),
+            ExpectedSizeBytes: 5));
+        var streamed = await storage.StoreAsync(new StoreTraceArtifactRequest(
+            "too-large/streamed.bin",
+            "streamed.bin",
+            null,
+            new MemoryStream(new byte[5])));
+
+        Assert.Equal(
+            "Validation.Traceability.ArtifactSizeLimitExceeded",
+            declared.Error.Code);
+        Assert.Equal(
+            "Validation.Traceability.ArtifactSizeLimitExceeded",
+            streamed.Error.Code);
+        Assert.Empty(Directory.EnumerateFiles(directory.Path, "*", SearchOption.AllDirectories));
+    }
+
+    [Theory]
+    [InlineData("reports/CON.json")]
+    [InlineData("reports/com1.txt")]
+    [InlineData("reports/name./artifact.bin")]
+    public async Task StoreAsyncRejectsReservedFilesystemSegments(string storageKey)
+    {
+        using var directory = TemporaryDirectory.Create();
+        var storage = new FileSystemTraceArtifactStorage(directory.Path);
+
+        var result = await storage.StoreAsync(new StoreTraceArtifactRequest(
+            storageKey,
+            "artifact.bin",
+            null,
+            new MemoryStream([1])));
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Validation.Traceability.ArtifactStorageKeyInvalid", result.Error.Code);
+    }
+
+    [Fact]
+    public async Task StoreAsyncRejectsReparseDirectoryBeforeWritingOutsideRoot()
+    {
+        using var root = TemporaryDirectory.Create();
+        using var outside = TemporaryDirectory.Create();
+        var link = Path.Combine(root.Path, "redirect");
+        if (!TryCreateDirectoryLink(link, outside.Path))
+        {
+            return;
+        }
+
+        var storage = new FileSystemTraceArtifactStorage(root.Path);
+        var result = await storage.StoreAsync(new StoreTraceArtifactRequest(
+            "redirect/escaped.bin",
+            "escaped.bin",
+            null,
+            new MemoryStream([1, 2, 3])));
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("Validation.Traceability.ArtifactPathUnsafe", result.Error.Code);
+        Assert.False(File.Exists(Path.Combine(outside.Path, "escaped.bin")));
+    }
+
+    [Fact]
+    public void ConstructorRejectsReparsePointInRootAncestorChain()
+    {
+        using var links = TemporaryDirectory.Create();
+        using var target = TemporaryDirectory.Create();
+        var linkedParent = Path.Combine(links.Path, "linked-parent");
+        if (!TryCreateDirectoryLink(linkedParent, target.Path))
+        {
+            return;
+        }
+
+        var rootThroughLink = Path.Combine(linkedParent, "artifacts");
+
+        Assert.Throws<InvalidDataException>(() =>
+            new FileSystemTraceArtifactStorage(rootThroughLink));
+    }
+
+    private static bool TryCreateDirectoryLink(string linkPath, string targetPath)
+    {
+        try
+        {
+            Directory.CreateSymbolicLink(linkPath, targetPath);
+            return true;
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException
+                                            or IOException
+                                            or PlatformNotSupportedException)
+        {
+            return false;
+        }
+    }
+
     private static string ComputeSha256(byte[] bytes)
     {
         return Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
@@ -142,6 +283,14 @@ public sealed class FileSystemTraceArtifactStorageTests
         {
             if (Directory.Exists(Path))
             {
+                foreach (var entry in Directory.EnumerateFileSystemEntries(
+                             Path,
+                             "*",
+                             SearchOption.AllDirectories))
+                {
+                    File.SetAttributes(entry, File.GetAttributes(entry) & ~FileAttributes.ReadOnly);
+                }
+
                 Directory.Delete(Path, recursive: true);
             }
         }

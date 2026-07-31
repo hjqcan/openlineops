@@ -19,6 +19,7 @@ public static class StationDispatchMessageIdentity
             idempotencyKey,
             request.AgentId,
             request.StationId,
+            request.StationSystemId,
             request.JobId,
             request.ProductionRunId,
             request.OperationRunId,

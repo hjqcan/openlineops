@@ -8,6 +8,8 @@ using OpenLineOps.Devices.Application.Execution;
 using OpenLineOps.Devices.Application.Execution.ExternalPrograms;
 using OpenLineOps.Devices.Domain.Identifiers;
 using OpenLineOps.Devices.Infrastructure.Execution;
+using OpenLineOps.Devices.Infrastructure.Execution.ExternalPrograms;
+using OpenLineOps.Plugins.Application.Trials;
 using OpenLineOps.Projects.Application.ExternalPrograms;
 using OpenLineOps.Runtime.Application.Commands;
 using OpenLineOps.Runtime.Contracts;
@@ -17,14 +19,20 @@ namespace OpenLineOps.Devices.Api.ExternalPrograms;
 public sealed class ExternalProgramResourceTrialExecutor : IExternalProgramTrialExecutor
 {
     private readonly IExternalProgramHost _host;
-    private readonly IExternalProgramProviderTrialAdapter[] _providerAdapters;
+    private readonly IPluginProviderTrialRunner _providerTrialRunner;
+    private readonly ExternalProgramProtocolTrialOptions _options;
 
     public ExternalProgramResourceTrialExecutor(
         IExternalProgramHost host,
-        IEnumerable<IExternalProgramProviderTrialAdapter> providerAdapters)
+        IPluginProviderTrialRunner providerTrialRunner,
+        ExternalProgramProtocolTrialOptions options,
+        ExternalProgramHostOptions hostOptions)
     {
-        _host = host;
-        _providerAdapters = providerAdapters.ToArray();
+        _host = host ?? throw new ArgumentNullException(nameof(host));
+        _providerTrialRunner = providerTrialRunner
+                               ?? throw new ArgumentNullException(nameof(providerTrialRunner));
+        _options = options ?? throw new ArgumentNullException(nameof(options));
+        _options.Validate(hostOptions);
     }
 
     public async ValueTask<Result<ExternalProgramProtocolTrialResult>> ExecuteAsync(
@@ -36,6 +44,15 @@ public sealed class ExternalProgramResourceTrialExecutor : IExternalProgramTrial
         ArgumentNullException.ThrowIfNull(scope);
         ArgumentNullException.ThrowIfNull(resource);
         ArgumentNullException.ThrowIfNull(request);
+        if (resource.LaunchKind == ExternalProgramLaunchKind.ApplicationExecutable
+            && !_options.AllowsApplicationExecutable)
+        {
+            return Result.Failure<ExternalProgramProtocolTrialResult>(ApplicationError.Conflict(
+                "Projects.ApplicationExecutableProtocolTrialDisabled",
+                "Application executable protocol trials are disabled on this host. "
+                + "Run executable validation through a restricted Station execution boundary."));
+        }
+
         try
         {
             var values = ParseInputs(resource, request);
@@ -86,33 +103,23 @@ public sealed class ExternalProgramResourceTrialExecutor : IExternalProgramTrial
             }
             else
             {
-                var adapters = _providerAdapters.Where(adapter =>
-                        string.Equals(adapter.ProviderKind, resource.ProviderKind, StringComparison.Ordinal)
-                        && string.Equals(adapter.ProviderKey, resource.ProviderKey, StringComparison.Ordinal))
-                    .Take(2)
-                    .ToArray();
-                if (adapters.Length != 1)
-                {
-                    return Result.Failure<ExternalProgramProtocolTrialResult>(ApplicationError.Validation(
-                        "Projects.ExternalProgramProviderTrialAdapterInvalid",
-                        $"Provider resource {resource.ResourceId} must resolve to exactly one authorized trial adapter."));
-                }
-
-                var providerResult = await adapters[0].ExecuteAsync(
-                        new ExternalProgramProviderTrialExecutionRequest(
-                            scope,
-                            resource,
+                var providerResult = await _providerTrialRunner.ExecuteAsync(
+                        scope,
+                        new PluginProviderTrialRequest(
+                            resource.ProviderKind!,
+                            resource.ProviderKey!,
+                            resource.CapabilityId,
+                            resource.CommandName,
                             invocation,
-                            arguments,
-                            TimeSpan.FromMilliseconds(resource.ExecutionLimits.TimeoutMilliseconds)),
+                            checked((int)resource.ExecutionLimits.TimeoutMilliseconds)),
                         cancellationToken)
                     .ConfigureAwait(false);
-                mapped = providerResult.ExecutionStatus == ExternalProgramProviderTrialExecutionStatus.Completed
+                mapped = providerResult.Outcome == PluginProviderTrialOutcome.Completed
                     ? ProjectReleaseExternalProgramCommandExecutor.MapCompletedProtocolResult(
                         ToRoute(scope, resource, entryPointFile: null),
                         providerResult.ResultPayload)
                     : ToRuntimeResult(providerResult);
-                artifacts = providerResult.Artifacts;
+                artifacts = [];
             }
 
             return Result.Success(new ExternalProgramProtocolTrialResult(
@@ -399,18 +406,18 @@ public sealed class ExternalProgramResourceTrialExecutor : IExternalProgramTrial
         };
 
     private static RuntimeCommandExecutionResult ToRuntimeResult(
-        ExternalProgramProviderTrialExecutionResult result) => result.ExecutionStatus switch
+        PluginProviderTrialResult result) => result.Outcome switch
         {
-            ExternalProgramProviderTrialExecutionStatus.Failed => RuntimeCommandExecutionResult.Failed(
+            PluginProviderTrialOutcome.Failed => RuntimeCommandExecutionResult.Failed(
                 result.FailureReason ?? "External program Provider trial failed."),
-            ExternalProgramProviderTrialExecutionStatus.TimedOut => RuntimeCommandExecutionResult.TimedOut(
+            PluginProviderTrialOutcome.TimedOut => RuntimeCommandExecutionResult.TimedOut(
                 result.FailureReason ?? "External program Provider trial timed out."),
-            ExternalProgramProviderTrialExecutionStatus.Canceled => RuntimeCommandExecutionResult.Canceled(
+            PluginProviderTrialOutcome.Canceled => RuntimeCommandExecutionResult.Canceled(
                 result.FailureReason ?? "External program Provider trial was canceled."),
-            ExternalProgramProviderTrialExecutionStatus.Rejected => RuntimeCommandExecutionResult.Rejected(
+            PluginProviderTrialOutcome.Rejected => RuntimeCommandExecutionResult.Rejected(
                 result.FailureReason ?? "External program Provider trial was rejected."),
             _ => RuntimeCommandExecutionResult.Failed(
-                $"External program Provider trial returned unsupported status {result.ExecutionStatus}.")
+                $"External program Provider trial returned unsupported status {result.Outcome}.")
         };
 
     private static ExecutionStatus ToExecutionStatus(RuntimeCommandExecutionOutcome outcome) => outcome switch

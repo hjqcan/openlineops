@@ -63,6 +63,17 @@ public sealed class ProcessFlowIrCompilerTests
         Assert.Equal(FlowIrSourceElementKind.ProcessNode, action.Source.ElementKind);
         Assert.Equal("inspect", action.Source.ElementId);
         Assert.Null(action.Source.ContentHash);
+        var operational = Assert.IsType<FlowIrOperationalPolicy>(action.OperationalPolicy);
+        Assert.Equal(FlowIrIdempotencyClass.NonIdempotent, operational.IdempotencyClass);
+        Assert.Equal(FlowIrRecoveryPolicy.ManualAuthorization, operational.RecoveryPolicy);
+        Assert.Equal(FlowIrFailurePolicy.Terminate, operational.FailurePolicy);
+        Assert.Equal(
+            "System:system.vision",
+            Assert.Single(operational.ResourceLocks).ResourceId);
+        Assert.Equal(
+            "execution-outcome",
+            Assert.Single(operational.EvidenceRequirements).EvidenceKind);
+        Assert.Equal(Enum.GetValues<FlowIrStationMode>(), operational.AllowedStationModes);
     }
 
     [Theory]
@@ -239,6 +250,9 @@ public sealed class ProcessFlowIrCompilerTests
         Assert.Contains("\"kind\":\"deviceCommand\"", first.Value.CanonicalJson, StringComparison.Ordinal);
         Assert.Contains("\"timeoutMilliseconds\":30000", first.Value.CanonicalJson, StringComparison.Ordinal);
         Assert.Contains("\"cancellationMode\":\"cooperative\"", first.Value.CanonicalJson, StringComparison.Ordinal);
+        Assert.Contains("\"idempotencyClass\":\"nonIdempotent\"", first.Value.CanonicalJson, StringComparison.Ordinal);
+        Assert.Contains("\"recoveryPolicy\":\"manualAuthorization\"", first.Value.CanonicalJson, StringComparison.Ordinal);
+        Assert.Contains("\"failurePolicy\":\"terminate\"", first.Value.CanonicalJson, StringComparison.Ordinal);
         Assert.DoesNotContain("TimeoutTicks", first.Value.CanonicalJson, StringComparison.Ordinal);
         Assert.Equal(
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(first.Value.CanonicalJson)))
@@ -248,6 +262,107 @@ public sealed class ProcessFlowIrCompilerTests
         var roundTrip = serializer.Deserialize(first.Value.CanonicalJson);
         Assert.True(roundTrip.IsSuccess, roundTrip.Error.Message);
         Assert.Equal(first.Value.Sha256, serializer.Serialize(roundTrip.Value).Value.Sha256);
+    }
+
+    [Fact]
+    public void CanonicalSerializerKeepsLegacyFlowWithoutOperationalPolicyReadable()
+    {
+        var definition = CreateCommandDefinition(reverseInsertionOrder: false);
+        Publish(definition);
+        var compilation = _compiler.Compile(definition);
+        var legacyDocument = compilation.Value.Document with
+        {
+            Nodes = compilation.Value.Document.Nodes
+                .Select(node => node with
+                {
+                    Actions = node.Actions
+                        .Select(action => action with { OperationalPolicy = null })
+                        .ToImmutableArray()
+                })
+                .ToImmutableArray()
+        };
+        var serializer = new FlowIrCanonicalSerializer();
+
+        var artifact = serializer.Serialize(legacyDocument);
+        var restored = serializer.Deserialize(artifact.Value.CanonicalJson);
+
+        Assert.True(artifact.IsSuccess, artifact.Error.Message);
+        Assert.DoesNotContain("\"operationalPolicy\"", artifact.Value.CanonicalJson, StringComparison.Ordinal);
+        Assert.True(restored.IsSuccess, restored.Error.Message);
+        Assert.All(
+            restored.Value.Nodes.SelectMany(node => node.Actions),
+            action => Assert.Null(action.OperationalPolicy));
+    }
+
+    [Fact]
+    public void CanonicalSerializerRejectsAutomaticReplayForNonIdempotentAction()
+    {
+        var definition = CreateCommandDefinition(reverseInsertionOrder: false);
+        Publish(definition);
+        var compilation = _compiler.Compile(definition);
+        var invalid = compilation.Value.Document with
+        {
+            Nodes = compilation.Value.Document.Nodes
+                .Select(node => node.NodeId != "inspect"
+                    ? node
+                    : node with
+                    {
+                        Actions =
+                        [
+                            node.Actions[0] with
+                            {
+                                OperationalPolicy = node.Actions[0].OperationalPolicy! with
+                                {
+                                    RecoveryPolicy = FlowIrRecoveryPolicy.AutomaticReplay
+                                }
+                            }
+                        ]
+                    })
+                .ToImmutableArray()
+        };
+
+        var result = new FlowIrCanonicalSerializer().Serialize(invalid);
+
+        Assert.True(result.IsFailure);
+        Assert.Contains("automatically replay", result.Error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CanonicalSerializerRejectsRetryForNonIdempotentAction()
+    {
+        var definition = CreateCommandDefinition(reverseInsertionOrder: false);
+        Publish(definition);
+        var compilation = _compiler.Compile(definition);
+        var invalid = compilation.Value.Document with
+        {
+            Nodes = compilation.Value.Document.Nodes
+                .Select(node => node.NodeId != "inspect"
+                    ? node
+                    : node with
+                    {
+                        Actions =
+                        [
+                            node.Actions[0] with
+                            {
+                                Execution = node.Actions[0].Execution with
+                                {
+                                    RetryLimit = 1
+                                },
+                                OperationalPolicy = node.Actions[0].OperationalPolicy! with
+                                {
+                                    FailurePolicy = FlowIrFailurePolicy.Retry
+                                }
+                            }
+                        ]
+                    })
+                .ToImmutableArray()
+        };
+
+        var result = new FlowIrCanonicalSerializer().Serialize(invalid);
+
+        Assert.True(result.IsFailure);
+        Assert.Contains("cannot retry unless it is idempotent", result.Error.Message,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -316,6 +431,15 @@ public sealed class ProcessFlowIrCompilerTests
         Assert.Equal("vision-camera", command.TargetCapability.Value);
         Assert.Equal("Inspect", command.CommandName);
         Assert.Equal(TimeSpan.FromSeconds(30), command.Timeout);
+        var runtimePolicy = Assert.IsType<
+            OpenLineOps.Runtime.Application.Processes.ExecutableRuntimeActionPolicy>(
+            command.OperationalPolicy);
+        Assert.Equal(
+            OpenLineOps.Runtime.Application.Processes.RuntimeActionIdempotencyClass.NonIdempotent,
+            runtimePolicy.IdempotencyClass);
+        Assert.Equal(
+            OpenLineOps.Runtime.Application.Processes.RuntimeActionRecoveryPolicy.ManualAuthorization,
+            runtimePolicy.RecoveryPolicy);
         var loop = Assert.Single(result.Value.Transitions, transition => transition.Label == "retry");
         Assert.Equal(3, loop.MaxTraversals);
     }

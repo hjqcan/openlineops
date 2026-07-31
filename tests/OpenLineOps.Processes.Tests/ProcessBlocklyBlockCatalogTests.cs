@@ -1,4 +1,5 @@
 using System.Text.Json;
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Processes.Application.Persistence;
 using OpenLineOps.Processes.Application.Scripting;
@@ -33,7 +34,7 @@ public sealed class ProcessBlocklyBlockCatalogTests
             block.IsBuiltIn
             && block.BlockType == "openlineops_run_external_program");
         var builtIns = result.Value.Where(block => block.IsBuiltIn).ToArray();
-        Assert.Equal(6, builtIns.Length);
+        Assert.Equal(7, builtIns.Length);
         var serializer = new RuntimeActionContractCanonicalSerializer();
         Assert.All(
             builtIns,
@@ -273,7 +274,12 @@ public sealed class ProcessBlocklyBlockCatalogTests
         return new ProcessBlocklyBlockCatalog(
             new TestBlockRepository(),
             new FixedClock(RegisteredAtUtc),
-            sources);
+            sources,
+            new ProjectApplicationWorkspaceScope(
+                "project.test",
+                "application.test",
+                Path.Combine(Path.GetTempPath(), "openlineops-blockly-tests"),
+                "applications/test/test.oloapp"));
     }
 
     private static RegisterProcessBlocklyBlockDefinitionRequest Registration(
@@ -387,6 +393,7 @@ public sealed class ProcessBlocklyBlockCatalogTests
         IReadOnlyCollection<ProcessBlocklyBlockDefinitionDetails> blocks) : IProcessBlocklyBlockCatalogSource
     {
         public ValueTask<IReadOnlyCollection<ProcessBlocklyBlockDefinitionDetails>> ListAsync(
+            ProjectApplicationWorkspaceScope scope,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();

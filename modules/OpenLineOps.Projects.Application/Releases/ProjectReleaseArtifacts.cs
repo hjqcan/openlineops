@@ -60,7 +60,14 @@ public sealed record ProjectReleaseOperation(
     string FlowIrCanonicalJson,
     IReadOnlyCollection<string> BlockVersionIds,
     IReadOnlyCollection<ProjectReleaseOperationResource> Resources,
+    IReadOnlyCollection<ProjectReleaseOperationInputMapping> InputMappings,
     IReadOnlyCollection<ProjectReleaseAuthorizedAction> AuthorizedActions);
+
+public sealed record ProjectReleaseOperationInputMapping(
+    string TargetInputKey,
+    string SourceOperationId,
+    string SourceOutputKey,
+    string ExpectedValueKind);
 
 public sealed record ProjectReleaseOperationResource(
     string BindingId,
@@ -97,7 +104,8 @@ public sealed record ProjectReleaseLineControllerAuthorization(
 public sealed record ProjectReleaseRouteTransition(
     string TransitionId,
     string SourceOperationId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    string? TerminalDisposition,
     string Kind,
     string? RequiredJudgement,
     int? MaxTraversals,

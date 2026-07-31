@@ -5,26 +5,44 @@ using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class OperationsAlarmsApiTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class OperationsAlarmsApiTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
-    private readonly HttpClient _client;
+    private readonly HttpClient _operatorClient;
+    private readonly HttpClient _stationAgentClient;
 
-    public OperationsAlarmsApiTests(WebApplicationFactory<Program> factory)
+    public OperationsAlarmsApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        var options = new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
-        });
+        };
+        _operatorClient = factory.CreateAuthenticatedClient(options, ApiTestAuthentication.OperatorToken);
+        _stationAgentClient = factory.CreateAuthenticatedClient(options, ApiTestAuthentication.StationAgentToken);
     }
 
     [Fact]
-    public async Task AlarmLifecycleEndpointsRaiseAcknowledgeResolveAndQueryOpenAlarms()
+    public async Task AlarmLifecycleAllowsStationSourceClearanceButNotOperatorResolution()
     {
         var suffix = Guid.NewGuid().ToString("N");
         var alarmId = $"operations.alarm.api.{suffix}";
-        var stationId = $"station-operations-{suffix}";
+        var stationId = ApiTestAuthentication.StationAgentStationId;
 
-        using var raiseResponse = await _client.PostAsJsonAsync("/api/operations/alarms", new
+        using var forbiddenRaiseResponse = await _operatorClient.PostAsJsonAsync(
+            "/api/operations/alarms",
+            new
+            {
+                id = $"{alarmId}.forbidden",
+                stationId,
+                source = "runtime",
+                sourceId = $"session-{suffix}",
+                severity = 3,
+                title = "Runtime command failed",
+                description = "The command failed during execution."
+            });
+
+        Assert.Equal(HttpStatusCode.Forbidden, forbiddenRaiseResponse.StatusCode);
+
+        using var raiseResponse = await _stationAgentClient.PostAsJsonAsync("/api/operations/alarms", new
         {
             id = alarmId,
             stationId,
@@ -41,7 +59,7 @@ public sealed class OperationsAlarmsApiTests : IClassFixture<WebApplicationFacto
         Assert.Equal(stationId, raiseBody.RootElement.GetProperty("stationId").GetString());
         Assert.Equal(0, raiseBody.RootElement.GetProperty("status").GetInt32());
 
-        using var openResponse = await _client.GetAsync(
+        using var openResponse = await _operatorClient.GetAsync(
             $"/api/operations/alarms/open?stationId={Uri.EscapeDataString(stationId)}");
         using var openBody = await ReadJsonAsync(openResponse);
         var openAlarm = Assert.Single(openBody.RootElement.EnumerateArray());
@@ -49,27 +67,45 @@ public sealed class OperationsAlarmsApiTests : IClassFixture<WebApplicationFacto
         Assert.Equal(HttpStatusCode.OK, openResponse.StatusCode);
         Assert.Equal(alarmId, openAlarm.GetProperty("id").GetString());
 
-        using var acknowledgeResponse = await _client.PostAsJsonAsync(
+        using var acknowledgeResponse = await _operatorClient.PostAsJsonAsync(
             $"/api/operations/alarms/{Uri.EscapeDataString(alarmId)}/acknowledgement",
-            new { acknowledgedBy = "operator-api" });
+            new { });
         using var acknowledgeBody = await ReadJsonAsync(acknowledgeResponse);
 
         Assert.Equal(HttpStatusCode.OK, acknowledgeResponse.StatusCode);
         Assert.True(acknowledgeBody.RootElement.GetProperty("succeeded").GetBoolean());
 
-        using var resolveResponse = await _client.PostAsJsonAsync(
-            $"/api/operations/alarms/{Uri.EscapeDataString(alarmId)}/resolution",
+        using var forbiddenClearResponse = await _operatorClient.PostAsJsonAsync(
+            $"/api/operations/alarms/{Uri.EscapeDataString(alarmId)}/source-clearance",
             new
             {
-                resolvedBy = "operator-api",
-                resolutionNote = "Recovered and verified."
+                clearanceNote = "Recovered and verified."
             });
-        using var resolveBody = await ReadJsonAsync(resolveResponse);
 
-        Assert.Equal(HttpStatusCode.OK, resolveResponse.StatusCode);
-        Assert.True(resolveBody.RootElement.GetProperty("succeeded").GetBoolean());
+        Assert.Equal(HttpStatusCode.Forbidden, forbiddenClearResponse.StatusCode);
 
-        using var resolvedOpenResponse = await _client.GetAsync(
+        using var clearResponse = await _stationAgentClient.PostAsJsonAsync(
+            $"/api/operations/alarms/{Uri.EscapeDataString(alarmId)}/source-clearance",
+            new
+            {
+                clearanceNote = "Recovered and verified."
+            });
+        using var clearBody = await ReadJsonAsync(clearResponse);
+
+        Assert.Equal(HttpStatusCode.OK, clearResponse.StatusCode);
+        Assert.True(clearBody.RootElement.GetProperty("succeeded").GetBoolean());
+
+        using var resolvedResponse = await _operatorClient.GetAsync(
+            $"/api/operations/alarms/{Uri.EscapeDataString(alarmId)}");
+        using var resolvedBody = await ReadJsonAsync(resolvedResponse);
+        Assert.Equal(
+            ApiTestAuthentication.OperatorActorId,
+            resolvedBody.RootElement.GetProperty("acknowledgedBy").GetString());
+        Assert.Equal(
+            ApiTestAuthentication.StationAgentActorId,
+            resolvedBody.RootElement.GetProperty("resolvedBy").GetString());
+
+        using var resolvedOpenResponse = await _operatorClient.GetAsync(
             $"/api/operations/alarms/open?stationId={Uri.EscapeDataString(stationId)}");
         using var resolvedOpenBody = await ReadJsonAsync(resolvedOpenResponse);
 

@@ -13,6 +13,7 @@ internal static class BuiltInRuntimeActionContracts
             "openlineops_rotate_motor" => RotateMotor(),
             "openlineops_wait" => Wait(),
             "openlineops_result_from_input" => ResultFromInput(),
+            "openlineops_result_from_production_input" => ResultFromProductionInput(),
             "openlineops_run_external_program" => RunExternalProgram(),
             _ => throw new ArgumentException(
                 $"Built-in Blockly block {blockType} does not have a Runtime Action Contract.",
@@ -137,6 +138,23 @@ internal static class BuiltInRuntimeActionContracts
                     Literal("timestamp_utc"),
                     new RuntimeActionContextValue(RuntimeActionContextValueKind.TimestampUtc),
                     new RuntimeActionFieldEqualsCondition("INCLUDE_TIMESTAMP", ExpectedValue: true))
+            ]));
+    }
+
+    private static RuntimeActionContract ResultFromProductionInput()
+    {
+        return Contract(
+            "result.from-production-input",
+            new Dictionary<string, RuntimeActionFieldDefinition>(StringComparer.Ordinal)
+            {
+                ["INPUT_KEY"] = TextField(maxLength: 256),
+                ["OUTPUT_KEY"] = TextField(maxLength: 256)
+            },
+            new RuntimeResultPatchEmit(
+            [
+                new RuntimeResultPatchAssignment(
+                    Field("OUTPUT_KEY"),
+                    Object(("$productionInput", Field("INPUT_KEY"))))
             ]));
     }
 

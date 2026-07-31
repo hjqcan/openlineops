@@ -26,16 +26,17 @@ They share application contracts, not UI state or a mutable global project
 object. No production host executes draft state or reconstructs trusted
 execution data from UI input.
 
-## Reference boundary
+## Product boundary
 
-The earlier SmartMatriX product is useful only as prior-art input for the user
-experience: a directory represents a project, the start experience is New/Open/
-Recent, the explorer uses automation vocabulary, and an operator has explicit
-run and safety controls.
+An OpenLineOps project is a directory with explicit project and application
+manifests. Studio provides New, Open, and Recent entry points, an
+automation-oriented Project Explorer, and explicit operator run and safety
+controls.
 
-OpenLineOps does not accept `.ak`, serialize a CLR object graph as project
-source, use one global mutable kernel, infer edit mode by hiding windows, or
-write runtime databases and logs back into editable source.
+OpenLineOps accepts only its documented project formats. It does not serialize a
+CLR object graph as project source, use one global mutable kernel, infer edit
+mode by hiding windows, or write runtime databases and logs back into editable
+source.
 
 ## Product artifacts and execution flow
 
@@ -142,12 +143,31 @@ Problems navigation. Saving changes editable source only. Publishing performs
 cross-context validation and creates immutable content; Save and Publish are
 different commands.
 
+The Topology editor tracks Capability, Driver, semantic target, and geometry
+drafts independently. Save All commits Capability creation first, then Driver
+migrations before System Capability removal, followed by semantic target and
+geometry changes. Hidden editor tabs remain saveable. An inline Discard Drafts
+action reloads persisted Application source, and entering Run mode is blocked
+by the same unsaved-document guard used for Application switching and close.
+The guard's global Discard Changes action awaits every affected editor's real
+revert operation; it never clears registry dirty state without reloading the
+underlying draft, and a failed revert keeps the guard open.
+
+Engineering Configuration and global Device Integration participate in that
+same document lifecycle. Their creation forms retain an explicit saved-source
+baseline, preserve edits made while an asynchronous save is in flight, expose
+inline Discard Changes, and never let a refresh overwrite a dirty draft.
+Engineering Save persists mutable Recipe and Station Profile Application
+source only; Publish Snapshot is a separate command that requires clean,
+already-saved source before it freezes the Recipe and Configuration Snapshot.
+
 ### Edit mode
 
 Edit mode exposes:
 
 - a hierarchical 2D topology/layout editor for Station Systems, child Systems,
-  Groups, and Slots;
+  Groups, and Slots, including Capability-contract creation, System
+  required/provided assignment, and Driver binding;
 - a Line Designer for Product Model, Operation nodes, typed route edges,
   bounded rework, and parallel fork/join;
 - Blockly and explicit PythonScript editing;
@@ -158,8 +178,9 @@ Edit mode exposes:
 - Trace navigation that never mutates production evidence.
 
 Moving a Station shape moves its complete visual subtree because child geometry
-is parent-local. A future 3D renderer must use the same semantic topology,
-published identities, and runtime projection rather than introduce another line
+is parent-local. The editable semantic 3D view uses the same topology,
+parent-local geometry, published identities, and runtime projection; a 3D drag
+therefore persists directly into the shared layout rather than another line
 model.
 
 ### Run and monitor mode
@@ -233,6 +254,14 @@ reparse-point escape, ambiguous casing, and writes outside the Application
 root. Source writes are staged and atomically replaced. Content-addressed node
 files are written before `flow.json`, which acts as the commit pointer.
 
+Opening or creating a Project also requires the `.oloproj`, Project root, and
+every existing parent to be ordinary filesystem paths. Studio and the backend
+reject Projects reached through symbolic links, junctions, mount-point reparse
+paths, or other redirected parents so the IDE and runtime bind one unambiguous
+physical workspace. This preflight happens before directory creation or any
+Application write. The `.oloproj` and `.oloapp` extensions are exact lowercase
+canonical names; case aliases are not accepted.
+
 There is one strict current schema per resource. Unknown fields, missing fields,
 unknown enum values, noncanonical identities, and removed formats fail loading.
 There is no compatibility reader, alias, migration path, or automatic backfill.
@@ -247,7 +276,15 @@ A `ProductionLineDefinition` contains:
   and configuration snapshot id;
 - `RouteTransition` edges of kind `Sequence`, `Judgement`, `Condition`,
   `Rework`, `ParallelFork`, or `ParallelJoin`;
+- one required `routeLayout.operationPositions` collection with exactly one
+  bounded integer `(x, y)` coordinate for every Operation;
 - optional external-program adapter resources.
+
+Route layout is authoring state inside the same `line.json`, not a detached UI
+preference. Drag and Auto Arrange therefore participate in the line's dirty
+state, atomic save, revision/ETag conflict check, Application copy, and Save All
+workflow. Missing, extra, case-ambiguous, duplicate, or out-of-range positions
+make the current resource invalid; there is no layout backfill reader.
 
 There is no duplicate Station aggregate in Production. An Operation binds
 directly to the `StationSystem` identity owned by Topology. Publication rejects

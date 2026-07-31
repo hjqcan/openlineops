@@ -3,13 +3,72 @@ using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Infrastructure.Transport;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.Agent.Tests;
 
 public sealed class RabbitMqStationTransportReliabilityTests
 {
+    private const string StationGateEvidence =
+        "station-lifecycle:station-system.main:3:Automatic:Execute|controller-handshake:7";
+    private const string StationGateRevision =
+        "station-gate-revision:v1:station-system.main:3:1";
     private static readonly DateTimeOffset Now =
         new(2026, 7, 11, 8, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task QuiescenceRejectsNewDeliveriesAndWaitsForInFlightCleanup()
+    {
+        var quiescence = new StationDeliveryQuiescence();
+        var entered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var inFlight = quiescence.ExecuteAsync(
+            async () =>
+            {
+                entered.TrySetResult();
+                await release.Task;
+            },
+            CancellationToken.None);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        var drained = quiescence.StopAcceptingAndWaitAsync();
+        Assert.False(drained.IsCompleted);
+        var lateDeliveryRan = false;
+        await quiescence.ExecuteAsync(
+            () =>
+            {
+                lateDeliveryRan = true;
+                return Task.CompletedTask;
+            },
+            CancellationToken.None);
+        Assert.False(lateDeliveryRan);
+
+        release.TrySetResult();
+        await inFlight.WaitAsync(TimeSpan.FromSeconds(2));
+        await drained.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task QuiescenceDoesNotStartDeliveryAfterShutdownCancellation()
+    {
+        var quiescence = new StationDeliveryQuiescence();
+        using var stopping = new CancellationTokenSource();
+        stopping.Cancel();
+        var handlerRan = false;
+
+        await quiescence.ExecuteAsync(
+            () =>
+            {
+                handlerRan = true;
+                return Task.CompletedTask;
+            },
+            stopping.Token);
+        await quiescence.StopAcceptingAndWaitAsync();
+
+        Assert.False(handlerRan);
+    }
 
     [Fact]
     public async Task ConfirmedPublisherFailureEscapesAndIdenticalRetryKeepsCanonicalIdentity()
@@ -42,7 +101,10 @@ public sealed class RabbitMqStationTransportReliabilityTests
         Assert.Equal(accepted.MessageId, publication.MessageId);
         Assert.Equal(accepted.JobId, publication.CorrelationId);
         Assert.Equal(
-            "station.station.main.StationJobAccepted",
+            StationTransportRoute.Event(
+                "agent.main",
+                "station.main",
+                nameof(StationJobAccepted)),
             publication.RoutingKey);
     }
 
@@ -110,6 +172,38 @@ public sealed class RabbitMqStationTransportReliabilityTests
 
         Assert.False(handled);
         Assert.Equal([(3UL, false)], settlement.Rejected);
+    }
+
+    [Fact]
+    public async Task JobForDifferentStationSystemIsRejectedBeforeInboxHandler()
+    {
+        var request = JobRequest() with
+        {
+            StationSystemId = "station-system.spoof",
+            ResourceFences =
+            [
+                new StationResourceFence(
+                    "Station",
+                    "station-system.spoof",
+                    7,
+                    Now.AddMinutes(5))
+            ]
+        };
+        var settlement = new RecordingSettlement();
+        var handled = false;
+
+        await new StationJobDeliveryProcessor(JobOptions()).ProcessAsync(
+            Delivery(request, deliveryTag: 4, redelivered: false),
+            (_, _) =>
+            {
+                handled = true;
+                return ValueTask.CompletedTask;
+            },
+            IgnoreResourceLeaseAsync,
+            settlement);
+
+        Assert.False(handled);
+        Assert.Equal([(4UL, false)], settlement.Rejected);
     }
 
     [Fact]
@@ -194,6 +288,15 @@ public sealed class RabbitMqStationTransportReliabilityTests
         Assert.Equal(
             publisher.Publications[0].MessageId,
             publisher.Publications[1].MessageId);
+        Assert.All(
+            publisher.Publications,
+            publication => Assert.Equal(
+                StationTransportRoute.Event(
+                    options.AgentId,
+                    options.StationId,
+                    "emergency-stop-acknowledged"),
+                publication.RoutingKey));
+        Assert.Equal(3, publisher.Publications[1].RoutingKey.Split('.').Length);
     }
 
     [Fact]
@@ -231,6 +334,7 @@ public sealed class RabbitMqStationTransportReliabilityTests
         new Uri("amqp://localhost"),
         "agent.main",
         "station.main",
+        "station-system.main",
         RequireTls: false);
 
     private static RabbitMqStationSafetyOptions SafetyOptions() => new(
@@ -242,7 +346,7 @@ public sealed class RabbitMqStationTransportReliabilityTests
     private static StationJobRequested JobRequest()
     {
         using var inputs = JsonDocument.Parse("{}");
-        return new StationJobRequested(
+        var request = new StationJobRequested(
             Guid.NewGuid(),
             Guid.NewGuid(),
             "job/unit-001/operation.main/1",
@@ -278,6 +382,17 @@ public sealed class RabbitMqStationTransportReliabilityTests
                 Now.AddMinutes(5))],
             inputs.RootElement.Clone(),
             Now);
+        return StationMessageContract.BindStationExecutionGateEvidence(
+            request,
+            StationGateRevision,
+            StationGateEvidence,
+            Now,
+            Now.AddMinutes(5),
+            new StationAgentControlLeaseDispatchAuthority(
+                request.AgentId,
+                "11111111-1111-4111-8111-111111111111",
+                FencingToken: 17,
+                Now.AddMinutes(10)));
     }
 
     private static StationTransportDelivery Delivery(
@@ -291,7 +406,7 @@ public sealed class RabbitMqStationTransportReliabilityTests
         "coordinator.main",
         request.MessageId.ToString("D"),
         request.JobId.ToString("D"),
-        $"station.{request.AgentId}.{request.StationId}",
+        StationTransportRoute.Job(request.AgentId, request.StationId),
         redelivered,
         JsonSerializer.SerializeToUtf8Bytes(request, JsonOptions()));
 
@@ -306,7 +421,10 @@ public sealed class RabbitMqStationTransportReliabilityTests
         "coordinator.main",
         request.MessageId.ToString("D"),
         request.MessageId.ToString("D"),
-        $"station.{request.AgentId}.{request.StationId}.emergency-stop",
+        StationTransportRoute.Safety(
+            request.AgentId,
+            request.StationId,
+            "emergency-stop"),
         redelivered,
         JsonSerializer.SerializeToUtf8Bytes(request, JsonOptions()));
 

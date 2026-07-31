@@ -2,6 +2,8 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Npgsql;
 using OpenLineOps.EventBus.Configuration;
 using OpenLineOps.Operations.Infra.Data.Persistence;
+using OpenLineOps.Runtime.Infrastructure.Persistence;
+using OpenLineOps.Runtime.Infrastructure.Transport;
 using RabbitMQ.Client;
 
 namespace OpenLineOps.Api.Health;
@@ -18,11 +20,14 @@ public static class OpenLineOpsReadinessHealthChecks
         ArgumentNullException.ThrowIfNull(configuration);
 
         services.AddOptions();
+        services.AddLogging();
         var builder = services.AddHealthChecks();
 
         AddOperationsPostgreSqlCheck(builder, configuration);
         AddEventBusPostgreSqlCheck(builder, configuration);
         AddRabbitMqCheck(builder, configuration);
+        AddRuntimeCoordinationPostgreSqlCheck(builder, configuration);
+        AddStationTransportRabbitMqCheck(builder, configuration);
 
         return services;
     }
@@ -109,6 +114,61 @@ public static class OpenLineOpsReadinessHealthChecks
             tags: ["ready", "rabbitmq", "eventbus", "cap"]);
     }
 
+    private static void AddRuntimeCoordinationPostgreSqlCheck(
+        IHealthChecksBuilder builder,
+        IConfiguration configuration)
+    {
+        var section = configuration.GetSection(
+            ProductionCoordinationPersistenceOptions.SectionName);
+        if (!section.Exists())
+        {
+            return;
+        }
+
+        var options = new ProductionCoordinationPersistenceOptions();
+        section.Bind(options);
+        var provider = ProductionCoordinationPersistenceProviders.Parse(options.Provider);
+        if (provider != ProductionCoordinationPersistenceProvider.PostgreSql)
+        {
+            return;
+        }
+
+        builder.AddCheck(
+            "openlineops.runtime.coordination.postgresql",
+            new PostgreSqlConnectionHealthCheck(
+                options.ResolvePostgreSqlConnectionString(),
+                "Runtime coordination PostgreSQL"),
+            failureStatus: HealthStatus.Unhealthy,
+            tags: ["ready", "postgresql", "runtime", "coordination"]);
+    }
+
+    private static void AddStationTransportRabbitMqCheck(
+        IHealthChecksBuilder builder,
+        IConfiguration configuration)
+    {
+        var section = configuration.GetSection(StationCoordinatorTransportOptions.SectionName);
+        if (!section.Exists())
+        {
+            return;
+        }
+
+        var options = new StationCoordinatorTransportOptions();
+        section.Bind(options);
+        var provider = StationCoordinatorTransportProviders.Parse(options.Provider);
+        if (provider != StationCoordinatorTransportProvider.RabbitMq)
+        {
+            return;
+        }
+
+        builder.AddCheck(
+            "openlineops.runtime.station-transport.rabbitmq",
+            new RabbitMqUriConnectionHealthCheck(
+                options.ResolveBrokerUri(),
+                "Runtime Station transport RabbitMQ"),
+            failureStatus: HealthStatus.Unhealthy,
+            tags: ["ready", "rabbitmq", "runtime", "station-transport"]);
+    }
+
     private sealed class PostgreSqlConnectionHealthCheck(
         string connectionString,
         string dependencyName)
@@ -171,6 +231,41 @@ public static class OpenLineOpsReadinessHealthChecks
             {
                 return HealthCheckResult.Unhealthy(
                     "EventBus RabbitMQ is not reachable.",
+                    exception);
+            }
+        }
+    }
+
+    private sealed class RabbitMqUriConnectionHealthCheck(
+        Uri brokerUri,
+        string dependencyName)
+        : IHealthCheck
+    {
+        public async Task<HealthCheckResult> CheckHealthAsync(
+            HealthCheckContext context,
+            CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var factory = new ConnectionFactory
+                {
+                    Uri = brokerUri,
+                    AutomaticRecoveryEnabled = false,
+                    TopologyRecoveryEnabled = false,
+                    RequestedConnectionTimeout = TimeSpan.FromSeconds(5),
+                    RequestedHeartbeat = TimeSpan.FromSeconds(10)
+                };
+                await using var connection = await factory
+                    .CreateConnectionAsync(
+                        "OpenLineOps runtime readiness",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                return HealthCheckResult.Healthy($"{dependencyName} is reachable.");
+            }
+            catch (Exception exception)
+            {
+                return HealthCheckResult.Unhealthy(
+                    $"{dependencyName} is not reachable.",
                     exception);
             }
         }

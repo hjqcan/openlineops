@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../OpenLineOps.Operations.Metrics.Application/OpenLineOps.Operations.Metrics.Application.csproj" />
+    <ProjectReference Include="../OpenLineOps.Operations.Metrics.Domain/OpenLineOps.Operations.Metrics.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

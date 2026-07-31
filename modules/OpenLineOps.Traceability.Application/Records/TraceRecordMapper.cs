@@ -105,6 +105,7 @@ internal static class TraceRecordMapper
         decision.SourceOperationRunId,
         decision.TransitionId,
         decision.TargetOperationId,
+        decision.TerminalDisposition?.ToString(),
         decision.SourceJudgement.ToString(),
         decision.Traversal,
         decision.DecidedAtUtc);
@@ -170,8 +171,8 @@ internal static class TraceRecordMapper
         command.TargetId,
         command.TargetCapabilityId,
         command.CommandName,
-        command.Status.ToString(),
-        command.ResultJudgement?.ToString(),
+        command.ExecutionStatus.ToString(),
+        command.ResultJudgement.ToString(),
         command.CreatedAtUtc,
         command.DeadlineAtUtc,
         command.AcceptedAtUtc,
@@ -191,7 +192,8 @@ internal static class TraceRecordMapper
         measurement.ActionId,
         measurement.TargetKind.ToString(),
         measurement.TargetId,
-        measurement.CommandStatus.ToString(),
+        measurement.CommandExecutionStatus.ToString(),
+        measurement.CommandResultJudgement.ToString(),
         measurement.Passed,
         measurement.MeasuredAtUtc);
 

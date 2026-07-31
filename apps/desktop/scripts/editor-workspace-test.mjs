@@ -55,6 +55,89 @@ assert.match(registry.get(flow.id).saveError, /disk denied/);
 assert.deepEqual(registry.dirtyEntries(new Set([line.id])), []);
 assert.equal(registry.dirtyEntries(new Set([flow.id])).length, 1);
 
+const concurrentSaveRegistry = new model.DirtyDocumentRegistry();
+let finishConcurrentSave;
+const concurrentSave = new Promise(resolve => { finishConcurrentSave = resolve; });
+concurrentSaveRegistry.register(line.id, line.label);
+concurrentSaveRegistry.update(line.id, registration({
+  dirty: true,
+  editRevision: 'draft-1',
+  save: async () => concurrentSave
+}));
+const concurrentSaveResult = concurrentSaveRegistry.save(line.id);
+assert.equal(concurrentSaveRegistry.get(line.id).saving, true);
+concurrentSaveRegistry.update(line.id, { dirty: true });
+finishConcurrentSave();
+assert.equal(await concurrentSaveResult, false);
+assert.equal(concurrentSaveRegistry.get(line.id).dirty, true);
+assert.equal(concurrentSaveRegistry.get(line.id).saving, false);
+assert.match(concurrentSaveRegistry.get(line.id).saveError, /changed while it was being saved/);
+
+let finishStatusOnlySave;
+const statusOnlyBarrier = new Promise(resolve => { finishStatusOnlySave = resolve; });
+concurrentSaveRegistry.update(line.id, registration({
+  dirty: true,
+  editRevision: 'draft-2',
+  save: async () => statusOnlyBarrier
+}));
+const statusOnlySaveResult = concurrentSaveRegistry.save(line.id);
+concurrentSaveRegistry.update(line.id, {
+  dirty: true,
+  editRevision: 'draft-2',
+  canSave: false
+});
+finishStatusOnlySave();
+assert.equal(await statusOnlySaveResult, true);
+assert.equal(concurrentSaveRegistry.get(line.id).dirty, false);
+
+let finishSaveAll;
+const saveAllBarrier = new Promise(resolve => { finishSaveAll = resolve; });
+concurrentSaveRegistry.update(line.id, registration({
+  dirty: true,
+  editRevision: 'draft-3',
+  save: async () => saveAllBarrier
+}));
+const concurrentSaveAllResult = concurrentSaveRegistry.saveAll();
+concurrentSaveRegistry.markDirty(line.id);
+finishSaveAll();
+assert.equal(await concurrentSaveAllResult, false);
+assert.equal(concurrentSaveRegistry.get(line.id).dirty, true);
+
+const revertRegistry = new model.DirtyDocumentRegistry();
+let lineDraft = 'unsaved-line';
+let flowDraft = 'unsaved-flow';
+revertRegistry.register(line.id, line.label);
+revertRegistry.register(flow.id, flow.label);
+revertRegistry.update(line.id, registration({
+  dirty: true,
+  revert: async () => { lineDraft = 'persisted-line'; }
+}));
+revertRegistry.update(flow.id, registration({
+  dirty: true,
+  revert: async () => { flowDraft = 'persisted-flow'; }
+}));
+assert.equal(await revertRegistry.revertAll(), true);
+assert.equal(lineDraft, 'persisted-line');
+assert.equal(flowDraft, 'persisted-flow');
+assert.equal(revertRegistry.dirtyEntries().length, 0);
+
+lineDraft = 'second-unsaved-line';
+flowDraft = 'second-unsaved-flow';
+revertRegistry.update(line.id, registration({
+  dirty: true,
+  revert: async () => { lineDraft = 'second-persisted-line'; }
+}));
+revertRegistry.update(flow.id, registration({
+  dirty: true,
+  revert: async () => { throw new Error('reload denied'); }
+}));
+assert.equal(await revertRegistry.revertAll(), false);
+assert.equal(lineDraft, 'second-persisted-line');
+assert.equal(flowDraft, 'second-unsaved-flow');
+assert.equal(revertRegistry.get(line.id).dirty, false);
+assert.equal(revertRegistry.get(flow.id).dirty, true);
+assert.match(revertRegistry.get(flow.id).saveError, /reload denied/);
+
 let focusedTarget = null;
 registry.update(line.id, registration({
   problems: [{ id: 'missing-station', severity: 'Error', message: 'Station missing', targetId: 'operation-2' }],
@@ -89,6 +172,7 @@ function registration(overrides) {
   return {
     title: 'editor',
     dirty: false,
+    editRevision: null,
     canSave: true,
     save: async () => undefined,
     revert: async () => undefined,
@@ -96,6 +180,7 @@ function registration(overrides) {
     problems: [],
     conflict: null,
     saving: false,
+    busy: false,
     saveError: null,
     ...overrides
   };

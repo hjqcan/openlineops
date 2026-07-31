@@ -14,7 +14,8 @@ public sealed record OperationRunDefinition
         ConfigurationSnapshotId configurationSnapshotId,
         RecipeSnapshotId recipeSnapshotId,
         IEnumerable<ResourceRequirement>? resourceRequirements = null,
-        MaterialSlotRequirement? materialSlotRequirement = null)
+        MaterialSlotRequirement? materialSlotRequirement = null,
+        string? recipeId = null)
     {
         OperationId = ProductionRunText.Required(operationId, nameof(operationId));
         StationSystemId = ProductionRunText.Required(stationSystemId, nameof(stationSystemId));
@@ -27,6 +28,9 @@ public sealed record OperationRunDefinition
             ?? throw new ArgumentNullException(nameof(configurationSnapshotId));
         RecipeSnapshotId = recipeSnapshotId
             ?? throw new ArgumentNullException(nameof(recipeSnapshotId));
+        RecipeId = recipeId is null
+            ? null
+            : ProductionRunText.Required(recipeId, nameof(recipeId));
 
         var requirements = resourceRequirements?.ToArray() ??
             [new ResourceRequirement(ResourceKind.Station, StationSystemId)];
@@ -73,6 +77,8 @@ public sealed record OperationRunDefinition
     public ConfigurationSnapshotId ConfigurationSnapshotId { get; }
 
     public RecipeSnapshotId RecipeSnapshotId { get; }
+
+    public string? RecipeId { get; }
 
     public IReadOnlyList<ResourceRequirement> ResourceRequirements { get; }
 

@@ -1,6 +1,8 @@
 using OpenLineOps.Plugins.Application.Commands;
+using OpenLineOps.Plugins.Application.Discovery;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Runtime.Application.Commands;
+using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Runs;
 using OpenLineOps.Runtime.Infrastructure.Commands;
@@ -30,8 +32,11 @@ public sealed class PluginRuntimeCommandExecutorTests
         var request = Assert.IsType<PluginProcessCommandInvocationRequest>(invoker.Request);
         Assert.Equal("openlineops.vision-process-plugin", request.PluginId);
         Assert.Equal("process.vision:inspect@2", request.CommandDefinitionId);
-        Assert.Equal("2.3.4", request.PackageIdentity!.Version);
-        Assert.Equal(new string('a', 64), request.PackageIdentity.PackageContentSha256);
+        var executionIdentity = Assert.IsType<PluginPackageExecutionIdentity>(request.PackageIdentity);
+        Assert.Equal("project.main", executionIdentity.ProjectId);
+        Assert.Equal("application.main", executionIdentity.ApplicationId);
+        Assert.Equal("2.3.4", executionIdentity.PackageIdentity.Version);
+        Assert.Equal(new string('a', 64), executionIdentity.PackageIdentity.PackageContentSha256);
     }
 
     [Fact]
@@ -137,6 +142,7 @@ public sealed class PluginRuntimeCommandExecutorTests
             "project.main",
             "application.main",
             "snapshot.release",
+            new Dictionary<string, ProductionContextValue>(),
             RuntimeTestReleaseIdentity.ResourceFences());
     }
 

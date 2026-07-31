@@ -162,7 +162,9 @@ public sealed class ProjectReleaseProductionRunLauncherTests
                 "station.secondary",
                 "configuration.secondary"));
 
-        var transition = Assert.Single(request.RouteTransitions);
+        Assert.Equal(3, request.RouteTransitions.Count);
+        var transition = Assert.Single(request.RouteTransitions, candidate =>
+            candidate.Kind == RuntimeRouteTransitionKind.Condition);
         Assert.Equal(RuntimeRouteTransitionKind.Condition, transition.Kind);
         Assert.Equal("inspection.accepted", transition.OutputCondition?.OutputKey);
         Assert.Equal(
@@ -198,6 +200,32 @@ public sealed class ProjectReleaseProductionRunLauncherTests
         Assert.True(result.IsFailure);
         Assert.Equal("Conflict.Projects.ProjectReleaseFlowIrIdentityMismatch", result.Error.Code);
         Assert.Equal(0, configurationResolver.CallCount);
+        Assert.Null(coordinator.LastRequest);
+    }
+
+    [Fact]
+    public async Task SubmitRejectsConfigurationWithoutFrozenRecipeIdentity()
+    {
+        var coordinator = new RecordingProductionRunCoordinator();
+        var launcher = CreateLauncher(
+            new RecordingScopeResolver(LiveScope()),
+            new RecordingReleaseStore(OpenedRelease()),
+            new RecordingConfigurationResolver(
+            [
+                RuntimeConfiguration("configuration.main", "station.main") with
+                {
+                    RecipeId = null
+                }
+            ]),
+            coordinator);
+
+        var result = await launcher.SubmitAsync(Snapshot(), SubmitRequest());
+
+        Assert.True(result.IsFailure);
+        Assert.Equal(
+            "Conflict.Projects.ProjectReleaseOperationConfigurationMismatch",
+            result.Error.Code);
+        Assert.Contains("recipe id", result.Error.Message, StringComparison.Ordinal);
         Assert.Null(coordinator.LastRequest);
     }
 
@@ -363,6 +391,8 @@ public sealed class ProjectReleaseProductionRunLauncherTests
         Assert.Equal(stationSystemId, operation.Definition.StationSystemId);
         Assert.Equal(stationSystemId, operation.Definition.StationId.Value);
         Assert.Equal(configurationSnapshotId, operation.Definition.ConfigurationSnapshotId.Value);
+        Assert.Equal("recipe.main", operation.Definition.RecipeId);
+        Assert.Equal("recipe.main@1.0.0", operation.Definition.RecipeSnapshotId.Value);
         Assert.Equal("process.main@1.0.0", operation.FrozenExecutableProcess.ProcessVersionId.Value);
         Assert.Equal("MoveAbsolute", Assert.Single(operation.FrozenExecutableProcess.Nodes).CommandName);
         Assert.Equal(
@@ -438,22 +468,25 @@ public sealed class ProjectReleaseProductionRunLauncherTests
                 flowIr));
         }
 
-        var transitions = includeCondition
-            ? new ProjectReleaseRouteTransition[]
-            {
+        ProjectReleaseRouteTransition[] transitions = includeCondition
+            ?
+            [
                 new(
                     "transition.accepted",
                     "operation.main",
                     "operation.secondary",
+                    null,
                     "Condition",
                     RequiredJudgement: null,
                     MaxTraversals: null,
                     ParallelGroupId: null,
                     OutputKey: "inspection.accepted",
                     ExpectedOutputKind: "Boolean",
-                    ExpectedOutputValue: "true")
-            }
-            : [];
+                    ExpectedOutputValue: "true"),
+                TerminalReleaseTransition("transition.main-fallback", "operation.main", "Held"),
+                TerminalReleaseTransition("transition.secondary-completed", "operation.secondary", "Completed")
+            ]
+            : [TerminalReleaseTransition("transition.main-completed", "operation.main", "Completed")];
 
         return new OpenedProjectReleaseArtifact(
             "snapshot.main",
@@ -494,6 +527,22 @@ public sealed class ProjectReleaseProductionRunLauncherTests
             []);
     }
 
+    private static ProjectReleaseRouteTransition TerminalReleaseTransition(
+        string transitionId,
+        string sourceOperationId,
+        string disposition) => new(
+            transitionId,
+            sourceOperationId,
+            null,
+            disposition,
+            "Sequence",
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+
     private static ProjectReleaseOperation Operation(
         string operationId,
         string stationSystemId,
@@ -517,6 +566,7 @@ public sealed class ProjectReleaseProductionRunLauncherTests
                 stationSystemId,
                 "Fixed",
                 [])],
+            [],
             [new ProjectReleaseAuthorizedAction(
                 "move:action:1",
                 "move",
@@ -547,7 +597,10 @@ public sealed class ProjectReleaseProductionRunLauncherTests
             "process.main",
             "process.main@1.0.0",
             "recipe.main@1.0.0",
-            stationSystemId);
+            stationSystemId)
+        {
+            RecipeId = "recipe.main"
+        };
     }
 
     private static ProjectApplicationWorkspaceScope LiveScope()

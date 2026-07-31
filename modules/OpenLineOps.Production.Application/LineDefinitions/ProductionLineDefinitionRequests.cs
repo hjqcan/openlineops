@@ -11,7 +11,16 @@ public sealed record SaveProductionLineDefinitionRequest(
     string EntryOperationId,
     IReadOnlyCollection<OperationDefinitionRequest> Operations,
     IReadOnlyCollection<RouteTransitionRequest> Transitions,
-    IReadOnlyCollection<LineControllerAuthorizationRequest> LineControllerAuthorizations);
+    IReadOnlyCollection<LineControllerAuthorizationRequest> LineControllerAuthorizations,
+    ProductionRouteLayoutRequest RouteLayout);
+
+public sealed record ProductionRouteLayoutRequest(
+    IReadOnlyCollection<OperationCanvasPositionRequest> OperationPositions);
+
+public sealed record OperationCanvasPositionRequest(
+    string OperationId,
+    int X,
+    int Y);
 
 public sealed record ProductModelRequest(
     string ProductModelId,
@@ -24,7 +33,14 @@ public sealed record OperationDefinitionRequest(
     string StationSystemId,
     string FlowDefinitionId,
     string ConfigurationSnapshotId,
-    IReadOnlyCollection<OperationResourceBindingRequest> Resources);
+    IReadOnlyCollection<OperationResourceBindingRequest> Resources,
+    IReadOnlyCollection<OperationInputMappingRequest> InputMappings);
+
+public sealed record OperationInputMappingRequest(
+    string TargetInputKey,
+    string SourceOperationId,
+    string SourceOutputKey,
+    ProductionContextValueKind ExpectedValueKind);
 
 public sealed record OperationResourceBindingRequest(
     string BindingId,
@@ -49,7 +65,8 @@ public sealed record LineControllerAuthorizationRequest(
 public sealed record RouteTransitionRequest(
     string TransitionId,
     string SourceOperationId,
-    string TargetOperationId,
+    string? TargetOperationId,
+    TerminalDisposition? TerminalDisposition,
     RouteTransitionKind Kind,
     RouteJudgement? RequiredJudgement,
     int? MaxTraversals,

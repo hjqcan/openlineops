@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using OpenLineOps.Processes.Application.Definitions;
 using OpenLineOps.Processes.Domain.Definitions;
 using OpenLineOps.Processes.Domain.Identifiers;
 using OpenLineOps.Processes.Domain.Nodes;
@@ -11,6 +12,7 @@ namespace OpenLineOps.Processes.Tests;
 
 public sealed class ProcessDefinitionTests
 {
+    private static readonly string[] ValidationTargetKinds = ["Graph", "Node", "Transition"];
     private static readonly DateTimeOffset CreatedAtUtc = new(2026, 6, 29, 8, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset PublishedAtUtc = CreatedAtUtc.AddMinutes(5);
 
@@ -81,7 +83,11 @@ public sealed class ProcessDefinitionTests
         var report = ProcessGraphValidator.Validate(definition);
 
         Assert.False(report.IsValid);
-        Assert.Contains(report.Issues, issue => issue.Code == "Processes.GraphStartNodeCountInvalid");
+        AssertIssue(
+            report,
+            "Processes.GraphStartNodeCountInvalid",
+            ProcessGraphValidationTargetKind.Graph,
+            "packaging-line-eol");
     }
 
     [Fact]
@@ -98,7 +104,11 @@ public sealed class ProcessDefinitionTests
         var report = ProcessGraphValidator.Validate(definition);
 
         Assert.False(report.IsValid);
-        Assert.Contains(report.Issues, issue => issue.Code == "Processes.NodeUnreachable");
+        AssertIssue(
+            report,
+            "Processes.NodeUnreachable",
+            ProcessGraphValidationTargetKind.Node,
+            "orphan");
     }
 
     [Fact]
@@ -113,7 +123,11 @@ public sealed class ProcessDefinitionTests
         var report = ProcessGraphValidator.Validate(definition);
 
         Assert.False(report.IsValid);
-        Assert.Contains(report.Issues, issue => issue.Code == "Processes.TransitionTargetMissing");
+        AssertIssue(
+            report,
+            "Processes.TransitionTargetMissing",
+            ProcessGraphValidationTargetKind.Transition,
+            "start-to-missing");
     }
 
     [Fact]
@@ -133,7 +147,11 @@ public sealed class ProcessDefinitionTests
         var report = ProcessGraphValidator.Validate(definition);
 
         Assert.False(report.IsValid);
-        Assert.Contains(report.Issues, issue => issue.Code == "Processes.GraphCycleDetected");
+        AssertIssue(
+            report,
+            "Processes.GraphCycleDetected",
+            ProcessGraphValidationTargetKind.Graph,
+            "packaging-line-eol");
     }
 
     [Fact]
@@ -180,7 +198,11 @@ public sealed class ProcessDefinitionTests
         var report = ProcessGraphValidator.Validate(definition);
 
         Assert.False(report.IsValid);
-        Assert.Contains(report.Issues, issue => issue.Code == "Processes.LoopPolicyMaxTraversalsInvalid");
+        AssertIssue(
+            report,
+            "Processes.LoopPolicyMaxTraversalsInvalid",
+            ProcessGraphValidationTargetKind.Transition,
+            "route-to-inspect-retry");
     }
 
     [Fact]
@@ -208,7 +230,11 @@ public sealed class ProcessDefinitionTests
         var report = ProcessGraphValidator.Validate(definition);
 
         Assert.False(report.IsValid);
-        Assert.Contains(report.Issues, issue => issue.Code == "Processes.LoopPolicySourceMustBeDecision");
+        AssertIssue(
+            report,
+            "Processes.LoopPolicySourceMustBeDecision",
+            ProcessGraphValidationTargetKind.Transition,
+            "inspect-to-start-retry");
     }
 
     [Fact]
@@ -353,6 +379,61 @@ public sealed class ProcessDefinitionTests
         Assert.Contains(report.Issues, issue => issue.Code == "Processes.BlocklyWorkspaceMissing");
     }
 
+    [Fact]
+    public void ValidationReportMappingPreservesExactGraphNodeAndTransitionTargets()
+    {
+        var definition = CreateDefinition();
+        AddNode(definition, ProcessNode.Command(
+            NodeId("inspect"),
+            "Inspect",
+            requiredCapability: null,
+            targetKind: null,
+            targetId: null));
+        AddTransition(definition, ProcessTransition.Create(
+            TransitionId("inspect-to-missing"),
+            NodeId("inspect"),
+            NodeId("missing")));
+
+        var details = ProcessDefinitionMapper.ToValidationReport(
+            ProcessGraphValidator.Validate(definition));
+
+        Assert.False(details.IsValid);
+        Assert.Contains(details.Issues, issue =>
+            issue.Code == "Processes.GraphStartNodeCountInvalid"
+            && issue.TargetKind == "Graph"
+            && issue.TargetId == "packaging-line-eol");
+        Assert.Contains(details.Issues, issue =>
+            issue.Code == "Processes.CommandCapabilityMissing"
+            && issue.TargetKind == "Node"
+            && issue.TargetId == "inspect");
+        Assert.Contains(details.Issues, issue =>
+            issue.Code == "Processes.TransitionTargetMissing"
+            && issue.TargetKind == "Transition"
+            && issue.TargetId == "inspect-to-missing");
+        Assert.All(details.Issues, issue =>
+        {
+            Assert.Contains(issue.TargetKind, ValidationTargetKinds);
+            Assert.False(string.IsNullOrWhiteSpace(issue.TargetId));
+        });
+    }
+
+    [Fact]
+    public void ValidationIssueRejectsMissingOrUndefinedTarget()
+    {
+        Assert.Throws<ArgumentException>(() => new ProcessGraphValidationIssue(
+            ProcessGraphValidationSeverity.Error,
+            "Processes.Invalid",
+            "Invalid",
+            ProcessGraphValidationTargetKind.Node,
+            " "));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new ProcessGraphValidationIssue(
+            ProcessGraphValidationSeverity.Error,
+            "Processes.Invalid",
+            "Invalid",
+            (ProcessGraphValidationTargetKind)99,
+            "node.invalid"));
+    }
+
     private static ProcessDefinition CreateValidDefinition()
     {
         var definition = CreateDefinition();
@@ -426,6 +507,17 @@ public sealed class ProcessDefinitionTests
     private static void AssertAccepted(ProcessOperationResult result)
     {
         Assert.True(result.Succeeded, result.Message);
+    }
+
+    private static void AssertIssue(
+        ProcessGraphValidationReport report,
+        string code,
+        ProcessGraphValidationTargetKind targetKind,
+        string targetId)
+    {
+        var issue = Assert.Single(report.Issues, candidate => candidate.Code == code);
+        Assert.Equal(targetKind, issue.TargetKind);
+        Assert.Equal(targetId, issue.TargetId);
     }
 
     private static ProcessNodeId NodeId(string value)

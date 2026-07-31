@@ -5,4 +5,7 @@ public sealed record RuntimeConfigurationSnapshotDetails(
     string ProcessDefinitionId,
     string ProcessVersionId,
     string RecipeSnapshotId,
-    string StationSystemId);
+    string StationSystemId)
+{
+    public string? RecipeId { get; init; }
+}

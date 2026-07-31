@@ -2,6 +2,11 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
+import { CdpClient } from './smoke-cdp-client.mjs';
+import { observeProcessClose } from './owned-process-tree.mjs';
+import {
+  getCurrentWindowsProcessStartedAtUnixMilliseconds
+} from './windows-process-identity.mjs';
 
 export async function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -23,7 +28,14 @@ export function delay(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
-export function spawnCaptured(command, args, options, label, lines) {
+export function spawnCaptured(
+  command,
+  args,
+  options,
+  label,
+  lines,
+  onError = () => {}
+) {
   const child = spawn(command, args, {
     ...options,
     windowsHide: true,
@@ -38,54 +50,129 @@ export function spawnCaptured(command, args, options, label, lines) {
   };
   child.stdout.on('data', append);
   child.stderr.on('data', append);
+  child.openlineopsClosePromise = observeProcessClose(child);
+  child.once('error', error => {
+    append(`failed to start: ${error.message}`);
+    onError(error);
+  });
   child.on('exit', code => append(`exited with code ${code ?? 'unknown'}`));
   return child;
 }
 
 export async function stopProcess(child, timeoutMilliseconds = 8_000) {
-  if (!child || child.exitCode !== null || child.killed) return;
-  child.kill();
-  const exited = await Promise.race([
-    new Promise(resolve => child.once('exit', () => resolve(true))),
-    delay(timeoutMilliseconds).then(() => false)
-  ]);
-  if (!exited && child.exitCode === null) child.kill('SIGKILL');
+  if (!child) return;
+  if (hasChildExited(child)) {
+    if (child.openlineopsOwnsKillOnCloseJob === true) {
+      return;
+    }
+    throw new Error(
+      `Process tree root ${child.pid ?? 'unknown'} exited before descendant cleanup could be confirmed.`);
+  }
+  assertPositiveTimeout(timeoutMilliseconds, 'process termination timeout');
+
+  if (process.platform === 'win32'
+      && child.openlineopsOwnsKillOnCloseJob !== true) {
+    throw new Error(
+      'Windows process cleanup requires an owning kill-on-close Job Host.');
+  }
+
+  const accepted = child.kill('SIGKILL');
+  if (!accepted && !hasChildExited(child)) {
+    throw new Error('Owning process handle rejected termination.');
+  }
+  if (!await waitForChildExit(child, timeoutMilliseconds)) {
+    throw new Error(
+      `Owning process ${child.pid ?? 'unknown'} remained alive after exact-handle termination.`);
+  }
 }
 
 export class ElectronCdpHarness {
-  constructor({ executablePath, workingDirectory, userDataDirectory, apiBaseUrl, environment, logs }) {
+  constructor({
+    executablePath,
+    workingDirectory,
+    userDataDirectory,
+    environment,
+    logs,
+    processTreeHostPath,
+    processControl = {}
+  }) {
     this.executablePath = executablePath;
     this.workingDirectory = workingDirectory;
     this.userDataDirectory = userDataDirectory;
-    this.apiBaseUrl = apiBaseUrl;
     this.environment = environment;
     this.logs = logs;
+    if (typeof processTreeHostPath !== 'string'
+        || !path.isAbsolute(processTreeHostPath)
+        || path.resolve(processTreeHostPath) !== processTreeHostPath) {
+      throw new Error(
+        'Electron harness Process Tree Host path must be one canonical absolute path.');
+    }
+    this.processTreeHostPath = processTreeHostPath;
     this.process = null;
     this.cdp = null;
     this.cdpPort = null;
+    this.closePromise = null;
+    this.closed = false;
+    this.processLaunchError = null;
+    this.stopOwnedProcess = processControl.stopProcess ?? stopProcess;
+    if (typeof this.stopOwnedProcess !== 'function') {
+      throw new TypeError(
+        'Electron harness process control must provide callable Host termination.');
+    }
   }
 
   async start() {
     this.cdpPort = await getFreePort();
+    const ownerStartedAtUnixMilliseconds =
+      await getCurrentWindowsProcessStartedAtUnixMilliseconds();
+    const launchArguments = [
+      `--remote-debugging-port=${this.cdpPort}`,
+      '--remote-debugging-address=127.0.0.1',
+      '--disable-gpu'
+    ];
+    if (this.userDataDirectory !== null && this.userDataDirectory !== undefined) {
+      launchArguments.push(`--user-data-dir=${this.userDataDirectory}`);
+    }
     this.process = spawnCaptured(
-      this.executablePath,
+      this.processTreeHostPath,
       [
-        `--remote-debugging-port=${this.cdpPort}`,
-        '--disable-gpu',
-        `--user-data-dir=${this.userDataDirectory}`
+        String(process.pid),
+        String(ownerStartedAtUnixMilliseconds),
+        this.executablePath,
+        this.workingDirectory,
+        ...launchArguments
       ],
       {
-        cwd: this.workingDirectory,
+        cwd: path.dirname(this.processTreeHostPath),
         env: {
           ...process.env,
-          ...this.environment,
-          OPENLINEOPS_API_BASE_URL: this.apiBaseUrl
+          ...this.environment
         }
       },
       'OpenLineOps',
-      this.logs);
+      this.logs,
+      error => {
+        this.processLaunchError = error;
+      });
+    this.process.openlineopsOwnsKillOnCloseJob = true;
 
-    const target = await waitForTarget(this.cdpPort, 45_000);
+    let target;
+    try {
+      target = await waitForTarget(
+        this.cdpPort,
+        90_000,
+        () => ({
+          exitCode: this.process?.exitCode ?? null,
+          signalCode: this.process?.signalCode ?? null,
+          launchError: this.processLaunchError?.message ?? null,
+          recentProcessLogs: this.logs.slice(-40)
+        }));
+    } catch (error) {
+      if (this.processLaunchError !== null && this.process?.pid === undefined) {
+        this.process = null;
+      }
+      throw error;
+    }
     this.cdp = await CdpClient.connect(target.webSocketDebuggerUrl);
     await this.cdp.send('Runtime.enable');
     await this.cdp.send('Page.enable');
@@ -96,16 +183,35 @@ export class ElectronCdpHarness {
   }
 
   async close() {
+    if (this.closed) return;
+    if (this.closePromise) {
+      await this.closePromise;
+      return;
+    }
+
+    const closeAttempt = this.closeCore();
+    this.closePromise = closeAttempt;
+    try {
+      await closeAttempt;
+      this.closed = true;
+    } finally {
+      this.closePromise = null;
+    }
+  }
+
+  async closeCore() {
     if (this.cdp) {
       try {
-        await this.cdp.send('Browser.close');
+        await this.cdp.send('Browser.close', {}, 30_000);
       } catch {
         // The renderer can close before the acknowledgement is delivered.
       }
       this.cdp.close();
       this.cdp = null;
     }
-    await stopProcess(this.process);
+    const ownedProcess = this.process;
+    await this.stopOwnedProcess(ownedProcess, 15_000);
+    await waitForOwnedProcessClose(ownedProcess, 15_000);
     this.process = null;
   }
 
@@ -146,16 +252,21 @@ export class ElectronCdpHarness {
     if (!this.cdp) throw new Error('Electron CDP is not connected.');
     await this.cdp.send('Debugger.enable', {}, timeoutMilliseconds);
     const paused = this.cdp.waitForEvent('Debugger.paused', timeoutMilliseconds);
-    await this.cdp.send('Debugger.pause', {}, timeoutMilliseconds);
-    const event = await paused;
-    const frames = (event.callFrames ?? []).map(frame => ({
-      functionName: frame.functionName || '(anonymous)',
-      url: frame.url,
-      lineNumber: (frame.location?.lineNumber ?? -1) + 1,
-      columnNumber: (frame.location?.columnNumber ?? -1) + 1
-    }));
-    await this.cdp.send('Debugger.resume', {}, timeoutMilliseconds).catch(() => undefined);
-    return frames;
+    try {
+      const [event] = await Promise.all([
+        paused,
+        this.cdp.send('Debugger.pause', {}, timeoutMilliseconds)
+      ]);
+      return (event.callFrames ?? []).map(frame => ({
+        functionName: frame.functionName || '(anonymous)',
+        url: frame.url,
+        lineNumber: (frame.location?.lineNumber ?? -1) + 1,
+        columnNumber: (frame.location?.columnNumber ?? -1) + 1
+      }));
+    } finally {
+      await this.cdp.send('Debugger.resume', {}, timeoutMilliseconds)
+        .catch(() => undefined);
+    }
   }
 
   async click(testId) {
@@ -163,6 +274,9 @@ export class ElectronCdpHarness {
       const element = document.querySelector('[data-testid=${JSON.stringify(testId)}]');
       if (!(element instanceof HTMLElement || element instanceof SVGElement)) {
         throw new Error('Missing element ${escapeForJavaScript(testId)}');
+      }
+      if (element instanceof HTMLButtonElement && element.disabled) {
+        throw new Error('Disabled button ${escapeForJavaScript(testId)}');
       }
       if (element instanceof HTMLElement) element.click();
       else element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
@@ -201,12 +315,6 @@ export class ElectronCdpHarness {
       `window.openlineopsDesktop.apiRequest(${JSON.stringify(pathname)}, ${JSON.stringify(options)})`);
   }
 
-  async uploadExternalProgram(pathname, definition, files, headers = {}) {
-    return this.evaluate(
-      `window.openlineopsDesktop.uploadExternalProgram(`
-      + `${JSON.stringify(pathname)}, ${JSON.stringify(definition)}, ${JSON.stringify(files)}, ${JSON.stringify(headers)})`);
-  }
-
   async screenshot(filePath) {
     if (!this.cdp) throw new Error('Electron CDP is not connected.');
     const result = await this.cdp.send('Page.captureScreenshot', {
@@ -220,15 +328,58 @@ export class ElectronCdpHarness {
   }
 }
 
+export async function waitForOwnedProcessClose(
+  child,
+  timeoutMilliseconds = 8_000
+) {
+  if (!child) return;
+  assertPositiveTimeout(timeoutMilliseconds, 'process close timeout');
+  const closePromise = child.openlineopsClosePromise;
+  if (!(closePromise instanceof Promise)) {
+    throw new Error(
+      'Owned process close must be observed from the instant it is spawned.');
+  }
+  let timeout;
+  try {
+    await Promise.race([
+      closePromise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(
+            `Owning process ${child.pid ?? 'unknown'} streams did not close within ${
+              timeoutMilliseconds} ms.`)),
+          timeoutMilliseconds);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function escapeForJavaScript(value) {
   return value.replaceAll('\\', '\\\\').replaceAll("'", "\\'");
 }
 
-async function waitForTarget(port, timeoutMilliseconds) {
+export async function waitForTarget(
+  port,
+  timeoutMilliseconds,
+  diagnostics = () => null,
+  options = {}
+) {
+  assertPositiveTimeout(timeoutMilliseconds, 'CDP target timeout');
+  const requestTimeoutMilliseconds = options.requestTimeoutMilliseconds ?? 2_000;
+  assertPositiveTimeout(requestTimeoutMilliseconds, 'CDP target request timeout');
+  const fetchImplementation = options.fetchImplementation ?? fetch;
   const deadline = Date.now() + timeoutMilliseconds;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+      const remaining = Math.max(1, deadline - Date.now());
+      const response = await fetchImplementation(
+        `http://127.0.0.1:${port}/json/list`,
+        {
+          signal: AbortSignal.timeout(
+            Math.max(1, Math.min(requestTimeoutMilliseconds, remaining)))
+        });
       if (response.ok) {
         const targets = await response.json();
         const target = targets.find(candidate => candidate.type === 'page' && candidate.url.startsWith('file:'));
@@ -237,105 +388,49 @@ async function waitForTarget(port, timeoutMilliseconds) {
     } catch {
       // Electron is still starting.
     }
-    await delay(250);
+    const state = diagnostics();
+    if (typeof state?.launchError === 'string'
+        && state.launchError.length > 0) {
+      throw new Error(
+        `Packaged Electron failed to start before exposing CDP on port ${port}. Diagnostics: ${JSON.stringify(state)}`);
+    }
+    if ((state?.exitCode !== null && state?.exitCode !== undefined)
+        || (state?.signalCode !== null && state?.signalCode !== undefined)) {
+      throw new Error(
+        `Packaged Electron exited before exposing CDP on port ${port}. Diagnostics: ${JSON.stringify(state)}`);
+    }
+    await delay(Math.max(1, Math.min(250, deadline - Date.now())));
   }
-  throw new Error(`Timed out waiting for packaged Electron CDP on port ${port}.`);
+  throw new Error(
+    `Timed out waiting for packaged Electron CDP on port ${port}. Diagnostics: ${JSON.stringify(diagnostics())}`);
 }
 
-class CdpClient {
-  constructor(socket) {
-    this.socket = socket;
-    this.nextId = 1;
-    this.pending = new Map();
-    this.eventWaiters = new Map();
-  }
+async function waitForChildExit(child, timeoutMilliseconds) {
+  if (!child || hasChildExited(child)) return true;
+  return new Promise(resolve => {
+    let settled = false;
+    const complete = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      child.removeListener('exit', onExit);
+      resolve(value);
+    };
+    const onExit = () => complete(true);
+    const timeout = setTimeout(
+      () => complete(false),
+      timeoutMilliseconds);
+    child.once('exit', onExit);
+    if (hasChildExited(child)) complete(true);
+  });
+}
 
-  static connect(webSocketUrl) {
-    return new Promise((resolve, reject) => {
-      const socket = new WebSocket(webSocketUrl);
-      const client = new CdpClient(socket);
-      socket.addEventListener('open', () => resolve(client), { once: true });
-      socket.addEventListener('error', event => reject(event.error ?? new Error('CDP socket error.')), { once: true });
-      socket.addEventListener('close', () => client.handleClose(), { once: true });
-      socket.addEventListener('message', event => client.handle(event.data));
-    });
-  }
+function hasChildExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
 
-  send(method, params = {}, timeoutMilliseconds = 30_000) {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        if (!this.pending.delete(id)) return;
-        reject(new Error(`CDP ${method} timed out after ${timeoutMilliseconds} ms.`));
-      }, timeoutMilliseconds);
-      this.pending.set(id, {
-        resolve: value => {
-          clearTimeout(timeout);
-          resolve(value);
-        },
-        reject: error => {
-          clearTimeout(timeout);
-          reject(error);
-        }
-      });
-      this.socket.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  close() {
-    this.handleClose();
-    if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) {
-      this.socket.close();
-    }
-  }
-
-  handleClose() {
-    for (const pending of this.pending.values()) pending.reject(new Error('CDP connection closed.'));
-    this.pending.clear();
-    for (const waiters of this.eventWaiters.values()) {
-      for (const waiter of waiters) waiter.reject(new Error('CDP connection closed.'));
-    }
-    this.eventWaiters.clear();
-  }
-
-  waitForEvent(method, timeoutMilliseconds = 10_000) {
-    return new Promise((resolve, reject) => {
-      const waiters = this.eventWaiters.get(method) ?? [];
-      const waiter = {
-        resolve: value => {
-          clearTimeout(timeout);
-          resolve(value);
-        },
-        reject: error => {
-          clearTimeout(timeout);
-          reject(error);
-        }
-      };
-      const timeout = setTimeout(() => {
-        const current = this.eventWaiters.get(method) ?? [];
-        const index = current.indexOf(waiter);
-        if (index >= 0) current.splice(index, 1);
-        if (current.length === 0) this.eventWaiters.delete(method);
-        reject(new Error(`CDP event ${method} timed out after ${timeoutMilliseconds} ms.`));
-      }, timeoutMilliseconds);
-      waiters.push(waiter);
-      this.eventWaiters.set(method, waiters);
-    });
-  }
-
-  handle(data) {
-    const message = JSON.parse(data);
-    if (!message.id) {
-      const waiters = this.eventWaiters.get(message.method);
-      const waiter = waiters?.shift();
-      if (waiters?.length === 0) this.eventWaiters.delete(message.method);
-      waiter?.resolve(message.params ?? {});
-      return;
-    }
-    const pending = this.pending.get(message.id);
-    if (!pending) return;
-    this.pending.delete(message.id);
-    if (message.error) pending.reject(new Error(message.error.message));
-    else pending.resolve(message.result);
+function assertPositiveTimeout(timeoutMilliseconds, description) {
+  if (!Number.isSafeInteger(timeoutMilliseconds) || timeoutMilliseconds <= 0) {
+    throw new Error(`${description} must be a positive safe integer.`);
   }
 }

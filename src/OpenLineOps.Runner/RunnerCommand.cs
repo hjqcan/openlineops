@@ -1,36 +1,42 @@
 using System.Text.Json;
+using OpenLineOps.Application.Abstractions.Results;
 using OpenLineOps.Projects.Api.Integrations;
 using OpenLineOps.Projects.Application.ProjectWorkspaces;
 using OpenLineOps.Runtime.Application.Events;
-using OpenLineOps.Runtime.Application.Recovery;
+using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Runner;
 
 public sealed class RunnerCommand
 {
+    private static readonly TimeSpan ControlledStopTimeout = TimeSpan.FromSeconds(30);
     private readonly IAutomationProjectWorkspaceService _workspaceService;
     private readonly IRunnerProductionUnitPreparer _productionUnitPreparer;
     private readonly IProjectReleaseProductionRunLauncher _productionRunLauncher;
-    private readonly IProductionRunRunner _productionRunRunner;
-    private readonly IProductionRunRecoveryService _recoveryService;
+    private readonly IProductionRunCompletionWaiter _completionWaiter;
+    private readonly IProductionRunCoordinator _productionRunCoordinator;
+    private readonly IProductionRunRepository _productionRunRepository;
     private readonly IProductionRunTerminalOutboxDispatcher _terminalOutboxDispatcher;
 
     public RunnerCommand(
         IAutomationProjectWorkspaceService workspaceService,
         IRunnerProductionUnitPreparer productionUnitPreparer,
         IProjectReleaseProductionRunLauncher productionRunLauncher,
-        IProductionRunRunner productionRunRunner,
-        IProductionRunRecoveryService recoveryService,
+        IProductionRunCompletionWaiter completionWaiter,
+        IProductionRunCoordinator productionRunCoordinator,
+        IProductionRunRepository productionRunRepository,
         IProductionRunTerminalOutboxDispatcher terminalOutboxDispatcher)
     {
         _workspaceService = workspaceService;
         _productionUnitPreparer = productionUnitPreparer;
         _productionRunLauncher = productionRunLauncher;
-        _productionRunRunner = productionRunRunner;
-        _recoveryService = recoveryService;
+        _completionWaiter = completionWaiter;
+        _productionRunCoordinator = productionRunCoordinator;
+        _productionRunRepository = productionRunRepository;
         _terminalOutboxDispatcher = terminalOutboxDispatcher;
     }
 
@@ -110,9 +116,6 @@ public sealed class RunnerCommand
         }
 
         var snapshot = selection.Snapshot!;
-        await _recoveryService.RecoverAsync(cancellationToken).ConfigureAwait(false);
-        await _terminalOutboxDispatcher.DrainAsync(cancellationToken).ConfigureAwait(false);
-
         var preparation = await _productionUnitPreparer
             .PrepareAsync(snapshot, options, cancellationToken)
             .ConfigureAwait(false);
@@ -153,9 +156,24 @@ public sealed class RunnerCommand
                 snapshot).ConfigureAwait(false);
         }
 
-        var execution = await _productionRunRunner
-            .ExecuteAsync(submission.Value.RunId, cancellationToken)
-            .ConfigureAwait(false);
+        Result<ProductionRunSnapshot> execution;
+        try
+        {
+            execution = await _completionWaiter
+                .WaitForTerminalAsync(submission.Value.RunId, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return await RequestControlledStopAsync(
+                    options,
+                    projectTarget,
+                    output,
+                    workspace,
+                    snapshot,
+                    submission.Value)
+                .ConfigureAwait(false);
+        }
         if (execution.IsFailure)
         {
             return await WriteFailureAsync(
@@ -169,7 +187,147 @@ public sealed class RunnerCommand
                 submission.Value).ConfigureAwait(false);
         }
 
-        var productionRun = execution.Value.Run;
+        return await WriteTerminalOutcomeAsync(
+            projectTarget,
+            output,
+            workspace,
+            snapshot,
+            execution.Value).ConfigureAwait(false);
+    }
+
+    private async Task<int> RequestControlledStopAsync(
+        RunnerRunOptions options,
+        string projectTarget,
+        TextWriter output,
+        AutomationProjectWorkspaceDetails workspace,
+        OpenLineOps.Projects.Application.Projects.PublishedProjectSnapshotDetails snapshot,
+        ProductionRunSnapshot submittedRun)
+    {
+        using var timeout = new CancellationTokenSource(ControlledStopTimeout);
+        Result<ProductionRunSnapshot> stopped;
+        try
+        {
+            stopped = await _productionRunCoordinator
+                .CommandAsync(
+                    submittedRun.RunId,
+                    new ProductionRunCommandRequest(
+                        ProductionRunCommand.SafeStop,
+                        options.ActorId,
+                        "Runner cancellation requested a controlled Safe Stop."),
+                    timeout.Token)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            var durableRun = await ReadDurableRunAsync(submittedRun.RunId).ConfigureAwait(false);
+            if (durableRun.IsFailure)
+            {
+                return await WriteFailureAsync(
+                    RunnerExitCodes.ProductionRunExecutionFailed,
+                    projectTarget,
+                    durableRun.Error.Code,
+                    durableRun.Error.Message,
+                    output,
+                    workspace,
+                    snapshot).ConfigureAwait(false);
+            }
+
+            if (IsTerminal(durableRun.Value.ExecutionStatus))
+            {
+                return await WriteTerminalOutcomeAsync(
+                    projectTarget,
+                    output,
+                    workspace,
+                    snapshot,
+                    durableRun.Value).ConfigureAwait(false);
+            }
+
+            return await WriteFailureAsync(
+                RunnerExitCodes.ProductionRunExecutionFailed,
+                projectTarget,
+                "Runner.ControlledStopTimedOut",
+                $"Production Run {submittedRun.RunId.Value:D} did not acknowledge Safe Stop within {ControlledStopTimeout.TotalSeconds:0} seconds.",
+                output,
+                workspace,
+                snapshot,
+                durableRun.Value).ConfigureAwait(false);
+        }
+        if (stopped.IsFailure)
+        {
+            var durableRun = await ReadDurableRunAsync(submittedRun.RunId).ConfigureAwait(false);
+            if (durableRun.IsFailure)
+            {
+                return await WriteFailureAsync(
+                    RunnerExitCodes.ProductionRunExecutionFailed,
+                    projectTarget,
+                    durableRun.Error.Code,
+                    durableRun.Error.Message,
+                    output,
+                    workspace,
+                    snapshot).ConfigureAwait(false);
+            }
+
+            if (IsTerminal(durableRun.Value.ExecutionStatus))
+            {
+                return await WriteTerminalOutcomeAsync(
+                    projectTarget,
+                    output,
+                    workspace,
+                    snapshot,
+                    durableRun.Value).ConfigureAwait(false);
+            }
+
+            return await WriteFailureAsync(
+                RunnerExitCodes.ProductionRunExecutionFailed,
+                projectTarget,
+                stopped.Error.Code,
+                stopped.Error.Message,
+                output,
+                workspace,
+                snapshot,
+                durableRun.Value).ConfigureAwait(false);
+        }
+
+        var run = stopped.Value;
+        return IsTerminal(run.ExecutionStatus)
+            ? await WriteTerminalOutcomeAsync(
+                projectTarget,
+                output,
+                workspace,
+                snapshot,
+                run).ConfigureAwait(false)
+            : await WriteFailureAsync(
+                RunnerExitCodes.ProductionRunExecutionFailed,
+                projectTarget,
+                run.FailureCode ?? "Runner.ControlledStopDidNotCancel",
+                run.FailureReason
+                    ?? $"Production Run {run.RunId.Value:D} did not reach a durable terminal state after Safe Stop.",
+                output,
+                workspace,
+                snapshot,
+                run).ConfigureAwait(false);
+    }
+
+    private async ValueTask<Result<ProductionRunSnapshot>> ReadDurableRunAsync(
+        ProductionRunId runId)
+    {
+        var entry = await _productionRunRepository
+            .GetByIdAsync(runId, CancellationToken.None)
+            .ConfigureAwait(false);
+        return entry is null
+            ? Result.Failure<ProductionRunSnapshot>(ApplicationError.NotFound(
+                "Runner.ProductionRunNotFound",
+                $"Production Run {runId.Value:D} disappeared after it was accepted."))
+            : Result.Success(entry.Run.ToSnapshot());
+    }
+
+    private async Task<int> WriteTerminalOutcomeAsync(
+        string projectTarget,
+        TextWriter output,
+        AutomationProjectWorkspaceDetails workspace,
+        OpenLineOps.Projects.Application.Projects.PublishedProjectSnapshotDetails snapshot,
+        ProductionRunSnapshot productionRun)
+    {
         await _terminalOutboxDispatcher.DrainAsync(CancellationToken.None).ConfigureAwait(false);
         if (productionRun.ExecutionStatus == ExecutionStatus.Canceled)
         {
@@ -204,9 +362,15 @@ public sealed class RunnerCommand
                 output,
                 RunnerJsonOutput.Succeeded(projectTarget, workspace, snapshot, productionRun))
             .ConfigureAwait(false);
-
         return RunnerExitCodes.Success;
     }
+
+    private static bool IsTerminal(ExecutionStatus status) => status is
+        ExecutionStatus.Completed
+        or ExecutionStatus.Failed
+        or ExecutionStatus.TimedOut
+        or ExecutionStatus.Canceled
+        or ExecutionStatus.Rejected;
 
     private static bool IsMissingRelease(string errorCode)
     {

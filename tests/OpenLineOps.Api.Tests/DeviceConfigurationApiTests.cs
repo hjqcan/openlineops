@@ -5,13 +5,13 @@ using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class DeviceConfigurationApiTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class DeviceConfigurationApiTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
     private readonly HttpClient _client;
 
-    public DeviceConfigurationApiTests(WebApplicationFactory<Program> factory)
+    public DeviceConfigurationApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        _client = factory.CreateAuthenticatedClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
         });

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Plugins.Application.Commands;
 using OpenLineOps.Processes.Application.Scripting;
 
@@ -20,6 +21,7 @@ internal sealed partial class PluginCommandBlocklyBlockCatalogSource : IProcessB
     }
 
     public async ValueTask<IReadOnlyCollection<ProcessBlocklyBlockDefinitionDetails>> ListAsync(
+        ProjectApplicationWorkspaceScope scope,
         CancellationToken cancellationToken = default)
     {
         var blocks = new Dictionary<string, ProcessBlocklyBlockDefinitionDetails>(StringComparer.Ordinal);
@@ -28,7 +30,7 @@ internal sealed partial class PluginCommandBlocklyBlockCatalogSource : IProcessB
         if (deviceInventory is not null)
         {
             var commands = await deviceInventory
-                .ListDeviceCommandsAsync(cancellationToken)
+                .ListDeviceCommandsAsync(scope, cancellationToken)
                 .ConfigureAwait(false);
             foreach (var command in commands)
             {
@@ -41,7 +43,7 @@ internal sealed partial class PluginCommandBlocklyBlockCatalogSource : IProcessB
         if (processInventory is not null)
         {
             var commands = await processInventory
-                .ListProcessCommandsAsync(cancellationToken)
+                .ListProcessCommandsAsync(scope, cancellationToken)
                 .ConfigureAwait(false);
             foreach (var command in commands)
             {

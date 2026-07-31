@@ -11,7 +11,10 @@ $PrepareScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "prepare
 $ValidRepositoryUrl = "https://github.com/openlineops/openlineops"
 $ValidSecurityContact = "security@openlineops.example"
 $ValidConductContact = "conduct@openlineops.example"
-$ValidGitHubActionsRunUrl = "https://github.com/openlineops/openlineops/actions/runs/123456789"
+$ValidProductionIntegrationEvidencePath = $null
+$FixtureGitHubEnvironment = $null
+$RequiredProductionIntegrationTest = "OpenLineOps.PostgresIntegration.Tests.PostgresRabbitMqProductionCoordinationIntegrationTests.DurableOutboxAndResultInboxSurviveCoordinatorRestartAcrossRealBroker"
+. (Join-Path $PSScriptRoot "github-fixture-process.ps1")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -71,23 +74,18 @@ function Invoke-Prepare {
         [Parameter(Mandatory = $true)][string[]] $Arguments
     )
 
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $PrepareScript @Arguments 2>&1
-        $exitCode = $LASTEXITCODE
-        if ($null -eq $exitCode) {
-            $exitCode = 0
-        }
+    if ($null -eq $FixtureGitHubEnvironment) {
+        throw "Final publication preflight fixture GitHub environment has not been initialized."
     }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
+    $result = Invoke-GitHubFixturePowerShellProcess `
+        -ScriptPath $PrepareScript `
+        -Arguments $Arguments `
+        -GitHubEnvironment $FixtureGitHubEnvironment
 
     return [pscustomobject]@{
         Name = $Name
-        ExitCode = $exitCode
-        Text = (($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine)
+        ExitCode = $result.ExitCode
+        Text = $result.Text
     }
 }
 
@@ -101,8 +99,8 @@ function New-BaseArguments {
         $ValidSecurityContact,
         "-ConductContact",
         $ValidConductContact,
-        "-GitHubActionsRunUrl",
-        $ValidGitHubActionsRunUrl,
+        "-ProductionIntegrationEvidencePath",
+        $ValidProductionIntegrationEvidencePath,
         "-CodeSigningCertificateThumbprint",
         "00112233445566778899AABBCCDDEEFF00112233",
         "-ArtifactsRoot",
@@ -132,6 +130,65 @@ function Assert-FailsWith {
 
 $ResolvedWorkRoot = Resolve-RepoPath $WorkRoot
 New-CleanDirectory $ResolvedWorkRoot
+
+$currentCommit = (& git -C $RepoRoot rev-parse HEAD 2>$null).Trim().ToLowerInvariant()
+if ($LASTEXITCODE -ne 0 -or $currentCommit -cnotmatch '^[0-9a-f]{40,64}$') {
+    throw "Final publication preflight could not resolve the current Git commit."
+}
+$FixtureGitHubEnvironment = @{
+    GITHUB_REPOSITORY = "openlineops/openlineops"
+    GITHUB_SHA = $currentCommit
+    GITHUB_RUN_ID = "123456789"
+    GITHUB_SERVER_URL = "https://github.com"
+}
+
+$integrationEvidenceRoot = Join-Path $ResolvedWorkRoot "production-integration"
+New-Item -ItemType Directory -Path $integrationEvidenceRoot -Force | Out-Null
+$integrationTrxPath = Join-Path $integrationEvidenceRoot "production-integration.trx"
+$integrationTrx = @"
+<?xml version="1.0" encoding="utf-8"?>
+<TestRun>
+  <Results>
+    <UnitTestResult testName="$RequiredProductionIntegrationTest" outcome="Passed" />
+  </Results>
+  <ResultSummary outcome="Completed">
+    <Counters total="1" executed="1" passed="1" failed="0" notExecuted="0" />
+  </ResultSummary>
+</TestRun>
+"@
+Write-Utf8NoBom -Path $integrationTrxPath -Content $integrationTrx
+$integrationTrxFile = Get-Item -LiteralPath $integrationTrxPath
+$repoPrefix = $RepoRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+$integrationTrxRelativePath = $integrationTrxPath.Substring($repoPrefix.Length).Replace('\', '/')
+$ValidProductionIntegrationEvidencePath = Join-Path $integrationEvidenceRoot "integration-evidence.json"
+$integrationEvidence = [ordered]@{
+    schemaVersion = 1
+    generatedAtUtc = [System.DateTimeOffset]::UtcNow.ToString("O")
+    product = "OpenLineOps"
+    repository = "openlineops/openlineops"
+    commitSha = $currentCommit
+    runId = "123456789"
+    runUrl = "https://github.com/openlineops/openlineops/actions/runs/123456789"
+    jobName = "production-integration"
+    testName = $RequiredProductionIntegrationTest
+    conclusion = "success"
+    counters = [ordered]@{
+        total = 1
+        executed = 1
+        passed = 1
+        failed = 0
+        skipped = 0
+    }
+    trx = [ordered]@{
+        relativePath = $integrationTrxRelativePath
+        sizeBytes = $integrationTrxFile.Length
+        sha256 = (Get-FileHash -LiteralPath $integrationTrxPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+}
+Write-Utf8NoBom `
+    -Path $ValidProductionIntegrationEvidencePath `
+    -Content (($integrationEvidence | ConvertTo-Json -Depth 8) + [Environment]::NewLine)
+
 $caseResults = @()
 
 $missingLicense = Invoke-Prepare -Name "missing-license-confirmation" -Arguments (New-BaseArguments)
@@ -143,17 +200,19 @@ $caseResults += [pscustomobject][ordered]@{
 }
 Assert-FailsWith -Result $missingLicense -Pattern "ConfirmMitLicense is required"
 
-$invalidGitHubActionsUrlArgs = (New-BaseArguments) + "-ConfirmMitLicense"
-$index = [Array]::IndexOf($invalidGitHubActionsUrlArgs, "-GitHubActionsRunUrl")
-$invalidGitHubActionsUrlArgs[$index + 1] = "https://example.com/actions/runs/123"
-$invalidGitHubActionsUrl = Invoke-Prepare -Name "invalid-github-actions-url" -Arguments $invalidGitHubActionsUrlArgs
+$missingIntegrationEvidenceArgs = (New-BaseArguments) + "-ConfirmMitLicense"
+$index = [Array]::IndexOf($missingIntegrationEvidenceArgs, "-ProductionIntegrationEvidencePath")
+$missingIntegrationEvidenceArgs[$index + 1] = Join-Path $integrationEvidenceRoot "missing-evidence.json"
+$missingIntegrationEvidence = Invoke-Prepare `
+    -Name "missing-production-integration-evidence" `
+    -Arguments $missingIntegrationEvidenceArgs
 $caseResults += [pscustomobject][ordered]@{
-    name = $invalidGitHubActionsUrl.Name
-    exitCode = $invalidGitHubActionsUrl.ExitCode
+    name = $missingIntegrationEvidence.Name
+    exitCode = $missingIntegrationEvidence.ExitCode
     expected = "fail"
-    output = $invalidGitHubActionsUrl.Text
+    output = $missingIntegrationEvidence.Text
 }
-Assert-FailsWith -Result $invalidGitHubActionsUrl -Pattern "GitHubActionsRunUrl must point"
+Assert-FailsWith -Result $missingIntegrationEvidence -Pattern "Production integration evidence does not exist"
 
 $missingSigningSelectorArgs = @((New-BaseArguments) | Where-Object {
     $_ -ne "-CodeSigningCertificateThumbprint" -and $_ -ne "00112233445566778899AABBCCDDEEFF00112233"
@@ -165,7 +224,7 @@ $caseResults += [pscustomobject][ordered]@{
     expected = "fail"
     output = $missingSigningSelector.Text
 }
-Assert-FailsWith -Result $missingSigningSelector -Pattern "exactly one code-signing certificate selector"
+Assert-FailsWith -Result $missingSigningSelector -Pattern "exactly one certificate-store selector"
 
 $validPlanArgs = (New-BaseArguments) + "-ConfirmMitLicense"
 $validPlan = Invoke-Prepare -Name "valid-plan" -Arguments $validPlanArgs
@@ -184,14 +243,30 @@ foreach ($expected in @(
         "finalize-publication-metadata.ps1",
         "stage-release-artifacts.ps1",
         "-SignWindowsPackages",
+        "-RequireCleanGitWorkTree",
+        "-ExpectedGitCommit",
         "inspect-release-candidate.ps1",
         "-RequireSignedWindowsArtifacts",
         "verify-publication-readiness.ps1",
         "write-publication-evidence.ps1",
+        "-ProductionIntegrationEvidencePath",
         "-RequirePublishable")) {
     if ($validPlan.Text -notmatch [regex]::Escape($expected)) {
         Write-Host $validPlan.Text
         throw "Final publication plan did not include expected text '$expected'."
+    }
+}
+
+if ($validPlan.Text -notmatch '-ExpectedGitCommit\s+[0-9a-f]{40,64}(?:\s|$)') {
+    Write-Host $validPlan.Text
+    throw "Final publication plan did not bind staging to the current full Git commit."
+}
+foreach ($removedSigningArgument in @(
+        "CodeSigningCertificatePath",
+        "CodeSigningCertificatePassword")) {
+    if ($validPlan.Text -match [regex]::Escape($removedSigningArgument)) {
+        Write-Host $validPlan.Text
+        throw "Final publication plan exposed removed signing argument '$removedSigningArgument'."
     }
 }
 

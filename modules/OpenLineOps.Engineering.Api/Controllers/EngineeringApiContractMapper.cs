@@ -43,7 +43,13 @@ internal static class EngineeringApiContractMapper
             request.Parameters!
                 .Select(parameter => new RecipeApplicationParameterRequest(
                     parameter.Key!,
-                    parameter.Value!))
+                    parameter.Value ?? string.Empty,
+                    parameter.Type,
+                    parameter.Unit,
+                    parameter.Minimum,
+                    parameter.Maximum,
+                    parameter.AllowedValues,
+                    parameter.Required))
                 .ToArray());
     }
 
@@ -123,8 +129,21 @@ internal static class EngineeringApiContractMapper
             recipe.Status,
             recipe.CreatedAtUtc,
             recipe.PublishedAtUtc,
+            recipe.ValidatedAtUtc,
+            recipe.ApprovedAtUtc,
+            recipe.ApprovedBy,
+            recipe.ReleasedAtUtc,
+            recipe.RetiredAtUtc,
             recipe.Parameters
-                .Select(parameter => new RecipeParameterResponse(parameter.Key, parameter.Value))
+                .Select(parameter => new RecipeParameterResponse(
+                    parameter.Key,
+                    parameter.Value,
+                    parameter.Type,
+                    parameter.Unit,
+                    parameter.Minimum,
+                    parameter.Maximum,
+                    parameter.AllowedValues,
+                    parameter.Required))
                 .ToArray());
     }
 
@@ -264,7 +283,11 @@ internal static class EngineeringApiContractMapper
         {
             var prefix = $"Parameters[{index}]";
             AddRequired(errors, $"{prefix}.{nameof(parameter.Key)}", parameter.Key);
-            AddRequired(errors, $"{prefix}.{nameof(parameter.Value)}", parameter.Value);
+            AddRequired(errors, $"{prefix}.{nameof(parameter.Type)}", parameter.Type);
+            if (parameter.Required)
+            {
+                AddRequired(errors, $"{prefix}.{nameof(parameter.Value)}", parameter.Value);
+            }
             index++;
         }
     }

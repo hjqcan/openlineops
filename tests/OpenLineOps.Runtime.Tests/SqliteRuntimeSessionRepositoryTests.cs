@@ -11,13 +11,26 @@ using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Steps;
 using OpenLineOps.Runtime.Domain.Targets;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
-using RuntimeCommandStatus = OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus;
 
 namespace OpenLineOps.Runtime.Tests;
 
 public sealed class SqliteRuntimeSessionRepositoryTests
 {
     private static readonly DateTimeOffset BaseTimeUtc = new(2026, 6, 29, 8, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task SaveAsyncRejectsOmittedPendingEventsWithoutWritingSessionSnapshot()
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        using var repository = new SqliteRuntimeSessionRepository(database.ConnectionString);
+        var session = CreateRunningSession("omitted-events", BaseTimeUtc);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await repository.SaveAsync(session, []));
+
+        Assert.Contains("every pending Domain Event", exception.Message, StringComparison.Ordinal);
+        Assert.Null(await repository.GetByIdAsync(session.Id));
+    }
 
     [Fact]
     public async Task SaveAsyncPersistsRuntimeSessionGraphForNewRepositoryInstance()
@@ -53,7 +66,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
             "Camera temperature is above nominal range.",
             BaseTimeUtc.AddSeconds(8));
 
-        await repository.SaveAsync(session);
+        await repository.SaveAsync(session, session.DomainEvents.ToArray());
 
         using var restartedRepository = new SqliteRuntimeSessionRepository(database.ConnectionString);
         var restored = await restartedRepository.GetByIdAsync(session.Id);
@@ -72,7 +85,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
 
         var restoredCommand = Assert.Single(restored.Commands);
         Assert.Equal(command.Id, restoredCommand.Id);
-        Assert.Equal(RuntimeCommandStatus.Completed, restoredCommand.Status);
+        Assert.Equal(ExecutionStatus.Completed, restoredCommand.Status);
         Assert.Equal("{\"ok\":true}", restoredCommand.ResultPayload);
         Assert.Equal(ResultJudgement.Passed, restoredCommand.ResultJudgement);
         Assert.Equal(BaseTimeUtc.AddSeconds(6), restoredCommand.CompletedAtUtc);
@@ -81,6 +94,54 @@ public sealed class SqliteRuntimeSessionRepositoryTests
         Assert.Equal(incident.Id, restoredIncident.Id);
         Assert.Equal(RuntimeIncidentSeverity.Warning, restoredIncident.Severity);
         Assert.Equal("Runtime.CameraTemperatureHigh", restoredIncident.Code);
+    }
+
+    [Fact]
+    public async Task ColdReopenPreservesSkippedStepFailureEvidence()
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        using var repository = new SqliteRuntimeSessionRepository(database.ConnectionString);
+        var session = CreateRunningSession("skipped-step", BaseTimeUtc);
+        var step = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("node-optional-inspection"),
+            "Optional inspection",
+            BaseTimeUtc.AddSeconds(2),
+            new RuntimeActionId("node-optional-inspection:action:1"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.inspection"));
+        var command = session.CreateCommand(
+            RuntimeCommandId.New(),
+            step.Id,
+            new RuntimeCapabilityId("vision.optional"),
+            "Inspect",
+            BaseTimeUtc.AddSeconds(3),
+            TimeSpan.FromSeconds(5));
+        session.AcceptCommand(command.Id, BaseTimeUtc.AddSeconds(4));
+        session.StartCommand(command.Id, BaseTimeUtc.AddSeconds(5));
+        session.FailCommand(
+            command.Id,
+            "optional camera unavailable",
+            BaseTimeUtc.AddSeconds(6));
+        session.SkipStep(
+            step.Id,
+            "optional camera unavailable",
+            BaseTimeUtc.AddSeconds(7));
+        session.Complete(BaseTimeUtc.AddSeconds(8));
+
+        await repository.SaveAsync(session, session.DomainEvents.ToArray());
+
+        using var restartedRepository =
+            new SqliteRuntimeSessionRepository(database.ConnectionString);
+        var restored = Assert.IsType<RuntimeSession>(
+            await restartedRepository.GetByIdAsync(session.Id));
+
+        Assert.Equal(RuntimeSessionStatus.Completed, restored.Status);
+        var restoredStep = Assert.Single(restored.Steps);
+        Assert.Equal(RuntimeStepStatus.Skipped, restoredStep.Status);
+        Assert.Equal("optional camera unavailable", restoredStep.FailureReason);
+        Assert.Equal(BaseTimeUtc.AddSeconds(7), restoredStep.CompletedAtUtc);
+        Assert.Equal(ExecutionStatus.Failed, Assert.Single(restored.Commands).Status);
+        Assert.Empty(restored.DomainEvents);
     }
 
     [Fact]
@@ -111,7 +172,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
                 "TOPOLOGY-TRACE",
                 RuntimeTestReleaseIdentity.ResourceFences("STATION-SYSTEM-TRACE")));
 
-        await repository.SaveAsync(session);
+        await repository.SaveAsync(session, session.DomainEvents.ToArray());
 
         using var restartedRepository = new SqliteRuntimeSessionRepository(database.ConnectionString);
         var restored = await restartedRepository.GetByIdAsync(session.Id);
@@ -149,7 +210,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
         using var database = TemporarySqliteDatabase.Create();
         using var repository = new SqliteRuntimeSessionRepository(database.ConnectionString);
         var session = CreateRunningSession("missing-release-identity", BaseTimeUtc);
-        await repository.SaveAsync(session);
+        await repository.SaveAsync(session, session.DomainEvents.ToArray());
 
         await using (var connection = new SqliteConnection(database.ConnectionString))
         {
@@ -200,7 +261,7 @@ public sealed class SqliteRuntimeSessionRepositoryTests
             BaseTimeUtc.AddSeconds(3),
             TimeSpan.FromSeconds(5));
 
-        await repository.SaveAsync(session);
+        await repository.SaveAsync(session, session.DomainEvents.ToArray());
 
         using var restartedRepository = new SqliteRuntimeSessionRepository(database.ConnectionString);
         var restored = Assert.IsType<RuntimeSession>(await restartedRepository.GetByIdAsync(session.Id));
@@ -335,9 +396,9 @@ public sealed class SqliteRuntimeSessionRepositoryTests
         var completed = CreateRunningSession("completed", BaseTimeUtc.AddMinutes(6));
         completed.Complete(BaseTimeUtc.AddMinutes(7));
 
-        await repository.SaveAsync(paused);
-        await repository.SaveAsync(completed);
-        await repository.SaveAsync(running);
+        await repository.SaveAsync(paused, paused.DomainEvents.ToArray());
+        await repository.SaveAsync(completed, completed.DomainEvents.ToArray());
+        await repository.SaveAsync(running, running.DomainEvents.ToArray());
 
         var service = new RuntimeSessionRecoveryService(repository);
         var plan = await service.CreateRecoveryPlanAsync();

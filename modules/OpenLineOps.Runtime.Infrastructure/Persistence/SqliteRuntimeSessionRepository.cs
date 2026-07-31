@@ -1,15 +1,22 @@
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
+using OpenLineOps.Domain.Abstractions.Events;
+using OpenLineOps.Runtime.Application.Monitoring;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Sessions;
 
 namespace OpenLineOps.Runtime.Infrastructure.Persistence;
 
-public sealed class SqliteRuntimeSessionRepository : IRuntimeSessionRepository, IDisposable
+public sealed partial class SqliteRuntimeSessionRepository :
+    IRuntimeSessionRepository,
+    IRuntimeMonitoringStore,
+    IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = RuntimePersistenceJson.CreateOptions();
+    private static readonly JsonSerializerOptions MonitoringJsonOptions =
+        RuntimeMonitoringPersistenceJson.CreateOptions();
 
     private readonly string _connectionString;
     private readonly SemaphoreSlim _schemaLock = new(1, 1);
@@ -22,9 +29,12 @@ public sealed class SqliteRuntimeSessionRepository : IRuntimeSessionRepository, 
 
     public async ValueTask SaveAsync(
         RuntimeSession session,
+        IReadOnlyCollection<IDomainEvent> domainEvents,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(domainEvents);
+        RequireRuntimeSessionEvents(session, domainEvents);
 
         await EnsureSchemaAsync(cancellationToken);
 
@@ -33,8 +43,23 @@ public sealed class SqliteRuntimeSessionRepository : IRuntimeSessionRepository, 
 
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken);
+        await using var transaction = connection.BeginTransaction(deferred: false);
+
+        if (await IsTerminalWriteIdempotentAsync(
+                connection,
+                transaction,
+                session,
+                documentJson,
+                domainEvents,
+                cancellationToken)
+            .ConfigureAwait(false))
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
         await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO runtime_sessions (
                 session_id,
@@ -81,6 +106,88 @@ public sealed class SqliteRuntimeSessionRepository : IRuntimeSessionRepository, 
         command.Parameters.AddWithValue("$updated_at_utc", FormatTimestamp(DateTimeOffset.UtcNow));
 
         await command.ExecuteNonQueryAsync(cancellationToken);
+        await AppendMonitoringEventsAsync(
+                connection,
+                transaction,
+                documentJson,
+                domainEvents,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask<bool> IsTerminalWriteIdempotentAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        RuntimeSession session,
+        string candidateDocumentJson,
+        IReadOnlyCollection<IDomainEvent> domainEvents,
+        CancellationToken cancellationToken)
+    {
+        string? existingDocumentJson = null;
+        string? existingStatus = null;
+        await using (var select = connection.CreateCommand())
+        {
+            select.Transaction = transaction;
+            select.CommandText = """
+                SELECT document_json, status
+                FROM runtime_sessions
+                WHERE session_id = $session_id;
+                """;
+            select.Parameters.AddWithValue("$session_id", session.Id.Value.ToString("D"));
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                existingDocumentJson = reader.GetString(0);
+                existingStatus = reader.GetString(1);
+            }
+        }
+
+        if (existingStatus is null)
+        {
+            return false;
+        }
+
+        if (!Enum.TryParse<RuntimeSessionStatus>(existingStatus, ignoreCase: false, out var status)
+            || !Enum.IsDefined(status)
+            || !string.Equals(status.ToString(), existingStatus, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Persisted Runtime session {session.Id} has invalid status '{existingStatus}'.");
+        }
+
+        if (status is not (RuntimeSessionStatus.Stopped
+            or RuntimeSessionStatus.Completed
+            or RuntimeSessionStatus.Failed
+            or RuntimeSessionStatus.Canceled))
+        {
+            return false;
+        }
+
+        if (!string.Equals(existingDocumentJson, candidateDocumentJson, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Terminal Runtime session {session.Id} is immutable.");
+        }
+
+        foreach (var domainEvent in domainEvents)
+        {
+            var eventDocument = RuntimeMonitoringDomainEventMapper.ToDocument(domainEvent);
+            await RequireMatchingStoredEventAsync(
+                    connection,
+                    transaction,
+                    domainEvent.EventId,
+                    eventDocument.SessionId,
+                    eventDocument.EventName,
+                    eventDocument.OccurredAtUtc,
+                    candidateDocumentJson,
+                    JsonSerializer.Serialize(eventDocument, JsonOptions),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return true;
     }
 
     public async ValueTask<RuntimeSession?> GetByIdAsync(
@@ -171,6 +278,88 @@ public sealed class SqliteRuntimeSessionRepository : IRuntimeSessionRepository, 
 
                 CREATE INDEX IF NOT EXISTS ix_runtime_sessions_recovery
                     ON runtime_sessions(status, last_transition_at_utc);
+
+                CREATE TABLE IF NOT EXISTS runtime_monitoring_events (
+                    sequence INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE,
+                    session_id TEXT NOT NULL,
+                    event_name TEXT NOT NULL,
+                    occurred_at_utc TEXT NOT NULL,
+                    session_document_json TEXT NOT NULL,
+                    event_document_json TEXT NOT NULL,
+                    projected INTEGER NOT NULL DEFAULT 0 CHECK(projected IN (0, 1))
+                );
+
+                CREATE INDEX IF NOT EXISTS ix_runtime_monitoring_events_pending
+                    ON runtime_monitoring_events(projected, sequence);
+
+                CREATE TABLE IF NOT EXISTS runtime_monitoring_station_statuses (
+                    project_id TEXT NOT NULL,
+                    application_id TEXT NOT NULL,
+                    project_snapshot_id TEXT NOT NULL,
+                    topology_id TEXT NOT NULL,
+                    production_run_id TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    station_system_id TEXT NOT NULL,
+                    last_event_sequence INTEGER NOT NULL,
+                    document_json TEXT NOT NULL,
+                    PRIMARY KEY (
+                        project_id,
+                        application_id,
+                        project_snapshot_id,
+                        topology_id,
+                        production_run_id,
+                        operation_id,
+                        station_system_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS runtime_monitoring_target_statuses (
+                    project_id TEXT NOT NULL,
+                    application_id TEXT NOT NULL,
+                    project_snapshot_id TEXT NOT NULL,
+                    topology_id TEXT NOT NULL,
+                    production_run_id TEXT NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    station_system_id TEXT NOT NULL,
+                    target_kind TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    last_event_sequence INTEGER NOT NULL,
+                    document_json TEXT NOT NULL,
+                    PRIMARY KEY (
+                        project_id,
+                        application_id,
+                        project_snapshot_id,
+                        topology_id,
+                        production_run_id,
+                        operation_id,
+                        station_system_id,
+                        target_kind,
+                        target_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS runtime_monitoring_timeline (
+                    sequence INTEGER NOT NULL PRIMARY KEY,
+                    event_id TEXT NOT NULL UNIQUE,
+                    session_id TEXT NOT NULL,
+                    document_json TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS ix_runtime_monitoring_timeline_session
+                    ON runtime_monitoring_timeline(session_id, sequence);
+
+                CREATE TABLE IF NOT EXISTS runtime_monitoring_alarms (
+                    alarm_id TEXT NOT NULL PRIMARY KEY,
+                    station_system_id TEXT NOT NULL,
+                    occurred_at_utc TEXT NOT NULL,
+                    last_event_sequence INTEGER NOT NULL,
+                    document_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS runtime_monitoring_alarm_acknowledgements (
+                    alarm_id TEXT NOT NULL PRIMARY KEY,
+                    acknowledged_by TEXT NOT NULL,
+                    acknowledged_at_utc TEXT NOT NULL
+                );
                 """;
 
             await command.ExecuteNonQueryAsync(cancellationToken);

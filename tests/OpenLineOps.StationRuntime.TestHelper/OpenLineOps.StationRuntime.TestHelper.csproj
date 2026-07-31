@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\shared\OpenLineOps.ProcessIsolation\OpenLineOps.ProcessIsolation.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.Runtime.Contracts\OpenLineOps.Runtime.Contracts.csproj" />
   </ItemGroup>
 </Project>

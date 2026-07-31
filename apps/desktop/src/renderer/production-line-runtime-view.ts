@@ -45,6 +45,14 @@ export interface ProductionLineResourceView extends ProductionLineResourceStateR
 export interface ProductionLineStationView {
   stationSystemId: string;
   status: ProductionLineStationStateResponse['status'];
+  agentId: string | null;
+  stationId: string | null;
+  agentPresenceSessionId: string | null;
+  agentPresenceSequence: number | null;
+  agentPresenceState: ProductionLineStationStateResponse['agentPresenceState'];
+  agentPresenceHealth: ProductionLineStationStateResponse['agentPresenceHealth'];
+  agentPresenceLastSeenAtUtc: string | null;
+  agentPresenceAgeSeconds: number | null;
   queue: ProductionLineQueuedMaterialView[];
   activeOperations: ProductionLineOperationView[];
   productionUnits: ProductionLineProductionUnitStateResponse[];
@@ -99,6 +107,14 @@ export function buildProductionLineRuntimeView(
     return {
       stationSystemId: station.stationSystemId,
       status: station.status,
+      agentId: station.agentId,
+      stationId: station.stationId,
+      agentPresenceSessionId: station.agentPresenceSessionId,
+      agentPresenceSequence: station.agentPresenceSequence,
+      agentPresenceState: station.agentPresenceState,
+      agentPresenceHealth: station.agentPresenceHealth,
+      agentPresenceLastSeenAtUtc: station.agentPresenceLastSeenAtUtc,
+      agentPresenceAgeSeconds: station.agentPresenceAgeSeconds,
       queue: station.queue.map(material => toQueuedMaterialView(material, productionUnitById)),
       activeOperations,
       productionUnits,

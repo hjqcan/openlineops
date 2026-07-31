@@ -174,13 +174,13 @@ public sealed class AutomationTopologyTests
             new DriverBindingId("binding.axis-a"),
             axisA.Id,
             capability.Id,
-            DriverProviderKind.DeviceInstance,
+            DriverProviderKind.PluginCommand,
             "axis-a")).Succeeded);
         Assert.True(topology.AddDriverBinding(DriverBinding.Create(
             new DriverBindingId("binding.axis-b"),
             axisB.Id,
             capability.Id,
-            DriverProviderKind.DeviceInstance,
+            DriverProviderKind.PluginCommand,
             "axis-b")).Succeeded);
         var duplicateOwnerCapability = topology.AddDriverBinding(DriverBinding.Create(
             new DriverBindingId("binding.axis-a-duplicate"),
@@ -294,6 +294,14 @@ public sealed class AutomationTopologyTests
     public void SystemUpdatePreservesIdentityKindAndParentWhileSystemDeleteCascadesTheSubtree()
     {
         var topology = CreateTopology();
+        var capability = CapabilityContract.Create(
+            new CapabilityContractId("component.inspect"),
+            "Inspect",
+            new Version(1, 0),
+            null,
+            null,
+            TimeSpan.FromSeconds(5));
+        Assert.True(topology.AddCapability(capability).Succeeded);
         var station = AutomationSystem.Create(
             new AutomationSystemId("Station.Main"),
             null,
@@ -326,6 +334,8 @@ public sealed class AutomationTopologyTests
             child.Id,
             "component.new",
             "Renamed Component",
+            [capability.Id],
+            [capability.Id],
             new Dictionary<string, string> { ["vendor"] = "acme" }).Succeeded);
         var updated = topology.FindSystem(child.Id)!;
         Assert.Equal(child.Id, updated.Id);
@@ -333,6 +343,24 @@ public sealed class AutomationTopologyTests
         Assert.Equal(SystemKind.System, updated.Kind);
         Assert.Equal("component.new", updated.SystemType);
         Assert.Equal("Renamed Component", updated.DisplayName);
+        Assert.Equal([capability.Id], updated.RequiredCapabilities);
+        Assert.Equal([capability.Id], updated.ProvidedCapabilities);
+
+        Assert.True(topology.AddDriverBinding(DriverBinding.Create(
+            new DriverBindingId("binding.component.inspect"),
+            child.Id,
+            capability.Id,
+            DriverProviderKind.Simulator,
+            "component-inspector")).Succeeded);
+        var removeBoundCapability = topology.UpdateSystem(
+            child.Id,
+            updated.SystemType,
+            updated.DisplayName,
+            [],
+            [],
+            updated.Metadata);
+        Assert.False(removeBoundCapability.Succeeded);
+        Assert.Equal("Topology.SystemCapabilityInUse", removeBoundCapability.Code);
 
         Assert.True(topology.RemoveSystem(station.Id).Succeeded);
         Assert.Empty(topology.Systems);

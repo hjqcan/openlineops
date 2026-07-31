@@ -89,7 +89,8 @@ public sealed class ProjectProcessBlocklyBlockCatalog : IProjectProcessBlocklyBl
         var catalog = new ProcessBlocklyBlockCatalog(
             new ScopedBlockRepository(scope, _repository),
             _clock,
-            _sources);
+            _sources,
+            scope);
 
         return await execute(catalog).ConfigureAwait(false);
     }

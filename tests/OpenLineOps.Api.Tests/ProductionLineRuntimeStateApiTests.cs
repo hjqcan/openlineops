@@ -15,14 +15,14 @@ using OpenLineOps.Runtime.Domain.Runs;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class ProductionLineRuntimeStateApiTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class ProductionLineRuntimeStateApiTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
     private static readonly DateTimeOffset BaseTimeUtc =
         new(2026, 7, 11, 8, 0, 0, TimeSpan.Zero);
 
-    private readonly WebApplicationFactory<Program> _factory;
+    private readonly OpenLineOpsApiWebApplicationFactory _factory;
 
-    public ProductionLineRuntimeStateApiTests(WebApplicationFactory<Program> factory)
+    public ProductionLineRuntimeStateApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
         _factory = factory;
     }
@@ -41,7 +41,7 @@ public sealed class ProductionLineRuntimeStateApiTests : IClassFixture<WebApplic
                     new StubLineRuntimeStateReader(state));
             });
         });
-        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        using var client = factory.CreateAuthenticatedClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
         });
@@ -63,6 +63,11 @@ public sealed class ProductionLineRuntimeStateApiTests : IClassFixture<WebApplic
 
         var station = Assert.Single(root.GetProperty("stations").EnumerateArray());
         Assert.Equal("Running", station.GetProperty("status").GetString());
+        Assert.Equal("agent-api", station.GetProperty("agentId").GetString());
+        Assert.Equal("station-host-api", station.GetProperty("stationId").GetString());
+        Assert.Equal("Heartbeat", station.GetProperty("agentPresenceState").GetString());
+        Assert.Equal("Online", station.GetProperty("agentPresenceHealth").GetString());
+        Assert.Equal(0, station.GetProperty("agentPresenceAgeSeconds").GetDouble());
         Assert.Single(station.GetProperty("queue").EnumerateArray());
         var operation = Assert.Single(station.GetProperty("activeOperations").EnumerateArray());
         var resources = operation.GetProperty("resources").EnumerateArray().ToArray();
@@ -86,7 +91,7 @@ public sealed class ProductionLineRuntimeStateApiTests : IClassFixture<WebApplic
     [InlineData("line-api ")]
     public async Task GetLineStateRejectsNonCanonicalLineIdentity(string lineId)
     {
-        using var client = _factory.CreateClient();
+        using var client = _factory.CreateAuthenticatedClient();
 
         using var response = await client.GetAsync(
             $"/api/operations/lines/{Uri.EscapeDataString(lineId)}/state");
@@ -178,7 +183,19 @@ public sealed class ProductionLineRuntimeStateApiTests : IClassFixture<WebApplic
                 new ProductionLineStationState(
                     "station-api",
                     ProductionLineStationRuntimeStatus.Running,
-                    [new ProductionLineQueuedMaterial(MaterialKind.Carrier, "carrier-api", BaseTimeUtc)],
+                    AgentId: "agent-api",
+                    StationId: "station-host-api",
+                    AgentPresenceSessionId: Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                    AgentPresenceSequence: 2,
+                    AgentPresenceState: OpenLineOps.Agent.Contracts.AgentPresenceState.Heartbeat,
+                    AgentPresenceHealth: ProductionLineAgentPresenceHealth.Online,
+                    AgentPresenceLastSeenAtUtc: BaseTimeUtc.AddSeconds(1),
+                    AgentPresenceAge: TimeSpan.Zero,
+                    Queue: [new ProductionLineQueuedMaterial(
+                        MaterialKind.Carrier,
+                        "carrier-api",
+                        BaseTimeUtc)],
+                    ActiveOperations:
                     [
                         new ProductionLineStationOperationState(
                             runId,

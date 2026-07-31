@@ -9,7 +9,6 @@ public sealed record RequestStationEmergencyStopApiRequest(
     string ProjectId,
     string ApplicationId,
     string ProjectSnapshotId,
-    string ActorId,
     string Reason,
     string RequestedAtUtc);
 

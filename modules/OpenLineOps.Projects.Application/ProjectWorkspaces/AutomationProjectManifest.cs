@@ -1,3 +1,5 @@
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
+
 namespace OpenLineOps.Projects.Application.ProjectWorkspaces;
 
 public sealed record AutomationProjectManifest(
@@ -22,7 +24,8 @@ public sealed record ProjectApplicationManifest(
     string DisplayName,
     string? TopologyId,
     string[] ProcessDefinitionIds,
-    string ProjectFilePath);
+    string ProjectFilePath,
+    ProjectApplicationPluginPackageReference[] PluginPackageReferences);
 
 public sealed record AutomationProjectFile(
     string SchemaVersion,
@@ -68,7 +71,8 @@ public sealed record AutomationApplicationProjectFile(
     string DisplayName,
     int ResourceLayoutVersion,
     string? TopologyId,
-    string[] ProcessDefinitionIds)
+    string[] ProcessDefinitionIds,
+    ProjectApplicationPluginPackageReference[] PluginPackageReferences)
 {
     public const string CurrentSchemaVersion = "openlineops.automation-application";
 

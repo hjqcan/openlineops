@@ -1,3 +1,6 @@
+using System.Text.Json.Serialization;
+
 namespace OpenLineOps.Runtime.Api.Models;
 
-public sealed record AcknowledgeRuntimeAlarmRequest(string AcknowledgedBy);
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+public sealed record AcknowledgeRuntimeAlarmRequest;

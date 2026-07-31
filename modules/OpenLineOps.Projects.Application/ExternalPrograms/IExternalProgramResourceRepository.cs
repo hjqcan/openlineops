@@ -13,17 +13,16 @@ public interface IExternalProgramResourceRepository
         string resourceId,
         CancellationToken cancellationToken = default);
 
-    ValueTask<ExternalProgramResource> SaveAsync(
+    ValueTask<ExternalProgramResource> SaveDefinitionAsync(
         ProjectApplicationWorkspaceScope scope,
         SaveExternalProgramResourceRequest request,
-        IReadOnlyCollection<ExternalProgramFileUpload> uploads,
         DateTimeOffset updatedAtUtc,
         CancellationToken cancellationToken = default);
 
-    ValueTask<ExternalProgramResource> ImportFileAsync(
+    ValueTask<ExternalProgramResource> ImportDirectoryAsync(
         ProjectApplicationWorkspaceScope scope,
-        string resourceId,
-        ExternalProgramFileUpload upload,
+        SaveExternalProgramResourceRequest request,
+        IReadOnlyCollection<ExternalProgramFileUpload> files,
         DateTimeOffset updatedAtUtc,
         CancellationToken cancellationToken = default);
 

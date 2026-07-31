@@ -4,7 +4,6 @@ using OpenLineOps.Runtime.Domain.Events;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Targets;
-using RuntimeCommandStatus = OpenLineOps.Runtime.Domain.Commands.RuntimeCommandStatus;
 
 namespace OpenLineOps.Runtime.Tests;
 
@@ -25,7 +24,7 @@ public sealed class RuntimeCommandLifecycleTests
         Assert.True(accepted.Succeeded);
         Assert.True(started.Succeeded);
         Assert.True(completed.Succeeded);
-        Assert.Equal(RuntimeCommandStatus.Completed, command.Status);
+        Assert.Equal(ExecutionStatus.Completed, command.Status);
         Assert.True(command.IsTerminal);
         Assert.Equal("{\"ok\":true}", command.ResultPayload);
     }
@@ -45,7 +44,7 @@ public sealed class RuntimeCommandLifecycleTests
             ResultJudgement.Failed);
 
         Assert.True(completed.Succeeded);
-        Assert.Equal(RuntimeCommandStatus.Completed, command.Status);
+        Assert.Equal(ExecutionStatus.Completed, command.Status);
         Assert.Equal(ResultJudgement.Failed, command.ResultJudgement);
         Assert.Equal("{\"judgement\":\"Failed\"}", command.ResultPayload);
     }
@@ -59,7 +58,7 @@ public sealed class RuntimeCommandLifecycleTests
         var completed = session.CompleteCommand(command.Id, null, StartedAtUtc.AddSeconds(2));
 
         Assert.False(completed.Succeeded);
-        Assert.Equal(RuntimeCommandStatus.Pending, command.Status);
+        Assert.Equal(ExecutionStatus.Pending, command.Status);
         Assert.Equal("Runtime.CommandTransitionRejected", completed.Code);
     }
 
@@ -75,7 +74,7 @@ public sealed class RuntimeCommandLifecycleTests
         var timedOut = session.TimeoutCommand(command.Id, StartedAtUtc.AddSeconds(35));
 
         Assert.True(timedOut.Succeeded);
-        Assert.Equal(RuntimeCommandStatus.TimedOut, command.Status);
+        Assert.Equal(ExecutionStatus.TimedOut, command.Status);
         Assert.True(command.IsTerminal);
         Assert.Equal("Command timed out.", command.FailureReason);
     }
@@ -91,7 +90,7 @@ public sealed class RuntimeCommandLifecycleTests
 
         Assert.True(rejected.Succeeded);
         Assert.False(startAfterReject.Succeeded);
-        Assert.Equal(RuntimeCommandStatus.Rejected, command.Status);
+        Assert.Equal(ExecutionStatus.Rejected, command.Status);
         Assert.True(command.IsTerminal);
         Assert.Equal("capability unavailable", command.FailureReason);
     }
@@ -110,7 +109,7 @@ public sealed class RuntimeCommandLifecycleTests
             StartedAtUtc.AddSeconds(4));
 
         Assert.True(rejected.Succeeded);
-        Assert.Equal(RuntimeCommandStatus.Rejected, command.Status);
+        Assert.Equal(ExecutionStatus.Rejected, command.Status);
         Assert.Equal("backend route unavailable", command.FailureReason);
     }
 
@@ -132,19 +131,225 @@ public sealed class RuntimeCommandLifecycleTests
             commandEvents,
             first =>
             {
-                Assert.Equal(RuntimeCommandStatus.Pending, first.FromStatus);
-                Assert.Equal(RuntimeCommandStatus.Accepted, first.ToStatus);
+                Assert.Equal(ExecutionStatus.Pending, first.FromStatus);
+                Assert.Equal(ExecutionStatus.Running, first.ToStatus);
             },
             second =>
             {
-                Assert.Equal(RuntimeCommandStatus.Accepted, second.FromStatus);
-                Assert.Equal(RuntimeCommandStatus.InProgress, second.ToStatus);
-            },
-            third =>
-            {
-                Assert.Equal(RuntimeCommandStatus.InProgress, third.FromStatus);
-                Assert.Equal(RuntimeCommandStatus.Completed, third.ToStatus);
+                Assert.Equal(ExecutionStatus.Running, second.FromStatus);
+                Assert.Equal(ExecutionStatus.Completed, second.ToStatus);
             });
+    }
+
+    [Fact]
+    public void CompletedCommandAllowsOnlyExactTerminalEvidenceReplay()
+    {
+        var session = CreateRunningSession();
+        var command = CreateCommand(session);
+        Assert.True(session.AcceptCommand(command.Id, StartedAtUtc.AddSeconds(2)).Succeeded);
+        Assert.True(session.StartCommand(command.Id, StartedAtUtc.AddSeconds(3)).Succeeded);
+        Assert.True(session.CompleteCommand(
+            command.Id,
+            "original-payload",
+            StartedAtUtc.AddSeconds(4),
+            ResultJudgement.Passed).Succeeded);
+        var eventCount = session.DomainEvents.Count;
+
+        var exactReplay = session.CompleteCommand(
+            command.Id,
+            "original-payload",
+            StartedAtUtc.AddSeconds(4),
+            ResultJudgement.Passed);
+        var changedPayload = session.CompleteCommand(
+            command.Id,
+            "changed-payload",
+            StartedAtUtc.AddSeconds(4),
+            ResultJudgement.Passed);
+        var changedTimestamp = session.CompleteCommand(
+            command.Id,
+            "original-payload",
+            StartedAtUtc.AddSeconds(5),
+            ResultJudgement.Passed);
+        var changedJudgement = session.CompleteCommand(
+            command.Id,
+            "original-payload",
+            StartedAtUtc.AddSeconds(4),
+            ResultJudgement.Failed);
+        var lateTimeout = session.TimeoutCommand(
+            command.Id,
+            StartedAtUtc.AddSeconds(5),
+            "timeout-payload");
+        var lateReject = session.RejectCommand(
+            command.Id,
+            "late reject",
+            StartedAtUtc.AddSeconds(5));
+
+        Assert.True(exactReplay.Succeeded);
+        Assert.All(
+            new[] { changedPayload, changedTimestamp, changedJudgement, lateTimeout, lateReject },
+            result => Assert.False(result.Succeeded));
+        Assert.Equal("original-payload", command.ResultPayload);
+        Assert.Equal(ResultJudgement.Passed, command.ResultJudgement);
+        Assert.Null(command.FailureReason);
+        Assert.Equal(StartedAtUtc.AddSeconds(4), command.CompletedAtUtc);
+        Assert.Equal(eventCount, session.DomainEvents.Count);
+    }
+
+    [Fact]
+    public void FailedCanceledTimedOutAndRejectedCommandsRejectDifferentReplayEvidence()
+    {
+        var failed = CreateStartedCommand();
+        Assert.True(failed.Session.FailCommand(
+            failed.Command.Id,
+            "original failure",
+            StartedAtUtc.AddSeconds(4),
+            "failure-payload").Succeeded);
+        Assert.True(failed.Session.FailCommand(
+            failed.Command.Id,
+            "original failure",
+            StartedAtUtc.AddSeconds(4),
+            "failure-payload").Succeeded);
+        Assert.False(failed.Session.FailCommand(
+            failed.Command.Id,
+            "changed failure",
+            StartedAtUtc.AddSeconds(4),
+            "failure-payload").Succeeded);
+        Assert.Equal("original failure", failed.Command.FailureReason);
+        Assert.Equal("failure-payload", failed.Command.ResultPayload);
+        Assert.Equal(StartedAtUtc.AddSeconds(4), failed.Command.CompletedAtUtc);
+
+        var canceled = CreateStartedCommand();
+        Assert.True(canceled.Session.CancelCommand(
+            canceled.Command.Id,
+            StartedAtUtc.AddSeconds(4),
+            "original cancel",
+            "cancel-payload").Succeeded);
+        Assert.True(canceled.Session.CancelCommand(
+            canceled.Command.Id,
+            StartedAtUtc.AddSeconds(4),
+            "original cancel",
+            "cancel-payload").Succeeded);
+        Assert.False(canceled.Session.CancelCommand(
+            canceled.Command.Id,
+            StartedAtUtc.AddSeconds(5),
+            "changed cancel",
+            "changed-payload").Succeeded);
+        Assert.Equal("original cancel", canceled.Command.FailureReason);
+        Assert.Equal("cancel-payload", canceled.Command.ResultPayload);
+        Assert.Equal(ResultJudgement.Aborted, canceled.Command.ResultJudgement);
+        Assert.Equal(StartedAtUtc.AddSeconds(4), canceled.Command.CompletedAtUtc);
+
+        var timedOut = CreateStartedCommand();
+        Assert.True(timedOut.Session.TimeoutCommand(
+            timedOut.Command.Id,
+            StartedAtUtc.AddSeconds(4),
+            "timeout-payload").Succeeded);
+        Assert.True(timedOut.Session.TimeoutCommand(
+            timedOut.Command.Id,
+            StartedAtUtc.AddSeconds(4),
+            "timeout-payload").Succeeded);
+        Assert.False(timedOut.Session.TimeoutCommand(
+            timedOut.Command.Id,
+            StartedAtUtc.AddSeconds(5),
+            "changed-payload").Succeeded);
+        Assert.Equal("Command timed out.", timedOut.Command.FailureReason);
+        Assert.Equal("timeout-payload", timedOut.Command.ResultPayload);
+        Assert.Equal(StartedAtUtc.AddSeconds(4), timedOut.Command.CompletedAtUtc);
+
+        var rejectedSession = CreateRunningSession();
+        var rejectedCommand = CreateCommand(rejectedSession);
+        Assert.True(rejectedSession.RejectCommand(
+            rejectedCommand.Id,
+            "original reject",
+            StartedAtUtc.AddSeconds(2)).Succeeded);
+        Assert.True(rejectedSession.RejectCommand(
+            rejectedCommand.Id,
+            "original reject",
+            StartedAtUtc.AddSeconds(2)).Succeeded);
+        Assert.False(rejectedSession.RejectCommand(
+            rejectedCommand.Id,
+            "changed reject",
+            StartedAtUtc.AddSeconds(3)).Succeeded);
+        Assert.Equal("original reject", rejectedCommand.FailureReason);
+        Assert.Equal(StartedAtUtc.AddSeconds(2), rejectedCommand.CompletedAtUtc);
+    }
+
+    [Fact]
+    public void AcceptedAndStartedCommandReplayRequiresExactTransitionTimestamp()
+    {
+        var session = CreateRunningSession();
+        var command = CreateCommand(session);
+
+        Assert.True(session.AcceptCommand(command.Id, StartedAtUtc.AddSeconds(2)).Succeeded);
+        Assert.True(session.AcceptCommand(command.Id, StartedAtUtc.AddSeconds(2)).Succeeded);
+        Assert.False(session.AcceptCommand(command.Id, StartedAtUtc.AddSeconds(3)).Succeeded);
+        Assert.Equal(StartedAtUtc.AddSeconds(2), command.AcceptedAtUtc);
+
+        Assert.True(session.StartCommand(command.Id, StartedAtUtc.AddSeconds(3)).Succeeded);
+        Assert.True(session.StartCommand(command.Id, StartedAtUtc.AddSeconds(3)).Succeeded);
+        Assert.False(session.StartCommand(command.Id, StartedAtUtc.AddSeconds(4)).Succeeded);
+        Assert.Equal(StartedAtUtc.AddSeconds(3), command.StartedAtUtc);
+    }
+
+    [Fact]
+    public void RestoreRejectsInconsistentOrUndefinedExecutionAxes()
+    {
+        Assert.Throws<ArgumentException>(() => RestoreCommand(
+            ExecutionStatus.Completed,
+            acceptedAtUtc: null,
+            startedAtUtc: null,
+            completedAtUtc: StartedAtUtc.AddSeconds(4),
+            failureReason: null,
+            resultJudgement: ResultJudgement.Passed));
+        Assert.Throws<ArgumentException>(() => RestoreCommand(
+            ExecutionStatus.Canceled,
+            acceptedAtUtc: StartedAtUtc.AddSeconds(2),
+            startedAtUtc: StartedAtUtc.AddSeconds(3),
+            completedAtUtc: StartedAtUtc.AddSeconds(4),
+            failureReason: "operator canceled",
+            resultJudgement: ResultJudgement.Unknown));
+        Assert.Throws<ArgumentOutOfRangeException>(() => RestoreCommand(
+            (ExecutionStatus)int.MaxValue,
+            acceptedAtUtc: null,
+            startedAtUtc: null,
+            completedAtUtc: null,
+            failureReason: null,
+            resultJudgement: null));
+    }
+
+    private static RuntimeCommand RestoreCommand(
+        ExecutionStatus status,
+        DateTimeOffset? acceptedAtUtc,
+        DateTimeOffset? startedAtUtc,
+        DateTimeOffset? completedAtUtc,
+        string? failureReason,
+        ResultJudgement? resultJudgement)
+    {
+        return RuntimeCommand.Restore(
+            RuntimeCommandId.New(),
+            RuntimeStepId.New(),
+            new RuntimeCapabilityId("device.restore"),
+            "Restore",
+            status,
+            StartedAtUtc.AddSeconds(1),
+            TimeSpan.FromSeconds(30),
+            acceptedAtUtc,
+            startedAtUtc,
+            completedAtUtc,
+            resultPayload: null,
+            failureReason,
+            resultJudgement,
+            new RuntimeActionId("restore:action:1"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.restore"));
+    }
+
+    private static (RuntimeSession Session, RuntimeCommand Command) CreateStartedCommand()
+    {
+        var session = CreateRunningSession();
+        var command = CreateCommand(session);
+        Assert.True(session.AcceptCommand(command.Id, StartedAtUtc.AddSeconds(2)).Succeeded);
+        Assert.True(session.StartCommand(command.Id, StartedAtUtc.AddSeconds(3)).Succeeded);
+        return (session, command);
     }
 
     private static RuntimeCommand CreateCommand(RuntimeSession session)

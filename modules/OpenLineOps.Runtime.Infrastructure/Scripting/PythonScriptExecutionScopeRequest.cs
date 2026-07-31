@@ -1,4 +1,5 @@
 using OpenLineOps.Runtime.Application.Scripting;
+using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.Runtime.Infrastructure.Scripting;
 
@@ -7,6 +8,7 @@ public sealed record PythonScriptExecutionScopeRequest(
     string ScriptSourceCode,
     string? ScriptVersion,
     string? InputPayload,
+    string ProductionInputsJson,
     string SessionId,
     string ProductionRunId,
     string ProductionLineDefinitionId,
@@ -38,6 +40,8 @@ public sealed record PythonScriptExecutionScopeRequest(
             request.ScriptSourceCode,
             request.ScriptVersion,
             request.InputPayload,
+            ProductionContextDocument.WriteResolvedValues(
+                request.CommandContext.ProductionInputs).GetRawText(),
             request.CommandContext.SessionId.Value.ToString(),
             request.CommandContext.ProductionRunId.Value.ToString("D"),
             request.CommandContext.ProductionLineDefinitionId,

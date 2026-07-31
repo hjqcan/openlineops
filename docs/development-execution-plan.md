@@ -1,6 +1,6 @@
 # OpenLineOps Production-Line Implementation Baseline
 
-Last updated: 2026-07-11
+Last updated: 2026-07-30
 
 ## Product Contract
 
@@ -94,6 +94,23 @@ Trace preserves immutable evidence for:
 
 Trace read models are projections. They can be rebuilt from persisted Runtime,
 material, Station-job, and evidence records.
+Each immutable Production Run Trace is frozen through the Run's terminal
+`CompletedAtUtc`. The Product Material Lifecycle read model is rebuilt through
+the latest persisted material event, so final unload, handoff, and later
+disposition evidence remain visible without mutating the Run Trace. Operator
+clients read it with
+`GET /api/traceability/production-units/{productionUnitId}/material-lifecycle`;
+`observedThroughUtc` identifies the latest state or evidence included. Carrier
+location and Slot evidence is included only in the half-open Carrier membership
+interval `[enteredAtUtc, leftAtUtc)`. While that interval remains open,
+`currentCarrierLocation` reports the Carrier's latest physical location.
+Production Unit material events bind to the active Production Run; after that
+Run becomes terminal, final unload, handoff, arrival, and disposition events
+bind to `LastProductionRunId` until another Run becomes active. A Unit that has
+never entered a Run keeps independent manual material events unbound.
+The public Coordinator contract is read/export only for Trace records. Raw Trace
+documents cannot be posted or imported; the sole write path projects persisted
+terminal Production Run evidence.
 
 ## Studio And Headless Operation
 
@@ -102,6 +119,14 @@ actions. After opening, it presents project/application Explorer, hierarchical
 2D layout editing, production route graph editing, Blockly/Python Flow editing,
 external-program import and protocol trial, configuration, run monitoring, and
 Trace.
+
+The independent Coordinator API never launches an imported Application
+executable under its ambient identity. Its application-executable protocol
+trial policy is `Disabled` by default. The only accepted enabled policy is
+`RestrictedHost`, and startup then requires the exact restricted Windows
+service identity, immutable content protection, and AppContainer isolation.
+Provider protocol trials remain available. Ordinary executable validation is
+performed through the restricted Station execution boundary.
 
 Edit mode changes Application source. Run mode consumes only an immutable
 published snapshot. The shared 2D/3D projection exposes active products,
@@ -123,6 +148,7 @@ IDE. Production Station computers run `OpenLineOps.Agent` and
 - `POST /api/production-runs/{id}/commands/{command}`
 - `GET /api/operations/lines/{lineId}/state`
 - `GET /api/operations/active-runs`
+- `GET /api/traceability/production-units/{id}/material-lifecycle`
 
 The raw production-run injection endpoint is intentionally absent. A run can be
 created only from an immutable published Project Snapshot.
@@ -134,17 +160,142 @@ The repository gate is the combination of:
 ```powershell
 dotnet build OpenLineOps.sln --configuration Release --property:TreatWarningsAsErrors=true
 dotnet test OpenLineOps.sln --configuration Release --no-build -m:1
+$env:OPENLINEOPS_RUN_POSTGRES_INTEGRATION = "1"
+$env:OPENLINEOPS_RUN_RABBITMQ_INTEGRATION = "1"
+dotnet test tests/OpenLineOps.PostgresIntegration.Tests/OpenLineOps.PostgresIntegration.Tests.csproj --configuration Release --property:TreatWarningsAsErrors=true
 powershell -NoProfile -File eng/verify-no-version-suffix-implementations.ps1
 powershell -NoProfile -File eng/verify-no-legacy-production-contracts.ps1
+powershell -NoProfile -File eng/verify-coordinator-external-program-trial-security.ps1
 powershell -NoProfile -File eng/verify-no-technical-debt-markers.ps1
+powershell -NoProfile -File eng/verify-solution-project-coverage.ps1
+powershell -NoProfile -File eng/verify-ci-workflow-actions.ps1
+powershell -NoProfile -File eng/verify-ci-workflow-actions.tests.ps1
+powershell -NoProfile -File eng/verify-evidence-validation.tests.ps1
+powershell -NoProfile -File eng/verify-studio-two-agent-production-evidence.tests.ps1
+powershell -NoProfile -File eng/verify-runner-staged-agent-evidence.tests.ps1
+powershell -NoProfile -File eng/verify-open-source-metadata.ps1
+powershell -NoProfile -File eng/verify-third-party-license-metadata.ps1
+powershell -NoProfile -File eng/verify-dotnet-package-vulnerabilities.ps1
+powershell -NoProfile -File eng/verify-dotnet-package-vulnerabilities.tests.ps1
+powershell -NoProfile -File eng/verify-release-staging-security.ps1
+powershell -NoProfile -File eng/verify-station-agent-content-cache-contract.ps1
+$env:OPENLINEOPS_RABBITMQ_URI = "amqp://guest:guest@127.0.0.1:5672/%2f"
+$env:OPENLINEOPS_POSTGRES_CONNECTION_STRING = "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=<ephemeral-password>"
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-staged-agent-bundle-e2e.ps1 -Configuration Release -NoBuild -NoRestore
+$externalAbortScope = [System.Guid]::NewGuid().ToString("N")
+$cleanupRoot = [System.IO.Path]::GetFullPath((Join-Path ([System.IO.Path]::GetTempPath()) "openlineops-agent-service-cleanup"))
+New-Item -ItemType Directory -Path $cleanupRoot -Force | Out-Null
+$agentRoot = [System.IO.Path]::GetFullPath((Resolve-Path "artifacts/release-work/agent").Path)
+$samplePluginRoot = [System.IO.Path]::GetFullPath((Resolve-Path "artifacts/release-work/sample-plugin").Path)
+$apiRoot = [System.IO.Path]::GetFullPath((Resolve-Path "artifacts/release-work/api").Path)
+$cleanupManifest = Join-Path $cleanupRoot "rabbitmq-$externalAbortScope.json"
+$readyPath = Join-Path $cleanupRoot "external-abort-ready-$externalAbortScope.json"
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-agent-service-external-abort-cleanup.ps1 -AgentBundleRoot $agentRoot -SamplePluginRoot $samplePluginRoot -ApiBundleRoot $apiRoot -Scope $externalAbortScope -ManifestPath $cleanupManifest -ReadyPath $readyPath -Configuration Release -NoBuild -NoRestore
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-studio-two-agent-production-closure.ps1 -Configuration Release -NoBuild -NoRestore
+npm --prefix apps/desktop run test:production-command-policy
+npm --prefix apps/desktop run test:production-operations-filters
+npm --prefix apps/desktop run test:process-problem-location
+npm --prefix apps/desktop run test:draft-transition-guard
+npm --prefix apps/desktop run test:topology-draft-workspace
+npm --prefix apps/desktop run test:configuration-draft-workspace
+npm --prefix apps/desktop run test:external-program-directory-import
+npm --prefix apps/desktop run test:runtime-data-binding
+npm --prefix apps/desktop run test:production-route-runtime
+npm --prefix apps/desktop run smoke:e2e:packaged-existing
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-production-closure-evidence.ps1 -EvidenceRoot artifacts/production-closure-e2e -RequirePassed
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-studio-two-agent-production-evidence.ps1 -EvidenceRoot output/studio-two-agent-production-closure
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-runner-staged-agent-e2e.ps1 -Configuration Release -NoBuild -NoRestore
+powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-runner-staged-agent-evidence.ps1 -EvidenceRoot output/runner-staged-agent-e2e -RequirePassed
 git diff --check
 ```
 
 Desktop verification additionally runs strict TypeScript checking, production
-bundling, the cold-start production-line projection test, Electron smoke, and a
-packaged Windows executable E2E. The packaged E2E covers concurrent Stations,
-vendor pass, product nonconformance with rework, cancellation with full process
-tree termination, and crash/recovery without hardware replay.
+bundling, the cold-start production-line projection test, the trusted
+Application-extension ZIP import boundary, route graph validation and persisted
+layout conflict/reopen behavior, the shared Operations/2D/3D runtime route
+projection (current transition, traversed trail, flow direction, and terminal
+disposition), Trace artifact save confinement, Electron
+smoke, npm vulnerability audit, and a packaged Windows executable E2E. The
+packaged E2E covers concurrent Stations, vendor pass, product nonconformance
+with rework, cancellation with full process-tree termination, and
+crash/recovery without hardware replay. It also starts from incompatible local
+runtime state, binds that state to the packaged runtime content, proves a
+same-package restart preserves current Trace and Artifact bytes, and proves a
+second Studio instance cannot start another backend or race the destructive
+binding for the same user-data directory. The packaged API is bound to the
+exact Electron parent process and exits after an abrupt parent kill, while an
+explicit stop must confirm the process tree has exited before another backend
+can start.
+It also proves that immutable Run Trace bytes do not change after a terminal
+Slot unload while the latest Product Material Lifecycle API and Studio panel
+show the resulting Station queue location and `Available` Slot transition.
+
+The staged Agent, packaged-to-two-Agent, and Runner commands are not optional:
+they fail when their real PostgreSQL/RabbitMQ inputs are absent or unreachable.
+Their evidence must pass
+`eng/verify-staged-agent-evidence.ps1`, including authenticated central Artifact
+upload and Operator GET/hash verification, offline durable completion,
+once-only redelivery, the fixed `NT AUTHORITY\LocalService` account and SID, a
+canonical unique Windows service name and derived service SID, an enabled
+service-logon SID, an enabled-and-restricted exact service SID, no UAC linked
+token (`TokenElevationTypeDefault`), complete absence of the Administrators
+group, SCM
+start/stop/restart/delete lifecycle, the raw evidence hash, and an external
+`dotnet test` driver-tree abort cleanup proof, including testhost descendants,
+under a separate run scope. Strict private cleanup manifests bind only role,
+service suffix/name, fixed LocalService identity, derived service SID and
+`Restricted` type, copied Agent path/hash, the exact Windows Temp owned root,
+and the exact role-specific `CommonApplicationData` (`%ProgramData%`)
+package-cache root beneath its deterministic anchor;
+wrapper `finally` blocks and independent workflow `always()` steps invoke the
+same bounded, idempotent scavenger. Studio's two Station services share the
+LocalService base account but must expose distinct restricted service SIDs.
+The Windows gates use those real SCM services directly. The runner retains only
+terminate, limited-query, and synchronize access to each SCM-reported PID,
+validates the canonical packaged Agent image and SHA-256, and fails unless the
+process belongs to Session 0. It opens each process token with `TOKEN_QUERY`
+only and requires the exact primary, unlinked, restricted LocalService,
+service-logon, service-SID, and non-administrator facts. The runner never
+duplicates or exports a Station token, changes a process or token DACL, enables
+debug privilege, installs an identity broker, or exposes an arbitrary callback
+under the service identity. Staged evidence binds the initial and restarted
+service checks, Studio evidence binds both Station services, and Runner evidence
+binds its Agent check through a strict `session0Verified` JSON boolean; missing
+or truthy substitutes are rejected.
+
+The signed-package job then executes through the real Agent, Station Runtime,
+Plugin Host or Script Worker, least-privilege launcher, vendor program, Job
+Objects, SQLite stores, RabbitMQ transport, Coordinator persistence, Artifact
+upload, and Trace projection. Immutable content read/execute is proven by that
+production execution. The cache verifier independently requires exact
+service-SID read-only ACLs through every nested package entry, while recovery
+fixtures are explicitly administrator-created and never described as
+service-token actions.
+
+Before SCM start, the staged Agent gate writes one valid pending
+`MaterialArrived` message with the production SQLite Outbox store. The real
+Agent must recover it, publish it through RabbitMQ, mark it durably published,
+and keep the Coordinator delivery count at one after restart. Local arrival
+pipe framing, receipts, replay, and durable enqueue remain production
+server/client contract tests. The real Windows services must deny the ordinary
+CI token on both Station pipes. The two-Agent gate additionally requires two
+verified restricted service identities, distinct service SIDs and derived pipe
+name hashes, explicit access denial on both pipes, and both original SCM PIDs
+still running. The Station-local pipe is the restricted production extension
+boundary for code already running under the Station Agent identity; it is not a
+preconfigured vendor-specific PLC adapter. Independently managed scanner, PLC,
+or MES adapters use the authenticated Coordinator arrival endpoint and enter
+the same command model.
+
+`eng/verify-studio-two-agent-production-evidence.ps1` and
+`eng/verify-runner-staged-agent-evidence.ps1` bind that two-Agent proof and the
+Runner-to-SCM-Agent proof to their public roots. The production-closure scanner
+accepts only its exact
+public manifest: summary, screenshots, verified Trace saves, frozen manifest,
+public signing key, two `.olopkg` files, and two deployment catalogs. Studio
+user data, project working files, tokens, private keys, browser profiles, and
+raw process logs remain outside the public artifact root under the system
+temporary directory and are removed after the run.
 
 The implementation contains one current schema per owned resource, no format
 fallbacks, no legacy execution entry point, and no implementation-generation

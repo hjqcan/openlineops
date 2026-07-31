@@ -29,10 +29,10 @@ public sealed class RuntimeSessionRecoveryServiceTests
         failed.Start(BaseTimeUtc.AddMinutes(12));
         failed.Fail(BaseTimeUtc.AddMinutes(13), "Runtime.TestFailure", "test failure");
 
-        await repository.SaveAsync(completed);
-        await repository.SaveAsync(paused);
-        await repository.SaveAsync(failed);
-        await repository.SaveAsync(running);
+        await repository.SaveAsync(completed, completed.DomainEvents.ToArray());
+        await repository.SaveAsync(paused, paused.DomainEvents.ToArray());
+        await repository.SaveAsync(failed, failed.DomainEvents.ToArray());
+        await repository.SaveAsync(running, running.DomainEvents.ToArray());
 
         var service = new RuntimeSessionRecoveryService(repository);
 
@@ -65,7 +65,7 @@ public sealed class RuntimeSessionRecoveryServiceTests
         canceled.Start(BaseTimeUtc.AddSeconds(1));
         canceled.Cancel(BaseTimeUtc.AddSeconds(2), "operator cancel");
 
-        await repository.SaveAsync(canceled);
+        await repository.SaveAsync(canceled, canceled.DomainEvents.ToArray());
 
         var service = new RuntimeSessionRecoveryService(repository);
 

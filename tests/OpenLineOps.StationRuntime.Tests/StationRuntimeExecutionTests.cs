@@ -1,17 +1,24 @@
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.IO.Pipes;
+using System.Runtime.Versioning;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
+using OpenLineOps.ContentProtection;
 using OpenLineOps.Processes.Application.FlowIr;
 using OpenLineOps.Projects.Application.Releases;
 using OpenLineOps.Projects.Infrastructure.Releases;
 using OpenLineOps.Runtime.Contracts;
+using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.StationRuntime.Contracts;
 
 namespace OpenLineOps.StationRuntime.Tests;
 
+[SupportedOSPlatform("windows")]
 public sealed class StationRuntimeExecutionTests : IDisposable
 {
     private static readonly DateTimeOffset PublishedAtUtc =
@@ -37,7 +44,8 @@ public sealed class StationRuntimeExecutionTests : IDisposable
         using var inputs = JsonDocument.Parse("{}");
         var fenceAuthority = new StationResourceFenceAuthorityDescriptor(
             $"openlineops-test-{Guid.NewGuid():N}",
-            Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32)));
+            Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32)),
+            CurrentUserSid());
         using var fenceAuthorityCancellation = new CancellationTokenSource();
         var fenceAuthorityTask = RunFenceAuthorityAsync(
             fenceAuthority,
@@ -88,7 +96,8 @@ public sealed class StationRuntimeExecutionTests : IDisposable
         try
         {
             exitCode = await StationRuntimeEntrypoint.RunAsync(
-                ["execute-operation", "--request-file", requestPath, "--result-file", resultPath]);
+                ["execute-operation", "--request-file", requestPath, "--result-file", resultPath],
+                TestHostOptions());
         }
         finally
         {
@@ -116,7 +125,78 @@ public sealed class StationRuntimeExecutionTests : IDisposable
         Assert.Equal(
             "passed",
             result.Outputs.GetProperty("inspection.result").GetProperty("value").GetString());
-        Assert.Equal("Completed", Assert.Single(result.Commands).Status);
+        Assert.Equal(ExecutionStatus.Completed, Assert.Single(result.Commands).ExecutionStatus);
+    }
+
+    [Fact]
+    public async Task MissingFenceAuthorityRejectsWithinItsIndependentDeadline()
+    {
+        var productionRunId = Guid.NewGuid();
+        const string operationRunId = "operation.main@0001";
+        var expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(1);
+        using var inputs = JsonDocument.Parse("{}");
+        var request = new StationOperationRequestDocument(
+            StationOperationDocumentContract.RequestSchema,
+            Guid.NewGuid(),
+            "run/operation.main/1",
+            "agent.station-main",
+            "station.main",
+            "station.main",
+            productionRunId,
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            "line.main",
+            "topology.main",
+            "station-runtime-test",
+            operationRunId,
+            1,
+            "product.main",
+            "serialNumber",
+            "UNIT-001",
+            null,
+            null,
+            "project.main",
+            "application.main",
+            "snapshot.main",
+            new string('a', 64),
+            Path.GetFullPath(_root),
+            "operation.main",
+            "process.main",
+            "process.main@1",
+            "configuration.main",
+            "recipe.main@1",
+            new StationResourceFenceAuthorityDescriptor(
+                $"openlineops-missing-{Guid.NewGuid():N}",
+                Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32)),
+                CurrentUserSid()),
+            [new StationOperationResourceFence(
+                "Station",
+                "station.main",
+                1,
+                expiresAtUtc)],
+            inputs.RootElement.Clone(),
+            DateTimeOffset.UtcNow);
+        var repository = new AgentResourceLeaseFenceRepository(request);
+        using var testDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        var stopwatch = Stopwatch.StartNew();
+
+        var result = await repository.ValidateCurrentAsync(
+            new ProductionRunId(productionRunId),
+            operationRunId,
+            [new ResourceLeaseFenceEvidence(
+                new ResourceRequirement(ResourceKind.Station, "station.main"),
+                1,
+                expiresAtUtc)],
+            testDeadline.Token);
+
+        Assert.False(result.Accepted);
+        Assert.Contains(
+            "did not complete within",
+            result.RejectionReason,
+            StringComparison.Ordinal);
+        Assert.True(
+            stopwatch.Elapsed < TimeSpan.FromSeconds(10),
+            $"Fence authority rejection took {stopwatch.Elapsed}.");
     }
 
     [Fact]
@@ -124,10 +204,21 @@ public sealed class StationRuntimeExecutionTests : IDisposable
     {
         var resultPath = Path.Combine(_root, "scattered-options-result.json");
         var exitCode = await StationRuntimeEntrypoint.RunAsync(
-            ["execute-operation", "--package", _root, "--result-file", resultPath]);
+            ["execute-operation", "--package", _root, "--result-file", resultPath],
+            TestHostOptions());
 
         Assert.Equal(64, exitCode);
         Assert.False(File.Exists(resultPath));
+    }
+
+    [Fact]
+    public async Task UsageErrorDoesNotRequirePluginHostConfiguration()
+    {
+        var exitCode = await StationRuntimeEntrypoint.RunAsync(
+            [],
+            new StationRuntimeHostOptions(string.Empty));
+
+        Assert.Equal(64, exitCode);
     }
 
     public void Dispose()
@@ -297,6 +388,7 @@ public sealed class StationRuntimeExecutionTests : IDisposable
                     "station.main",
                     "Fixed",
                     [])],
+                [],
                 [new ProjectReleaseAuthorizedAction(
                     "operation.main:action:1",
                     "operation.main",
@@ -307,7 +399,18 @@ public sealed class StationRuntimeExecutionTests : IDisposable
                     "runtime.flow",
                     30_000,
                     null)])],
-            [],
+            [new ProjectReleaseRouteTransition(
+                "transition.complete",
+                "operation.main",
+                null,
+                "Completed",
+                "Sequence",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null)],
             []),
         [],
         [new ProjectReleaseCapabilityBinding(
@@ -330,34 +433,51 @@ public sealed class StationRuntimeExecutionTests : IDisposable
     {
         try
         {
+            await using var pipe = WindowsIdentityBoundNamedPipe.CreateServer(
+                authority.PipeName,
+                authority.AuthorizedPrincipalSid,
+                maximumServerInstances: 1,
+                inputBufferSize: 1024 * 1024 + sizeof(int),
+                outputBufferSize: 1024 * 1024 + sizeof(int));
             while (true)
             {
-                await using var pipe = new NamedPipeServerStream(
-                    authority.PipeName,
-                    PipeDirection.InOut,
-                    1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
                 await pipe.WaitForConnectionAsync(cancellationToken);
-                var request = await StationResourceFenceAuthorityWire
-                    .ReadAsync<StationResourceFenceValidationRequest>(pipe, cancellationToken);
-                StationOperationDocumentJson.Validate(request);
-                var response = new StationResourceFenceValidationResponse(
-                    StationOperationDocumentContract.ResourceFenceValidationResponseSchema,
-                    request.AccessToken == authority.AccessToken,
-                    request.AccessToken == authority.AccessToken
-                        ? null
-                        : "Fence authority access token does not match.");
-                await StationResourceFenceAuthorityWire.WriteAsync(
-                    pipe,
-                    response,
-                    cancellationToken);
+                try
+                {
+                    var request = await StationResourceFenceAuthorityWire
+                        .ReadAsync<StationResourceFenceValidationRequest>(pipe, cancellationToken);
+                    StationOperationDocumentJson.Validate(request);
+                    var response = new StationResourceFenceValidationResponse(
+                        StationOperationDocumentContract.ResourceFenceValidationResponseSchema,
+                        request.AccessToken == authority.AccessToken,
+                        request.AccessToken == authority.AccessToken
+                            ? null
+                            : "Fence authority access token does not match.");
+                    await StationResourceFenceAuthorityWire.WriteAsync(
+                        pipe,
+                        response,
+                        cancellationToken);
+                    await StationResourceFenceAuthorityWire.ReadResponseReceiptAsync(
+                        pipe,
+                        cancellationToken);
+                }
+                finally
+                {
+                    if (pipe.IsConnected)
+                    {
+                        pipe.Disconnect();
+                    }
+                }
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
     }
+
+    private static string CurrentUserSid() =>
+        WindowsIdentity.GetCurrent(TokenAccessLevels.Query).User?.Value
+        ?? throw new InvalidOperationException("Current test token has no user SID.");
 
     private static void Write(
         ProjectApplicationWorkspaceScope scope,
@@ -376,5 +496,12 @@ public sealed class StationRuntimeExecutionTests : IDisposable
         var hash = Convert.ToHexStringLower(
             SHA256.HashData(Encoding.UTF8.GetBytes(resourceId)))[..12];
         return $"{kind}-{resourceId}--{hash}.json";
+    }
+
+    private static StationRuntimeHostOptions TestHostOptions()
+    {
+        return new StationRuntimeHostOptions(
+            Environment.ProcessPath
+            ?? throw new InvalidOperationException("The test process executable path is unavailable."));
     }
 }

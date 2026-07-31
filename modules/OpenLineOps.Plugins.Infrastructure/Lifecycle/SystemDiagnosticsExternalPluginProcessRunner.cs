@@ -36,7 +36,7 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
 
         Record(
             ExternalPluginProcessEventKind.Starting,
-            request.Manifest.Id,
+            request.ExecutionIdentity,
             $"Starting external plugin process '{request.Manifest.Id}'.");
 
         if (!process.Start())
@@ -44,7 +44,7 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
             process.Dispose();
             Record(
                 ExternalPluginProcessEventKind.StartupFailed,
-                request.Manifest.Id,
+                request.ExecutionIdentity,
                 $"Plugin process '{request.Manifest.Id}' could not be started.");
 
             throw new InvalidOperationException(
@@ -68,7 +68,7 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
                 process.Dispose();
                 Record(
                     ExternalPluginProcessEventKind.StartupExited,
-                    request.Manifest.Id,
+                    request.ExecutionIdentity,
                     $"Plugin process '{request.Manifest.Id}' exited during startup with code {exitCode}.",
                     detail: exitCode.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
@@ -79,25 +79,29 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
 
         Record(
             ExternalPluginProcessEventKind.Started,
-            request.Manifest.Id,
+            request.ExecutionIdentity,
             $"External plugin process '{request.Manifest.Id}' started.");
 
         return new SystemDiagnosticsExternalPluginProcess(
             process,
             _options.ShutdownTimeout,
             _options.Sandbox,
+            request.ExecutionIdentity,
             _eventSink);
     }
 
     private void Record(
         ExternalPluginProcessEventKind kind,
-        string pluginId,
+        OpenLineOps.Plugins.Application.Discovery.PluginPackageExecutionIdentity executionIdentity,
         string message,
         string? detail = null)
     {
         _eventSink.Record(new ExternalPluginProcessEvent(
             kind,
-            pluginId,
+            executionIdentity.ProjectId,
+            executionIdentity.ApplicationId,
+            executionIdentity.PluginId,
+            executionIdentity.PackageIdentity.PackageContentSha256,
             message,
             DateTimeOffset.UtcNow,
             detail));
@@ -107,9 +111,13 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
         Process process,
         TimeSpan shutdownTimeout,
         ExternalPluginSandboxOptions sandboxOptions,
+        OpenLineOps.Plugins.Application.Discovery.PluginPackageExecutionIdentity executionIdentity,
         IExternalPluginProcessEventSink eventSink) : IExternalPluginProcess
     {
         private readonly SemaphoreSlim _commandLock = new(1, 1);
+        private readonly object _disposeLock = new();
+        private Task? _disposeTask;
+        private int _shutdownRequested;
 
         public bool HasExited => process.HasExited;
 
@@ -119,6 +127,12 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
         {
             ArgumentNullException.ThrowIfNull(request);
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (Volatile.Read(ref _shutdownRequested) != 0)
+            {
+                return PluginDeviceCommandInvocationResult.Failed(
+                    $"External plugin process '{request.PluginId}' is shutting down.");
+            }
 
             if (process.HasExited)
             {
@@ -142,6 +156,12 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
                 await _commandLock.WaitAsync(timeoutSource.Token).ConfigureAwait(false);
                 try
                 {
+                    if (Volatile.Read(ref _shutdownRequested) != 0)
+                    {
+                        return PluginDeviceCommandInvocationResult.Failed(
+                            $"External plugin process '{request.PluginId}' is shutting down.");
+                    }
+
                     var requestId = Guid.NewGuid().ToString("N");
                     var message = new ExternalDeviceCommandProtocolRequest(
                         "device-command",
@@ -211,6 +231,12 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
             ArgumentNullException.ThrowIfNull(request);
             cancellationToken.ThrowIfCancellationRequested();
 
+            if (Volatile.Read(ref _shutdownRequested) != 0)
+            {
+                return PluginProcessCommandInvocationResult.Failed(
+                    $"External plugin process '{request.PluginId}' is shutting down.");
+            }
+
             if (process.HasExited)
             {
                 return PluginProcessCommandInvocationResult.Failed(
@@ -233,6 +259,12 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
                 await _commandLock.WaitAsync(timeoutSource.Token).ConfigureAwait(false);
                 try
                 {
+                    if (Volatile.Read(ref _shutdownRequested) != 0)
+                    {
+                        return PluginProcessCommandInvocationResult.Failed(
+                            $"External plugin process '{request.PluginId}' is shutting down.");
+                    }
+
                     var requestId = Guid.NewGuid().ToString("N");
                     var message = new ExternalProcessCommandProtocolRequest(
                         "process-command",
@@ -295,20 +327,102 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
             }
         }
 
-        public async ValueTask DisposeAsync()
+        public ValueTask DisposeAsync()
         {
+            lock (_disposeLock)
+            {
+                _disposeTask ??= DisposeCoreAsync();
+
+                return new ValueTask(_disposeTask);
+            }
+        }
+
+        private async Task DisposeCoreAsync()
+        {
+            Interlocked.Exchange(ref _shutdownRequested, 1);
+            var ownsCommandLock = false;
             try
             {
+                ownsCommandLock = await _commandLock
+                    .WaitAsync(shutdownTimeout)
+                    .ConfigureAwait(false);
+                if (!ownsCommandLock)
+                {
+                    await ForceTerminateAsync().ConfigureAwait(false);
+                    ownsCommandLock = await _commandLock
+                        .WaitAsync(shutdownTimeout)
+                        .ConfigureAwait(false);
+                    if (!ownsCommandLock)
+                    {
+                        throw new TimeoutException(
+                            $"External plugin process '{executionIdentity.PluginId}' command did not quiesce after process termination.");
+                    }
+                }
+
                 if (!process.HasExited)
                 {
-                    process.Kill(entireProcessTree: true);
-                    await process.WaitForExitAsync().WaitAsync(shutdownTimeout).ConfigureAwait(false);
+                    // Closing stdin is the PluginHost shutdown protocol. It lets the host leave its
+                    // JSON-lines loop, dispose the loaded plugin, and release the package assembly
+                    // before it exits. A forced tree termination is reserved for a host that does
+                    // not honor that protocol within the configured shutdown boundary.
+                    await process.StandardInput.DisposeAsync().ConfigureAwait(false);
+
+                    try
+                    {
+                        await process.WaitForExitAsync()
+                            .WaitAsync(shutdownTimeout)
+                            .ConfigureAwait(false);
+                    }
+                    catch (TimeoutException)
+                    {
+                        await ForceTerminateAsync().ConfigureAwait(false);
+                    }
                 }
+
+                eventSink.Record(new ExternalPluginProcessEvent(
+                    ExternalPluginProcessEventKind.ProcessExited,
+                    executionIdentity.ProjectId,
+                    executionIdentity.ApplicationId,
+                    executionIdentity.PluginId,
+                    executionIdentity.PackageIdentity.PackageContentSha256,
+                    $"External plugin process '{executionIdentity.PluginId}' exited.",
+                    DateTimeOffset.UtcNow,
+                    process.ExitCode.ToString(System.Globalization.CultureInfo.InvariantCulture)));
             }
             finally
             {
-                _commandLock.Dispose();
+                process.StandardInput.Dispose();
+                process.StandardOutput.Dispose();
+                process.StandardError.Dispose();
+                if (ownsCommandLock)
+                {
+                    _commandLock.Release();
+                }
+
                 process.Dispose();
+            }
+        }
+
+        private async Task ForceTerminateAsync()
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                eventSink.Record(new ExternalPluginProcessEvent(
+                    ExternalPluginProcessEventKind.ProcessKilled,
+                    executionIdentity.ProjectId,
+                    executionIdentity.ApplicationId,
+                    executionIdentity.PluginId,
+                    executionIdentity.PackageIdentity.PackageContentSha256,
+                    $"External plugin process '{executionIdentity.PluginId}' was terminated after it did not shut down cleanly.",
+                    DateTimeOffset.UtcNow));
+            }
+
+            if (!process.HasExited)
+            {
+                await process.WaitForExitAsync()
+                    .WaitAsync(shutdownTimeout)
+                    .ConfigureAwait(false);
             }
         }
 
@@ -336,7 +450,10 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
         {
             eventSink.Record(new ExternalPluginProcessEvent(
                 ExternalPluginProcessEventKind.CommandTimedOut,
+                executionIdentity.ProjectId,
+                executionIdentity.ApplicationId,
                 pluginId,
+                executionIdentity.PackageIdentity.PackageContentSha256,
                 $"External plugin process '{pluginId}' command timed out after {timeoutMilliseconds}ms.",
                 DateTimeOffset.UtcNow));
 
@@ -348,7 +465,10 @@ public sealed class SystemDiagnosticsExternalPluginProcessRunner : IExternalPlug
             process.Kill(entireProcessTree: true);
             eventSink.Record(new ExternalPluginProcessEvent(
                 ExternalPluginProcessEventKind.ProcessKilled,
+                executionIdentity.ProjectId,
+                executionIdentity.ApplicationId,
                 pluginId,
+                executionIdentity.PackageIdentity.PackageContentSha256,
                 $"External plugin process '{pluginId}' was terminated after command timeout.",
                 DateTimeOffset.UtcNow));
         }

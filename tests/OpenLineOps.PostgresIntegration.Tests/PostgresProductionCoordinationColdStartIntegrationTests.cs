@@ -1,11 +1,15 @@
 using System.Text.Json;
 using OpenLineOps.Agent.Contracts;
+using OpenLineOps.Runtime.Application.Execution;
 using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Application.Stations;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Materials;
+using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
 using OpenLineOps.Runtime.Domain.Resources;
 using OpenLineOps.Runtime.Domain.Runs;
@@ -19,6 +23,657 @@ public sealed class PostgresProductionCoordinationColdStartIntegrationTests(
 {
     private static readonly DateTimeOffset Now =
         new(2026, 7, 11, 13, 0, 0, TimeSpan.Zero);
+
+    [PostgresIntegrationFact]
+    public async Task EmptyActiveRunQueriesAcceptAnUnspecifiedLineFilter()
+    {
+        await using var database = await TemporaryPostgresSchema.CreateAsync(
+            fixture.ConnectionString);
+        using var store = new PostgreSqlProductionCoordinationStore(database.ConnectionString);
+
+        Assert.Empty(await store.ListRecoverableAsync());
+        Assert.Empty(await store.ListActiveAsync(ProductionRunActiveQuery.All));
+    }
+
+    [PostgresIntegrationFact]
+    public async Task ActiveRunQueryMatchesOnlyCurrentCanonicalStationAndSlotResources()
+    {
+        await using var database = await TemporaryPostgresSchema.CreateAsync(
+            fixture.ConnectionString);
+        using var materials = new PostgreSqlProductionMaterialRepository(
+            database.ConnectionString);
+        using var store = new PostgreSqlProductionCoordinationStore(database.ConnectionString);
+        var suffix = Guid.NewGuid().ToString("N");
+        var lineId = $"line-{suffix}";
+        const string localSlotId = "slot.shared";
+        var currentPlan = OperationPlan($"{suffix}-current");
+        var futurePlan = OperationPlan($"{suffix}-future");
+        var currentSlot = $"{lineId}/{currentPlan.Definition.StationSystemId}/{localSlotId}";
+        var futureSlot = $"{lineId}/{futurePlan.Definition.StationSystemId}/{localSlotId}";
+        currentPlan = OperationPlan(
+            $"{suffix}-current",
+            [
+                new ResourceRequirement(
+                    ResourceKind.Station,
+                    currentPlan.Definition.StationSystemId),
+                new ResourceRequirement(ResourceKind.Slot, currentSlot)
+            ]);
+        futurePlan = OperationPlan(
+            $"{suffix}-future",
+            [
+                new ResourceRequirement(
+                    ResourceKind.Station,
+                    futurePlan.Definition.StationSystemId),
+                new ResourceRequirement(ResourceKind.Slot, futureSlot)
+            ]);
+        var sequential = CreateActiveQueryRun(
+            lineId,
+            $"sequential-{suffix}",
+            [currentPlan, futurePlan],
+            [
+                new RouteTransitionDefinition(
+                    $"route-{suffix}-current-future",
+                    currentPlan.Definition.OperationId,
+                    futurePlan.Definition.OperationId,
+                    RuntimeRouteTransitionKind.Sequence),
+                TerminalTransition(
+                    $"route-{suffix}-future-completed",
+                    futurePlan.Definition.OperationId)
+            ]);
+        await AddActiveQueryRunAsync(
+            store,
+            materials,
+            sequential,
+            [currentPlan, futurePlan],
+            new SlotAddress(
+                lineId,
+                currentPlan.Definition.StationSystemId,
+                localSlotId),
+            [
+                new SlotAddress(
+                    lineId,
+                    futurePlan.Definition.StationSystemId,
+                    localSlotId)
+            ]);
+
+        Assert.Contains(
+            await store.ListActiveAsync(new ProductionRunActiveQuery(
+                lineId,
+                currentPlan.Definition.StationSystemId,
+                currentSlot)),
+            entry => entry.Run.Id == sequential.Id);
+        Assert.DoesNotContain(
+            await store.ListActiveAsync(new ProductionRunActiveQuery(
+                slotResourceId: futureSlot)),
+            entry => entry.Run.Id == sequential.Id);
+        Assert.DoesNotContain(
+            await store.ListActiveAsync(new ProductionRunActiveQuery(
+                stationSystemId: futurePlan.Definition.StationSystemId)),
+            entry => entry.Run.Id == sequential.Id);
+
+        Assert.True(sequential.Start(Now.AddSeconds(1)).Succeeded);
+        await StartAndCompleteActiveQueryOperationAsync(
+            store,
+            sequential,
+            currentPlan,
+            expectedRevision: 0,
+            Now.AddSeconds(2));
+        Assert.DoesNotContain(
+            await store.ListActiveAsync(new ProductionRunActiveQuery(
+                slotResourceId: currentSlot)),
+            entry => entry.Run.Id == sequential.Id);
+        Assert.Contains(
+            await store.ListActiveAsync(new ProductionRunActiveQuery(
+                lineId,
+                futurePlan.Definition.StationSystemId,
+                futureSlot)),
+            entry => entry.Run.Id == sequential.Id);
+
+        var parallelLineId = $"line-parallel-{suffix}";
+        var entryPlan = OperationPlan($"{suffix}-entry");
+        var leftPlan = OperationPlan($"{suffix}-left");
+        var rightPlan = OperationPlan($"{suffix}-right");
+        var joinPlan = OperationPlan($"{suffix}-join");
+        var leftSlot =
+            $"{parallelLineId}/{leftPlan.Definition.StationSystemId}/{localSlotId}";
+        var rightSlot =
+            $"{parallelLineId}/{rightPlan.Definition.StationSystemId}/{localSlotId}";
+        leftPlan = OperationPlan(
+            $"{suffix}-left",
+            [
+                new ResourceRequirement(
+                    ResourceKind.Station,
+                    leftPlan.Definition.StationSystemId),
+                new ResourceRequirement(ResourceKind.Slot, leftSlot)
+            ]);
+        rightPlan = OperationPlan(
+            $"{suffix}-right",
+            [
+                new ResourceRequirement(
+                    ResourceKind.Station,
+                    rightPlan.Definition.StationSystemId),
+                new ResourceRequirement(ResourceKind.Slot, rightSlot)
+            ]);
+        var parallelGroupId = $"parallel-{suffix}";
+        var parallel = CreateActiveQueryRun(
+            parallelLineId,
+            $"parallel-{suffix}",
+            [entryPlan, leftPlan, rightPlan, joinPlan],
+            [
+                new RouteTransitionDefinition(
+                    $"route-{suffix}-entry-left",
+                    entryPlan.Definition.OperationId,
+                    leftPlan.Definition.OperationId,
+                    RuntimeRouteTransitionKind.ParallelFork,
+                    parallelGroupId: parallelGroupId),
+                new RouteTransitionDefinition(
+                    $"route-{suffix}-entry-right",
+                    entryPlan.Definition.OperationId,
+                    rightPlan.Definition.OperationId,
+                    RuntimeRouteTransitionKind.ParallelFork,
+                    parallelGroupId: parallelGroupId),
+                new RouteTransitionDefinition(
+                    $"route-{suffix}-left-join",
+                    leftPlan.Definition.OperationId,
+                    joinPlan.Definition.OperationId,
+                    RuntimeRouteTransitionKind.ParallelJoin,
+                    parallelGroupId: parallelGroupId),
+                new RouteTransitionDefinition(
+                    $"route-{suffix}-right-join",
+                    rightPlan.Definition.OperationId,
+                    joinPlan.Definition.OperationId,
+                    RuntimeRouteTransitionKind.ParallelJoin,
+                    parallelGroupId: parallelGroupId),
+                TerminalTransition(
+                    $"route-{suffix}-join-completed",
+                    joinPlan.Definition.OperationId)
+            ]);
+        await AddActiveQueryRunAsync(
+            store,
+            materials,
+            parallel,
+            [entryPlan, leftPlan, rightPlan, joinPlan],
+            runningSlot: null,
+            [
+                new SlotAddress(
+                    parallelLineId,
+                    leftPlan.Definition.StationSystemId,
+                    localSlotId),
+                new SlotAddress(
+                    parallelLineId,
+                    rightPlan.Definition.StationSystemId,
+                    localSlotId)
+            ]);
+        Assert.True(parallel.Start(Now.AddMinutes(1)).Succeeded);
+        await StartAndCompleteActiveQueryOperationAsync(
+            store,
+            parallel,
+            entryPlan,
+            expectedRevision: 0,
+            Now.AddMinutes(1).AddSeconds(1));
+
+        Assert.Contains(
+            await store.ListActiveAsync(new ProductionRunActiveQuery(
+                parallelLineId,
+                leftPlan.Definition.StationSystemId,
+                leftSlot)),
+            entry => entry.Run.Id == parallel.Id);
+        Assert.Contains(
+            await store.ListActiveAsync(new ProductionRunActiveQuery(
+                parallelLineId,
+                rightPlan.Definition.StationSystemId,
+                rightSlot)),
+            entry => entry.Run.Id == parallel.Id);
+        Assert.DoesNotContain(
+            await store.ListActiveAsync(new ProductionRunActiveQuery(
+                stationSystemId: joinPlan.Definition.StationSystemId)),
+            entry => entry.Run.Id == parallel.Id);
+    }
+
+    [PostgresIntegrationFact]
+    public async Task ActiveRunQueryMatchesOnlyFrozenDynamicSlotLeaseAfterDispatch()
+    {
+        await using var database = await TemporaryPostgresSchema.CreateAsync(
+            fixture.ConnectionString);
+        using var materials = new PostgreSqlProductionMaterialRepository(
+            database.ConnectionString);
+        using var store = new PostgreSqlProductionCoordinationStore(database.ConnectionString);
+        var suffix = Guid.NewGuid().ToString("N");
+
+        var currentMaterialSlotRun = await AssertPostgresDynamicSlotContractAsync(
+            store,
+            materials,
+            MaterialSlotResolution.CurrentMaterialSlot,
+            $"{suffix}-current-material-slot",
+            Now.AddMinutes(2));
+        var availableSlotRun = await AssertPostgresDynamicSlotContractAsync(
+            store,
+            materials,
+            MaterialSlotResolution.AvailableSlotInGroup,
+            $"{suffix}-available-slot-in-group",
+            Now.AddMinutes(3));
+        var tiedRuns = await AddPostgresTiedPendingRunsAsync(
+            store,
+            materials,
+            suffix);
+
+        var ordered = await store.ListActiveAsync(ProductionRunActiveQuery.All);
+        var expectedRuns = tiedRuns
+            .Append(currentMaterialSlotRun)
+            .Append(availableSlotRun)
+            .OrderByDescending(static run => run.LastTransitionAtUtc)
+            .ThenBy(static run => run.Id.Value)
+            .Select(static run => run.Id)
+            .ToArray();
+        Assert.Equal(expectedRuns, ordered.Select(static entry => entry.Run.Id));
+    }
+
+    [PostgresIntegrationFact]
+    public async Task TerminalRunPaginationUsesStableBoundedCursorAndExcludesActiveRuns()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        using var materials = new PostgreSqlProductionMaterialRepository(fixture.ConnectionString);
+        using var store = new PostgreSqlProductionCoordinationStore(fixture.ConnectionString);
+        var firstTerminal = await AddRunAsync(
+            store,
+            materials,
+            $"{suffix}-terminal-a",
+            Now.AddYears(1));
+        var secondTerminal = await AddRunAsync(
+            store,
+            materials,
+            $"{suffix}-terminal-b",
+            Now.AddYears(1).AddSeconds(10));
+        var active = await AddRunAsync(
+            store,
+            materials,
+            $"{suffix}-active",
+            null);
+
+        var seen = new HashSet<ProductionRunId>();
+        ProductionRunTerminalCursor? cursor = null;
+        ProductionRunTerminalCursor? previous = null;
+        for (var pageIndex = 0; pageIndex < 10000; pageIndex++)
+        {
+            var page = await store.ListTerminalAsync(
+                new ProductionRunTerminalPageRequest(1, cursor));
+            Assert.InRange(page.Items.Count, 0, 1);
+            foreach (var entry in page.Items)
+            {
+                Assert.NotNull(entry.Run.CompletedAtUtc);
+                Assert.True(seen.Add(entry.Run.RunId));
+                if (previous is not null)
+                {
+                    Assert.True(entry.Run.LastTransitionAtUtc > previous.LastTransitionAtUtc
+                        || entry.Run.LastTransitionAtUtc == previous.LastTransitionAtUtc
+                        && entry.Run.RunId.Value.CompareTo(previous.RunId.Value) > 0);
+                }
+
+                previous = new ProductionRunTerminalCursor(
+                    entry.Run.LastTransitionAtUtc,
+                    entry.Run.RunId);
+            }
+
+            if (page.Next is null)
+            {
+                break;
+            }
+
+            cursor = page.Next;
+            if (pageIndex == 9999)
+            {
+                throw new InvalidDataException("Terminal Production Run pagination did not terminate.");
+            }
+        }
+
+        Assert.Contains(firstTerminal.Id, seen);
+        Assert.Contains(secondTerminal.Id, seen);
+        Assert.DoesNotContain(active.Id, seen);
+    }
+
+    [PostgresIntegrationFact]
+    public async Task ProtectedTransitionRollsBackRunAndEveryHoldWhenOneFenceWasReassigned()
+    {
+        await using var database = await TemporaryPostgresSchema.CreateAsync(
+            fixture.ConnectionString);
+        var suffix = $"atomic-hold-{Guid.NewGuid():N}";
+        var station = new ResourceRequirement(ResourceKind.Station, $"station-system-{suffix}");
+        var device = new ResourceRequirement(ResourceKind.Device, $"device-{suffix}");
+        var operationPlan = OperationPlan(suffix, [station, device]);
+        var run = ProductionRun.Create(
+            ProductionRunId.New(),
+            $"project-{suffix}",
+            $"application-{suffix}",
+            $"snapshot-{suffix}",
+            $"topology-{suffix}",
+            $"line-{suffix}",
+            ProductionUnitId.New(),
+            new ProductionUnitIdentity($"product-{suffix}", "serialNumber", $"SN-{suffix}"),
+            null,
+            null,
+            $"operator-{suffix}",
+            operationPlan.Definition.OperationId,
+            Now,
+            [operationPlan.Definition],
+            [
+                new RouteTransitionDefinition(
+                    $"route-{suffix}-completed",
+                    operationPlan.Definition.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Sequence,
+                    terminalDisposition: ProductDisposition.Completed)
+            ]);
+        using var store = new PostgreSqlProductionCoordinationStore(database.ConnectionString);
+        using var materials = new PostgreSqlProductionMaterialRepository(database.ConnectionString);
+        Assert.True(await materials.TryAddAsync(ProductionUnit.Register(
+            run.ProductionUnitId,
+            run.ProductionUnitIdentity.ModelId,
+            run.ProductionUnitIdentity.InputKey,
+            run.ProductionUnitIdentity.Value,
+            null,
+            run.ActorId,
+            Now.AddTicks(-1))));
+        var unit = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+            await materials.GetProductionUnitAsync(run.ProductionUnitId));
+        Assert.True(await store.TryAddAsync(
+            run,
+            new ProductionRunExecutionPlan(run.Id, [operationPlan]),
+            new ProductionRunAdmission(unit.Aggregate.ToSnapshot(), unit.Revision)));
+        Assert.True(run.Start(Now.AddSeconds(1)).Succeeded);
+        var revision = await store.SaveAsync(run, 0);
+        var operation = Assert.Single(run.Operations);
+        var leases = Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
+            await store.TryAcquireAsync(
+                run.Id,
+                operation.OperationRunId,
+                operation.ResourceRequirements,
+                TimeSpan.FromMinutes(5)));
+        Assert.True(run.StartOperation(
+            operation.OperationRunId,
+            RuntimeSessionId.New(),
+            leases,
+            Now.AddSeconds(2)).Succeeded);
+        revision = await store.SaveAsync(run, revision);
+
+        var deviceLease = Assert.Single(leases, lease => lease.Resource == device);
+        await ExpireLeaseAsync(database.ConnectionString, device);
+        var replacementRunId = ProductionRunId.New();
+        var replacement = Assert.Single(Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
+            await store.TryAcquireAsync(
+                replacementRunId,
+                $"operation-replacement-{suffix}@0001",
+                [device],
+                TimeSpan.FromMinutes(5))));
+        Assert.True(run.RequestCancel("Operator canceled during fence reassignment.", Now.AddSeconds(3)).Succeeded);
+        var hold = new ProductionRunLeaseHold(
+            operation.OperationRunId,
+            leases.Select(ResourceLeaseHoldClaim.FromLease).ToArray());
+
+        await Assert.ThrowsAsync<ResourceLeaseOwnershipException>(() =>
+            store.SaveWithLeaseHoldsAsync(run, revision, [hold]).AsTask());
+
+        var persisted = Assert.IsType<ProductionRunPersistenceEntry>(await store.GetByIdAsync(run.Id));
+        Assert.Equal(revision, persisted.Revision);
+        Assert.Equal(ProductionRunControlState.Active, persisted.Run.ControlState);
+        Assert.Null(persisted.Run.FailureCode);
+        var stationLease = Assert.Single(
+            await store.ListAsync(),
+            lease => lease.Resource == station);
+        Assert.Equal(run.Id, stationLease.ProductionRunId);
+        Assert.NotEqual(DateTimeOffset.MaxValue, stationLease.ExpiresAtUtc);
+        var persistedReplacement = Assert.Single(
+            await store.ListAsync(),
+            lease => lease.Resource == device);
+        Assert.Equal(replacementRunId, persistedReplacement.ProductionRunId);
+        Assert.Equal(replacement.FencingToken, persistedReplacement.FencingToken);
+
+        await store.ReleaseAsync(
+            run.Id,
+            operation.OperationRunId,
+            leases.Where(lease => lease.Resource == station)
+                .Select(ResourceLeaseReleaseClaim.FromLease)
+                .ToArray());
+        await store.ReleaseAsync(
+            replacementRunId,
+            replacement.OperationRunId,
+            [ResourceLeaseReleaseClaim.FromLease(replacement)]);
+    }
+
+    [PostgresIntegrationFact]
+    public async Task ProtectedTransitionColdRestartPreservesOnlyRunningRecoveryHolds()
+    {
+        await using var database = await TemporaryPostgresSchema.CreateAsync(
+            fixture.ConnectionString);
+        var suffix = $"atomic-cold-{Guid.NewGuid():N}";
+        var runningStation = new ResourceRequirement(
+            ResourceKind.Station,
+            $"station-system-{suffix}-running");
+        var runningDevice = new ResourceRequirement(
+            ResourceKind.Device,
+            $"device-{suffix}-running");
+        var pendingStation = new ResourceRequirement(
+            ResourceKind.Station,
+            $"station-system-{suffix}-pending");
+        var entryPlan = OperationPlan($"{suffix}-entry");
+        var runningPlan = OperationPlan(
+            $"{suffix}-running",
+            [runningStation, runningDevice]);
+        var pendingPlan = OperationPlan($"{suffix}-pending", [pendingStation]);
+        var joinPlan = OperationPlan($"{suffix}-join");
+        var run = ProductionRun.Create(
+            ProductionRunId.New(),
+            $"project-{suffix}",
+            $"application-{suffix}",
+            $"snapshot-{suffix}",
+            $"topology-{suffix}",
+            $"line-{suffix}",
+            ProductionUnitId.New(),
+            new ProductionUnitIdentity($"product-{suffix}", "serialNumber", $"SN-{suffix}"),
+            null,
+            null,
+            $"operator-{suffix}",
+            entryPlan.Definition.OperationId,
+            Now,
+            [
+                entryPlan.Definition,
+                runningPlan.Definition,
+                pendingPlan.Definition,
+                joinPlan.Definition
+            ],
+            [
+                new RouteTransitionDefinition(
+                    $"route-{suffix}-fork-running",
+                    entryPlan.Definition.OperationId,
+                    runningPlan.Definition.OperationId,
+                    RuntimeRouteTransitionKind.ParallelFork,
+                    parallelGroupId: $"parallel-{suffix}"),
+                new RouteTransitionDefinition(
+                    $"route-{suffix}-fork-pending",
+                    entryPlan.Definition.OperationId,
+                    pendingPlan.Definition.OperationId,
+                    RuntimeRouteTransitionKind.ParallelFork,
+                    parallelGroupId: $"parallel-{suffix}"),
+                new RouteTransitionDefinition(
+                    $"route-{suffix}-join-running",
+                    runningPlan.Definition.OperationId,
+                    joinPlan.Definition.OperationId,
+                    RuntimeRouteTransitionKind.ParallelJoin,
+                    parallelGroupId: $"parallel-{suffix}"),
+                new RouteTransitionDefinition(
+                    $"route-{suffix}-join-pending",
+                    pendingPlan.Definition.OperationId,
+                    joinPlan.Definition.OperationId,
+                    RuntimeRouteTransitionKind.ParallelJoin,
+                    parallelGroupId: $"parallel-{suffix}"),
+                new RouteTransitionDefinition(
+                    $"route-{suffix}-completed",
+                    joinPlan.Definition.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Sequence,
+                    terminalDisposition: ProductDisposition.Completed)
+            ]);
+        IReadOnlyCollection<ResourceLease> runningLeases;
+        ResourceLease pendingReservation;
+        ProductionRunLeaseHold runningHold;
+        long protectedRevision;
+        using (var store = new PostgreSqlProductionCoordinationStore(database.ConnectionString))
+        using (var materials = new PostgreSqlProductionMaterialRepository(database.ConnectionString))
+        {
+            Assert.True(await materials.TryAddAsync(ProductionUnit.Register(
+                run.ProductionUnitId,
+                run.ProductionUnitIdentity.ModelId,
+                run.ProductionUnitIdentity.InputKey,
+                run.ProductionUnitIdentity.Value,
+                null,
+                run.ActorId,
+                Now.AddTicks(-1))));
+            var unit = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+                await materials.GetProductionUnitAsync(run.ProductionUnitId));
+            Assert.True(await store.TryAddAsync(
+                run,
+                new ProductionRunExecutionPlan(
+                    run.Id,
+                    [entryPlan, runningPlan, pendingPlan, joinPlan]),
+                new ProductionRunAdmission(unit.Aggregate.ToSnapshot(), unit.Revision)));
+            Assert.True(run.Start(Now.AddSeconds(1)).Succeeded);
+            var revision = await store.SaveAsync(run, 0);
+            var entry = Assert.Single(run.Operations);
+            var entryLeases = Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
+                await store.TryAcquireAsync(
+                    run.Id,
+                    entry.OperationRunId,
+                    entry.ResourceRequirements,
+                    TimeSpan.FromMinutes(5)));
+            var entrySessionId = RuntimeSessionId.New();
+            Assert.True(run.StartOperation(
+                entry.OperationRunId,
+                entrySessionId,
+                entryLeases,
+                Now.AddSeconds(2)).Succeeded);
+            revision = await store.SaveAsync(run, revision);
+            var entrySnapshot = run.ToSnapshot().Operations.Single(operation => string.Equals(
+                operation.OperationRunId,
+                entry.OperationRunId,
+                StringComparison.Ordinal));
+            var entryDispatch = new StationOperationDispatchRequest(
+                run.ToSnapshot(),
+                entrySnapshot,
+                entryPlan,
+                entrySessionId,
+                new Dictionary<string, ProductionContextValue>(),
+                entryLeases);
+            var entryCompletedAtUtc = Now.AddSeconds(3);
+            var entryCompletion = Completion(
+                JobRequest(run, entrySnapshot, entryLeases, $"{suffix}-entry"),
+                ResultJudgement.NotApplicable) with
+            {
+                CompletedAtUtc = entryCompletedAtUtc
+            };
+            Assert.True(run.CompleteOperation(
+                entry.OperationRunId,
+                ResultJudgement.NotApplicable,
+                null,
+                0,
+                0,
+                0,
+                entryCompletedAtUtc,
+                OperationExecutionEvidenceFactory.FromStationCompletion(
+                    entryDispatch,
+                    entryCompletion)).Succeeded);
+            revision = await store.SaveAsync(run, revision);
+            await store.ReleaseAsync(
+                run.Id,
+                entry.OperationRunId,
+                entryLeases.Select(ResourceLeaseReleaseClaim.FromLease).ToArray());
+
+            var running = run.Operations.Single(operation => string.Equals(
+                operation.OperationId,
+                runningPlan.Definition.OperationId,
+                StringComparison.Ordinal));
+            runningLeases = Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
+                await store.TryAcquireAsync(
+                    run.Id,
+                    running.OperationRunId,
+                    running.ResourceRequirements,
+                    TimeSpan.FromMinutes(5)));
+            Assert.True(run.StartOperation(
+                running.OperationRunId,
+                RuntimeSessionId.New(),
+                runningLeases,
+                Now.AddSeconds(4)).Succeeded);
+            revision = await store.SaveAsync(run, revision);
+
+            var pending = run.Operations.Single(operation => string.Equals(
+                operation.OperationId,
+                pendingPlan.Definition.OperationId,
+                StringComparison.Ordinal));
+            Assert.Equal(ExecutionStatus.Pending, pending.ExecutionStatus);
+            pendingReservation = Assert.Single(
+                Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
+                    await store.TryAcquireAsync(
+                        run.Id,
+                        pending.OperationRunId,
+                        pending.ResourceRequirements,
+                        TimeSpan.FromMinutes(5))));
+            Assert.NotEqual(DateTimeOffset.MaxValue, pendingReservation.ExpiresAtUtc);
+
+            Assert.True(run.MarkRecoveryRequired(
+                "The running Station result boundary became uncertain.",
+                Now.AddSeconds(5)).Succeeded);
+            runningHold = new ProductionRunLeaseHold(
+                running.OperationRunId,
+                runningLeases.Select(ResourceLeaseHoldClaim.FromLease).ToArray());
+            protectedRevision = await store.SaveWithLeaseHoldsAsync(
+                run,
+                revision,
+                [runningHold]);
+        }
+
+        using var restarted = new PostgreSqlProductionCoordinationStore(database.ConnectionString);
+        var restored = Assert.IsType<ProductionRunPersistenceEntry>(
+            await restarted.GetByIdAsync(run.Id));
+        Assert.Equal(protectedRevision, restored.Revision);
+        Assert.Equal(ProductionRunControlState.RecoveryRequired, restored.Run.ControlState);
+        var persistedLeases = await restarted.ListAsync();
+        var held = persistedLeases
+            .Where(lease => string.Equals(
+                lease.OperationRunId,
+                runningHold.OperationRunId,
+                StringComparison.Ordinal))
+            .ToArray();
+        Assert.Equal(runningLeases.Count, held.Length);
+        Assert.All(held, static lease =>
+            Assert.Equal(DateTimeOffset.MaxValue, lease.ExpiresAtUtc));
+        var finitePending = Assert.Single(persistedLeases, lease => string.Equals(
+            lease.OperationRunId,
+            pendingReservation.OperationRunId,
+            StringComparison.Ordinal));
+        Assert.Equal(pendingReservation.FencingToken, finitePending.FencingToken);
+        Assert.Equal(pendingReservation.ExpiresAtUtc, finitePending.ExpiresAtUtc);
+
+        await restarted.ReleaseAsync(
+            run.Id,
+            runningHold.OperationRunId,
+            runningLeases.Select(ResourceLeaseReleaseClaim.FromLease).ToArray());
+        Assert.All(
+            (await restarted.ListAsync()).Where(lease => string.Equals(
+                lease.OperationRunId,
+                runningHold.OperationRunId,
+                StringComparison.Ordinal)),
+            static lease => Assert.Equal(DateTimeOffset.MaxValue, lease.ExpiresAtUtc));
+
+        await restarted.ReleaseRecoveryHoldAsync(run.Id, [runningHold]);
+        var afterRecoveryRelease = await restarted.ListAsync();
+        Assert.DoesNotContain(afterRecoveryRelease, lease => string.Equals(
+            lease.OperationRunId,
+            runningHold.OperationRunId,
+            StringComparison.Ordinal));
+        Assert.Equal(pendingReservation, Assert.Single(afterRecoveryRelease));
+        await restarted.ReleaseAsync(
+            run.Id,
+            pendingReservation.OperationRunId,
+            [ResourceLeaseReleaseClaim.FromLease(pendingReservation)]);
+    }
 
     [PostgresIntegrationFact]
     public async Task RunPlanLeaseDispatchOutboxAndResultInboxSurviveColdRestartExactlyOnce()
@@ -76,7 +731,6 @@ public sealed class PostgresProductionCoordinationColdStartIntegrationTests(
                         run.Id,
                         operation.OperationRunId,
                         operation.ResourceRequirements,
-                        Now.AddSeconds(2),
                         TimeSpan.FromMinutes(5)))
                 .ToArray();
             Assert.True(run.StartOperation(
@@ -131,16 +785,11 @@ public sealed class PostgresProductionCoordinationColdStartIntegrationTests(
             Assert.False(await restarted.TryEnqueueAsync(request, [change]));
             var pendingLease = Assert.Single(await restarted.ListPendingAsync(10));
             Assert.Equal(nameof(ResourceLeaseChanged), pendingLease.Kind);
-            var retriedLease = Assert.Single(
-                Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
-                    await restarted.TryAcquireAsync(
-                        run.Id,
-                        request.OperationRunId,
-                        acquired.Select(static lease => lease.Resource).ToArray(),
-                        Now.AddSeconds(5),
-                        TimeSpan.FromHours(1))));
-            Assert.Equal(Assert.Single(acquired).FencingToken, retriedLease.FencingToken);
-            Assert.Equal(Assert.Single(acquired).ExpiresAtUtc, retriedLease.ExpiresAtUtc);
+            Assert.Null(await restarted.TryAcquireAsync(
+                run.Id,
+                request.OperationRunId,
+                acquired.Select(static lease => lease.Resource).ToArray(),
+                TimeSpan.FromHours(1)));
 
             var events = await restarted.ListEventsAsync(request.JobId);
             Assert.Equal(2, events.Count);
@@ -167,7 +816,10 @@ public sealed class PostgresProductionCoordinationColdStartIntegrationTests(
             Assert.Equal(nameof(StationJobRequested), pendingJob.Kind);
             await restarted.MarkPublishedAsync(pendingJob.MessageId);
 
-            await restarted.ReleaseAsync(run.Id, request.OperationRunId);
+            await restarted.ReleaseAsync(
+                run.Id,
+                request.OperationRunId,
+                acquired.Select(ResourceLeaseReleaseClaim.FromLease).ToArray());
         }
 
         using var secondRestart = new PostgreSqlProductionCoordinationStore(
@@ -176,7 +828,10 @@ public sealed class PostgresProductionCoordinationColdStartIntegrationTests(
         Assert.NotNull(await secondRestart.GetCompletionAsync(request.IdempotencyKey));
     }
 
-    private static OperationExecutionPlan OperationPlan(string suffix)
+    private static OperationExecutionPlan OperationPlan(
+        string suffix,
+        IEnumerable<ResourceRequirement>? resources = null,
+        MaterialSlotRequirement? materialSlotRequirement = null)
     {
         var operationId = $"operation-{suffix}";
         var stationSystemId = $"station-system-{suffix}";
@@ -190,7 +845,461 @@ public sealed class PostgresProductionCoordinationColdStartIntegrationTests(
             new StationId($"station-{suffix}"),
             new ConfigurationSnapshotId($"configuration-{suffix}"),
             new RecipeSnapshotId($"recipe-{suffix}"),
-            process);
+            process,
+            [],
+            resources,
+            materialSlotRequirement);
+    }
+
+    private static async Task<ProductionRun> AssertPostgresDynamicSlotContractAsync(
+        PostgreSqlProductionCoordinationStore store,
+        PostgreSqlProductionMaterialRepository materials,
+        MaterialSlotResolution resolution,
+        string suffix,
+        DateTimeOffset startedAtUtc)
+    {
+        var lineId = $"line-dynamic-{suffix}";
+        var seed = OperationPlan(suffix);
+        var stationSystemId = seed.Definition.StationSystemId;
+        var boundSlotId = $"slot-bound-{suffix}";
+        var otherSlotId = $"slot-other-{suffix}";
+        var boundSlot = new SlotAddress(lineId, stationSystemId, boundSlotId);
+        var otherSlot = new SlotAddress(lineId, stationSystemId, otherSlotId);
+        var materialSlotRequirement = resolution == MaterialSlotResolution.CurrentMaterialSlot
+            ? new MaterialSlotRequirement(resolution, stationSystemId)
+            : new MaterialSlotRequirement(
+                resolution,
+                $"group-dynamic-{suffix}",
+                [boundSlotId, otherSlotId]);
+        var operation = OperationPlan(
+            suffix,
+            [new ResourceRequirement(ResourceKind.Station, stationSystemId)],
+            materialSlotRequirement);
+        var run = CreateActiveQueryRun(
+            lineId,
+            $"dynamic-{suffix}",
+            [operation],
+            [TerminalTransition($"route-dynamic-{suffix}", operation.Definition.OperationId)]);
+        await AddActiveQueryRunAsync(
+            store,
+            materials,
+            run,
+            [operation],
+            boundSlot,
+            [otherSlot]);
+        var boundSlotQuery = new ProductionRunActiveQuery(
+            lineId,
+            stationSystemId,
+            boundSlot.ToString());
+        var otherSlotQuery = new ProductionRunActiveQuery(
+            lineId,
+            stationSystemId,
+            otherSlot.ToString());
+
+        Assert.DoesNotContain(
+            await store.ListActiveAsync(boundSlotQuery),
+            entry => entry.Run.Id == run.Id);
+        Assert.DoesNotContain(
+            await store.ListActiveAsync(otherSlotQuery),
+            entry => entry.Run.Id == run.Id);
+
+        Assert.True(run.Start(startedAtUtc).Succeeded);
+        Assert.Equal(1, await store.SaveAsync(run, 0));
+        Assert.DoesNotContain(
+            await store.ListActiveAsync(boundSlotQuery),
+            entry => entry.Run.Id == run.Id);
+        Assert.DoesNotContain(
+            await store.ListActiveAsync(otherSlotQuery),
+            entry => entry.Run.Id == run.Id);
+
+        var operationSnapshot = Assert.Single(run.ToSnapshot().Operations);
+        var readiness = await new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance)
+            .EvaluateAsync(run.ToSnapshot(), operationSnapshot);
+        Assert.Equal(ProductionOperationReadinessKind.Ready, readiness.Kind);
+        Assert.Equal(
+            new ResourceRequirement(ResourceKind.Slot, boundSlot.ToString()),
+            Assert.Single(readiness.MaterialResources));
+        var resources = operationSnapshot.Definition.ResourceRequirements
+            .Concat(readiness.MaterialResources)
+            .Distinct()
+            .ToArray();
+        var leases = Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
+            await store.TryAcquireAsync(
+                run.Id,
+                operationSnapshot.OperationRunId,
+                resources,
+                TimeSpan.FromMinutes(5)));
+        Assert.True(run.StartOperation(
+            operationSnapshot.OperationRunId,
+            RuntimeSessionId.New(),
+            leases,
+            startedAtUtc.AddSeconds(1)).Succeeded);
+        Assert.Equal(2, await store.SaveAsync(run, 1));
+
+        Assert.Contains(
+            await store.ListActiveAsync(boundSlotQuery),
+            entry => entry.Run.Id == run.Id);
+        Assert.DoesNotContain(
+            await store.ListActiveAsync(otherSlotQuery),
+            entry => entry.Run.Id == run.Id);
+
+        return run;
+    }
+
+    private static async Task<ProductionRun[]> AddPostgresTiedPendingRunsAsync(
+        PostgreSqlProductionCoordinationStore store,
+        PostgreSqlProductionMaterialRepository materials,
+        string testSuffix)
+    {
+        var runs = new List<ProductionRun>();
+        foreach (var suffix in new[] { $"{testSuffix}-tie-a", $"{testSuffix}-tie-b" })
+        {
+            var operation = OperationPlan(suffix);
+            var run = CreateActiveQueryRun(
+                $"line-order-{suffix}",
+                $"order-{suffix}",
+                [operation],
+                [TerminalTransition(
+                    $"route-order-{suffix}",
+                    operation.Definition.OperationId)]);
+            await AddActiveQueryRunAsync(
+                store,
+                materials,
+                run,
+                [operation],
+                runningSlot: null,
+                []);
+            runs.Add(run);
+        }
+
+        return runs.ToArray();
+    }
+
+    private static ProductionRun CreateActiveQueryRun(
+        string lineId,
+        string identitySuffix,
+        IReadOnlyList<OperationExecutionPlan> operations,
+        IReadOnlyCollection<RouteTransitionDefinition> transitions)
+    {
+        var entry = operations[0];
+        return ProductionRun.Create(
+            ProductionRunId.New(),
+            $"project-{identitySuffix}",
+            $"application-{identitySuffix}",
+            $"snapshot-{identitySuffix}",
+            $"topology-{identitySuffix}",
+            lineId,
+            ProductionUnitId.New(),
+            new ProductionUnitIdentity(
+                $"product-{identitySuffix}",
+                "serialNumber",
+                $"SN-{identitySuffix}"),
+            null,
+            null,
+            $"operator-{identitySuffix}",
+            entry.Definition.OperationId,
+            Now,
+            operations.Select(static operation => operation.Definition),
+            transitions);
+    }
+
+    private static RouteTransitionDefinition TerminalTransition(
+        string transitionId,
+        string operationId) => new(
+        transitionId,
+        operationId,
+        null,
+        RuntimeRouteTransitionKind.Sequence,
+        terminalDisposition: ProductDisposition.Completed);
+
+    private static async Task AddActiveQueryRunAsync(
+        PostgreSqlProductionCoordinationStore store,
+        PostgreSqlProductionMaterialRepository materials,
+        ProductionRun run,
+        IReadOnlyList<OperationExecutionPlan> operations,
+        SlotAddress? runningSlot,
+        IReadOnlyCollection<SlotAddress> additionalSlots)
+    {
+        Assert.True(await materials.TryAddAsync(ProductionUnit.Register(
+            run.ProductionUnitId,
+            run.ProductionUnitIdentity.ModelId,
+            run.ProductionUnitIdentity.InputKey,
+            run.ProductionUnitIdentity.Value,
+            null,
+            run.ActorId,
+            run.CreatedAtUtc.AddSeconds(-20))));
+        foreach (var slot in additionalSlots
+                     .Prepend(runningSlot)
+                     .OfType<SlotAddress>())
+        {
+            Assert.True(await materials.TryAddAsync(SlotOccupancy.Register(
+                slot,
+                run.CreatedAtUtc.AddSeconds(-10))));
+        }
+
+        if (runningSlot is not null)
+        {
+            var material = MaterialReference.ForProductionUnit(run.ProductionUnitId);
+            var materialService = new ProductionMaterialService(materials, store);
+            Assert.True((await materialService.ArriveAsync(new ArriveMaterialCommand(
+                Guid.NewGuid(),
+                material,
+                MaterialLocation.AtStation(
+                    runningSlot.LineId,
+                    runningSlot.StationSystemId),
+                "scanner.query",
+                run.CreatedAtUtc.AddSeconds(-8)))).Succeeded);
+            Assert.True((await materialService.ReserveSlotAsync(new ReserveSlotCommand(
+                runningSlot,
+                material,
+                "coordinator.query",
+                run.CreatedAtUtc.AddSeconds(-7)))).Succeeded);
+            Assert.True((await materialService.LoadSlotAsync(new LoadSlotCommand(
+                runningSlot,
+                material,
+                "operator.query",
+                run.CreatedAtUtc.AddSeconds(-6)))).Succeeded);
+            Assert.True((await materialService.StartSlotAsync(new StartSlotCommand(
+                runningSlot,
+                material,
+                "agent.query",
+                run.CreatedAtUtc.AddSeconds(-5)))).Succeeded);
+        }
+
+        var unit = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+            await materials.GetProductionUnitAsync(run.ProductionUnitId));
+        Assert.True(await store.TryAddAsync(
+            run,
+            new ProductionRunExecutionPlan(run.Id, operations),
+            new ProductionRunAdmission(unit.Aggregate.ToSnapshot(), unit.Revision)));
+    }
+
+    private static async Task StartAndCompleteActiveQueryOperationAsync(
+        PostgreSqlProductionCoordinationStore store,
+        ProductionRun run,
+        OperationExecutionPlan operationPlan,
+        long expectedRevision,
+        DateTimeOffset startedAtUtc)
+    {
+        var operation = run.Operations.Single(candidate => string.Equals(
+            candidate.OperationId,
+            operationPlan.Definition.OperationId,
+            StringComparison.Ordinal));
+        var leases = Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
+            await store.TryAcquireAsync(
+                run.Id,
+                operation.OperationRunId,
+                operation.ResourceRequirements,
+                TimeSpan.FromMinutes(5)));
+        var runtimeSessionId = RuntimeSessionId.New();
+        Assert.True(run.StartOperation(
+            operation.OperationRunId,
+            runtimeSessionId,
+            leases,
+            startedAtUtc).Succeeded);
+        var runningSnapshot = run.ToSnapshot();
+        var runningOperation = runningSnapshot.Operations.Single(candidate =>
+            string.Equals(
+                candidate.OperationRunId,
+                operation.OperationRunId,
+                StringComparison.Ordinal));
+        var dispatch = new StationOperationDispatchRequest(
+            runningSnapshot,
+            runningOperation,
+            operationPlan,
+            runtimeSessionId,
+            new Dictionary<string, ProductionContextValue>(),
+            leases);
+        var completedAtUtc = startedAtUtc.AddSeconds(1);
+        var completion = Completion(
+            JobRequest(run, runningOperation, leases, operationPlan.Definition.OperationId),
+            ResultJudgement.NotApplicable) with
+        {
+            CompletedAtUtc = completedAtUtc
+        };
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            ResultJudgement.NotApplicable,
+            null,
+            0,
+            0,
+            0,
+            completedAtUtc,
+            OperationExecutionEvidenceFactory.FromStationCompletion(
+                dispatch,
+                completion)).Succeeded);
+        Assert.Equal(
+            expectedRevision + 1,
+            await store.SaveAsync(run, expectedRevision));
+        await store.ReleaseAsync(
+            run.Id,
+            operation.OperationRunId,
+            leases.Select(ResourceLeaseReleaseClaim.FromLease).ToArray());
+    }
+
+    private static async ValueTask ExpireLeaseAsync(
+        string connectionString,
+        ResourceRequirement resource)
+    {
+        await using var connection = new Npgsql.NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE olo_resource_leases
+            SET expires_at_utc = clock_timestamp() - interval '1 second'
+            WHERE resource_kind = @resource_kind
+              AND resource_id = @resource_id;
+            """;
+        command.Parameters.AddWithValue("resource_kind", resource.Kind.ToString());
+        command.Parameters.AddWithValue("resource_id", resource.ResourceId);
+        Assert.Equal(1, await command.ExecuteNonQueryAsync());
+    }
+
+    private sealed class TemporaryPostgresSchema : IAsyncDisposable
+    {
+        private readonly string _administrativeConnectionString;
+        private readonly string _schemaName;
+
+        private TemporaryPostgresSchema(
+            string administrativeConnectionString,
+            string schemaName,
+            string connectionString)
+        {
+            _administrativeConnectionString = administrativeConnectionString;
+            _schemaName = schemaName;
+            ConnectionString = connectionString;
+        }
+
+        public string ConnectionString { get; }
+
+        public static async ValueTask<TemporaryPostgresSchema> CreateAsync(
+            string administrativeConnectionString)
+        {
+            var schemaName = $"olo_test_{Guid.NewGuid():N}";
+            await using var connection = new Npgsql.NpgsqlConnection(
+                administrativeConnectionString);
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"CREATE SCHEMA {schemaName};";
+            await command.ExecuteNonQueryAsync();
+            var builder = new Npgsql.NpgsqlConnectionStringBuilder(
+                administrativeConnectionString)
+            {
+                SearchPath = schemaName
+            };
+            return new TemporaryPostgresSchema(
+                administrativeConnectionString,
+                schemaName,
+                builder.ConnectionString);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await using var connection = new Npgsql.NpgsqlConnection(
+                _administrativeConnectionString);
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = $"DROP SCHEMA {_schemaName} CASCADE;";
+            await command.ExecuteNonQueryAsync();
+        }
+    }
+
+    private static async Task<ProductionRun> AddRunAsync(
+        PostgreSqlProductionCoordinationStore store,
+        PostgreSqlProductionMaterialRepository materials,
+        string suffix,
+        DateTimeOffset? completedAtUtc)
+    {
+        var operationPlan = OperationPlan(suffix);
+        var run = ProductionRun.Create(
+            ProductionRunId.New(),
+            $"project-{suffix}",
+            $"application-{suffix}",
+            $"snapshot-{suffix}",
+            $"topology-{suffix}",
+            $"line-{suffix}",
+            ProductionUnitId.New(),
+            new ProductionUnitIdentity($"product-{suffix}", "serialNumber", $"SN-{suffix}"),
+            null,
+            null,
+            $"operator-{suffix}",
+            operationPlan.Definition.OperationId,
+            completedAtUtc ?? Now,
+            [operationPlan.Definition],
+            [
+                new RouteTransitionDefinition(
+                    $"route-{suffix}-completed",
+                    operationPlan.Definition.OperationId,
+                    null,
+                    RuntimeRouteTransitionKind.Sequence,
+                    terminalDisposition: ProductDisposition.Completed)
+            ]);
+        Assert.True(await materials.TryAddAsync(ProductionUnit.Register(
+            run.ProductionUnitId,
+            run.ProductionUnitIdentity.ModelId,
+            run.ProductionUnitIdentity.InputKey,
+            run.ProductionUnitIdentity.Value,
+            null,
+            run.ActorId,
+            run.CreatedAtUtc.AddTicks(-1))));
+        var unit = Assert.IsType<ProductionMaterialPersistenceEntry<ProductionUnit>>(
+            await materials.GetProductionUnitAsync(run.ProductionUnitId));
+        Assert.True(await store.TryAddAsync(
+            run,
+            new ProductionRunExecutionPlan(run.Id, [operationPlan]),
+            new ProductionRunAdmission(unit.Aggregate.ToSnapshot(), unit.Revision)));
+        if (completedAtUtc is null)
+        {
+            return run;
+        }
+
+        Assert.True(run.Start(completedAtUtc.Value).Succeeded);
+        var operation = Assert.Single(run.Operations);
+        var leases = Assert.IsAssignableFrom<IReadOnlyCollection<ResourceLease>>(
+            await store.TryAcquireAsync(
+                run.Id,
+                operation.OperationRunId,
+                operation.ResourceRequirements,
+                TimeSpan.FromMinutes(5)));
+        var runtimeSessionId = RuntimeSessionId.New();
+        Assert.True(run.StartOperation(
+            operation.OperationRunId,
+            runtimeSessionId,
+            leases,
+            completedAtUtc.Value).Succeeded);
+        var terminalAtUtc = completedAtUtc.Value.AddSeconds(1);
+        var runningSnapshot = run.ToSnapshot();
+        var runningOperation = Assert.Single(runningSnapshot.Operations);
+        var dispatch = new StationOperationDispatchRequest(
+            runningSnapshot,
+            runningOperation,
+            operationPlan,
+            runtimeSessionId,
+            new Dictionary<string, ProductionContextValue>(),
+            leases);
+        var completion = Completion(
+            JobRequest(run, runningOperation, leases, suffix),
+            ResultJudgement.Passed) with
+        {
+            CompletedAtUtc = terminalAtUtc
+        };
+        Assert.True(run.CompleteOperation(
+            operation.OperationRunId,
+            ResultJudgement.Passed,
+            null,
+            0,
+            0,
+            0,
+            terminalAtUtc,
+            OperationExecutionEvidenceFactory.FromStationCompletion(dispatch, completion)).Succeeded);
+        Assert.Equal(1, await store.SaveAsync(run, 0));
+        await store.ReleaseAsync(
+            run.Id,
+            operation.OperationRunId,
+            leases.Select(ResourceLeaseReleaseClaim.FromLease).ToArray());
+        return run;
     }
 
     private static StationJobRequested JobRequest(

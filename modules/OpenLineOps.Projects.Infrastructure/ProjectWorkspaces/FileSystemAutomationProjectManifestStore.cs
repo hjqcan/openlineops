@@ -1,11 +1,16 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using OpenLineOps.Application.Abstractions.ProjectWorkspaces;
 using OpenLineOps.Projects.Application.ProjectWorkspaces;
 
 namespace OpenLineOps.Projects.Infrastructure.ProjectWorkspaces;
 
-public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjectManifestStore
+public sealed class FileSystemAutomationProjectManifestStore :
+    IAutomationProjectManifestStore,
+    IProjectApplicationPluginPackageReferenceStore
 {
+    private static readonly ProjectWorkspaceWriteLockPool ApplicationFileLocks = new();
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -27,18 +32,26 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         }
 
         var fullPath = Path.GetFullPath(projectTarget.Trim());
+        RejectNonCanonicalProjectFileExtension(fullPath);
         if (IsProjectFilePath(fullPath))
         {
-            return Path.GetDirectoryName(fullPath)
+            var projectRoot = Path.GetDirectoryName(fullPath)
                 ?? throw new InvalidDataException($"Project file '{fullPath}' has no parent directory.");
+            ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+                projectRoot,
+                "Project root");
+            return projectRoot;
         }
 
         if (File.Exists(fullPath))
         {
             throw new InvalidDataException(
-                $"Project target '{fullPath}' must be a directory or a {AutomationProjectFileConvention.ProjectFileExtension} file.");
+                $"Project target '{fullPath}' must be a directory or a canonical lowercase {AutomationProjectFileConvention.ProjectFileExtension} file.");
         }
 
+        ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+            fullPath,
+            "Project root");
         return fullPath;
     }
 
@@ -50,10 +63,17 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         }
 
         var fullTarget = Path.GetFullPath(projectTarget.Trim());
+        RejectNonCanonicalProjectFileExtension(fullTarget);
         if (IsProjectFilePath(fullTarget))
         {
             var explicitRoot = Path.GetDirectoryName(fullTarget)
                 ?? throw new InvalidDataException($"Project file '{fullTarget}' has no parent directory.");
+            ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+                explicitRoot,
+                "Project root");
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                fullTarget,
+                "Project file");
             var explicitRootFiles = FindProjectFiles(explicitRoot);
             if (explicitRootFiles.Length > 1)
             {
@@ -65,6 +85,9 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         }
 
         var projectRoot = GetProjectRootPath(fullTarget);
+        ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+            projectRoot,
+            "Project root");
         var projectFiles = FindProjectFiles(projectRoot);
         if (projectFiles.Length > 1)
         {
@@ -91,9 +114,6 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         cancellationToken.ThrowIfCancellationRequested();
 
         var projectRoot = GetProjectRootPath(manifest.ProjectPath);
-        Directory.CreateDirectory(projectRoot);
-        EnsureDirectoryIsNotReparsePoint(projectRoot, "Project root");
-
         var normalized = NormalizeForSave(manifest, projectRoot);
         var existingProjectFiles = FindProjectFiles(projectRoot);
         if (existingProjectFiles.Length > 1)
@@ -106,15 +126,64 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             ?? Path.Combine(
                 projectRoot,
                 AutomationProjectFileConvention.GetProjectFileName(normalized.ProjectId));
+        ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+            projectFilePath,
+            "Project file");
+
+        var applicationFilePaths = normalized.Applications.ToDictionary(
+            static application => application.ApplicationId,
+            application =>
+            {
+                var applicationFilePath = AutomationProjectFileConvention.ResolveApplicationProjectPath(
+                    projectRoot,
+                    application.ProjectFilePath);
+                ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    applicationFilePath,
+                    $"Application {application.ApplicationId} project file");
+                return applicationFilePath;
+            },
+            StringComparer.Ordinal);
+        var applicationDirectories = applicationFilePaths.Values
+            .SelectMany(applicationFilePath => GetApplicationDirectories(
+                Path.GetDirectoryName(applicationFilePath)!))
+            .ToArray();
+        foreach (var directory in applicationDirectories)
+        {
+            ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+                directory.Path,
+                directory.Description);
+        }
+
+        ProjectWorkspacePathGuard.CreateOrdinaryDirectory(projectRoot, "Project root");
+        foreach (var directory in applicationDirectories)
+        {
+            ProjectWorkspacePathGuard.CreateOrdinaryDirectory(directory.Path, directory.Description);
+        }
 
         foreach (var application in normalized.Applications)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var applicationFilePath = AutomationProjectFileConvention.ResolveApplicationProjectPath(
-                projectRoot,
-                application.ProjectFilePath);
-            EnsureProjectPathHasNoReparsePoints(projectRoot, application.ProjectFilePath);
-            CreateApplicationDirectories(Path.GetDirectoryName(applicationFilePath)!);
+            var applicationFilePath = applicationFilePaths[application.ApplicationId];
+
+            using var applicationLease = await ApplicationFileLocks.AcquireAsync(
+                    applicationFilePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var pluginPackageReferences = application.PluginPackageReferences;
+            if (File.Exists(applicationFilePath))
+            {
+                var existing = await ReadAsync<AutomationApplicationProjectFile>(
+                        applicationFilePath,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                ValidateApplicationFile(
+                    new AutomationProjectApplicationReference(
+                        application.ApplicationId,
+                        application.ProjectFilePath),
+                    existing,
+                    applicationFilePath);
+                pluginPackageReferences = existing.PluginPackageReferences;
+            }
 
             var applicationFile = new AutomationApplicationProjectFile(
                 AutomationApplicationProjectFile.CurrentSchemaVersion,
@@ -125,7 +194,9 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                 application.DisplayName,
                 AutomationApplicationProjectFile.CurrentResourceLayoutVersion,
                 application.TopologyId,
-                application.ProcessDefinitionIds);
+                application.ProcessDefinitionIds,
+                ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(
+                    pluginPackageReferences));
 
             await WriteAtomicallyAsync(applicationFilePath, applicationFile, cancellationToken)
                 .ConfigureAwait(false);
@@ -165,13 +236,17 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         cancellationToken.ThrowIfCancellationRequested();
 
         var projectRoot = GetProjectRootPath(projectTarget);
+        ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+            projectRoot,
+            "Project root");
         var projectFilePath = GetManifestPath(projectTarget);
-        if (!File.Exists(projectFilePath))
+        if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                projectFilePath,
+                "Project file"))
         {
             return null;
         }
 
-        EnsureDirectoryIsNotReparsePoint(projectRoot, "Project root");
         return await LoadCurrentAsync(projectRoot, projectFilePath, cancellationToken).ConfigureAwait(false);
     }
 
@@ -184,11 +259,12 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         var projectRoot = GetProjectRootPath(projectRootPath);
         var relativePath = GetApplicationProjectRelativePath(projectRoot, applicationProjectTarget);
         AutomationProjectFileConvention.ValidateApplicationProjectRelativePath(relativePath);
-        EnsureProjectPathHasNoReparsePoints(projectRoot, relativePath);
         var applicationFilePath = AutomationProjectFileConvention.ResolveApplicationProjectPath(
             projectRoot,
             relativePath);
-        if (!File.Exists(applicationFilePath))
+        if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                applicationFilePath,
+                "Application project file"))
         {
             return null;
         }
@@ -207,7 +283,9 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             applicationFile.DisplayName,
             applicationFile.TopologyId,
             NormalizeStrings(applicationFile.ProcessDefinitionIds),
-            relativePath);
+            relativePath,
+            ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(
+                applicationFile.PluginPackageReferences));
     }
 
     private static async ValueTask<AutomationProjectManifest> LoadCurrentAsync(
@@ -233,11 +311,12 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
         foreach (var reference in references.OrderBy(item => item.ApplicationId, StringComparer.Ordinal))
         {
             AutomationProjectFileConvention.ValidateApplicationProjectRelativePath(reference.ProjectFile);
-            EnsureProjectPathHasNoReparsePoints(projectRoot, reference.ProjectFile);
             var applicationFilePath = AutomationProjectFileConvention.ResolveApplicationProjectPath(
                 projectRoot,
                 reference.ProjectFile);
-            if (!File.Exists(applicationFilePath))
+            if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    applicationFilePath,
+                    $"Application {reference.ApplicationId} project file"))
             {
                 throw new InvalidDataException(
                     $"Application {reference.ApplicationId} project file '{reference.ProjectFile}' does not exist.");
@@ -253,7 +332,9 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                 applicationFile.DisplayName,
                 applicationFile.TopologyId,
                 NormalizeStrings(applicationFile.ProcessDefinitionIds),
-                reference.ProjectFile));
+                reference.ProjectFile,
+                ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(
+                    applicationFile.PluginPackageReferences)));
         }
 
         var snapshots = projectFile.Snapshots
@@ -305,10 +386,18 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                         $"Application {application.ApplicationId} must contain process definition ids.");
                 }
 
+                if (application.PluginPackageReferences is null)
+                {
+                    throw new InvalidDataException(
+                        $"Application {application.ApplicationId} must contain pluginPackageReferences.");
+                }
+
                 return application with
                 {
                     ProjectFilePath = projectFilePath,
-                    ProcessDefinitionIds = NormalizeStrings(application.ProcessDefinitionIds)
+                    ProcessDefinitionIds = NormalizeStrings(application.ProcessDefinitionIds),
+                    PluginPackageReferences = ProjectApplicationPluginPackageReferenceContract
+                        .ValidateAndOrder(application.PluginPackageReferences)
                 };
             })
             .OrderBy(application => application.ApplicationId, StringComparer.Ordinal)
@@ -430,10 +519,82 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                 $"Application project file '{applicationFilePath}' must contain processDefinitionIds.");
         }
 
+        if (applicationFile.PluginPackageReferences is null)
+        {
+            throw new InvalidDataException(
+                $"Application project file '{applicationFilePath}' must contain pluginPackageReferences.");
+        }
+
         EnsureUnique(
             applicationFile.ProcessDefinitionIds,
             $"Application {applicationFile.ApplicationId} process definition ids",
             StringComparer.Ordinal);
+        _ = ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(
+            applicationFile.PluginPackageReferences);
+    }
+
+    public async ValueTask<IReadOnlyCollection<ProjectApplicationPluginPackageReference>> ReadAsync(
+        ProjectApplicationWorkspaceScope scope,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var lease = await ApplicationFileLocks.AcquireAsync(
+                scope.ApplicationProjectFilePath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var applicationFile = await ReadApplicationFileAsync(scope, cancellationToken)
+            .ConfigureAwait(false);
+        return ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(
+            applicationFile.PluginPackageReferences);
+    }
+
+    public async ValueTask ReplaceAsync(
+        ProjectApplicationWorkspaceScope scope,
+        IReadOnlyCollection<ProjectApplicationPluginPackageReference> references,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(references);
+        cancellationToken.ThrowIfCancellationRequested();
+        var normalized = ProjectApplicationPluginPackageReferenceContract.ValidateAndOrder(references);
+        using var lease = await ApplicationFileLocks.AcquireAsync(
+                scope.ApplicationProjectFilePath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var applicationFile = await ReadApplicationFileAsync(scope, cancellationToken)
+            .ConfigureAwait(false);
+        await WriteAtomicallyAsync(
+                scope.ApplicationProjectFilePath,
+                applicationFile with { PluginPackageReferences = normalized },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async ValueTask<AutomationApplicationProjectFile> ReadApplicationFileAsync(
+        ProjectApplicationWorkspaceScope scope,
+        CancellationToken cancellationToken)
+    {
+        if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                scope.ApplicationProjectFilePath,
+                "Application project file"))
+        {
+            throw new FileNotFoundException(
+                $"Application project file '{scope.ApplicationProjectFilePath}' does not exist.",
+                scope.ApplicationProjectFilePath);
+        }
+
+        var applicationFile = await ReadAsync<AutomationApplicationProjectFile>(
+                scope.ApplicationProjectFilePath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        ValidateApplicationFile(
+            new AutomationProjectApplicationReference(
+                scope.ApplicationId,
+                scope.ApplicationProjectRelativePath),
+            applicationFile,
+            scope.ApplicationProjectFilePath);
+        return applicationFile;
     }
 
     private static void ValidateSnapshotFile(
@@ -533,6 +694,15 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
     {
         try
         {
+            if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    path,
+                    "Project file"))
+            {
+                throw new FileNotFoundException(
+                    $"Project file '{path}' does not exist.",
+                    path);
+            }
+
             await using var stream = new FileStream(
                 path,
                 FileMode.Open,
@@ -559,9 +729,12 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
     {
         var directory = Path.GetDirectoryName(path)
             ?? throw new InvalidDataException($"Project file '{path}' has no parent directory.");
-        Directory.CreateDirectory(directory);
+        ProjectWorkspacePathGuard.CreateOrdinaryDirectory(directory, "Project file directory");
+        var targetExists = ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+            path,
+            "Project file");
         var bytes = JsonSerializer.SerializeToUtf8Bytes(value, JsonOptions);
-        if (File.Exists(path))
+        if (targetExists)
         {
             var existingBytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
             if (existingBytes.AsSpan().SequenceEqual(bytes))
@@ -572,8 +745,13 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
 
         var temporaryPath = Path.Combine(directory, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
 
+        Exception? operationFailure = null;
+        Exception? cleanupFailure = null;
         try
         {
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                temporaryPath,
+                "Temporary project file");
             await using (var stream = new FileStream(
                 temporaryPath,
                 FileMode.CreateNew,
@@ -587,15 +765,47 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
                 stream.Flush(flushToDisk: true);
             }
 
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                temporaryPath,
+                "Temporary project file");
+            ProjectWorkspacePathGuard.EnsureOrdinaryDirectoryOrMissing(
+                directory,
+                "Project file directory");
+            ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                path,
+                "Project file");
             File.Move(temporaryPath, path, overwrite: true);
+            if (!ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    path,
+                    "Project file"))
+            {
+                throw new InvalidDataException(
+                    $"Project file '{path}' was not persisted as an ordinary file.");
+            }
         }
-        finally
+        catch (Exception exception)
         {
-            if (File.Exists(temporaryPath))
+            operationFailure = exception;
+        }
+
+        try
+        {
+            if (ProjectWorkspacePathGuard.EnsureOrdinaryFileOrMissing(
+                    temporaryPath,
+                    "Temporary project file"))
             {
                 File.Delete(temporaryPath);
             }
         }
+        catch (Exception exception)
+        {
+            cleanupFailure = exception;
+        }
+
+        ProjectWorkspaceFileOperation.ThrowFailures(
+            "Project file commit and temporary-file cleanup both failed.",
+            operationFailure,
+            cleanupFailure);
     }
 
     private static string[] FindProjectFiles(string projectRoot)
@@ -605,19 +815,43 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             return [];
         }
 
-        return Directory.EnumerateFiles(projectRoot, "*", SearchOption.TopDirectoryOnly)
+        var projectFiles = Directory.EnumerateFiles(projectRoot, "*", SearchOption.TopDirectoryOnly)
             .Where(path => path.EndsWith(
                 AutomationProjectFileConvention.ProjectFileExtension,
                 StringComparison.OrdinalIgnoreCase))
             .Order(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        var nonCanonical = projectFiles.FirstOrDefault(path => !path.EndsWith(
+            AutomationProjectFileConvention.ProjectFileExtension,
+            StringComparison.Ordinal));
+        if (nonCanonical is not null)
+        {
+            throw new InvalidDataException(
+                $"Project file '{nonCanonical}' must use the canonical lowercase "
+                + $"{AutomationProjectFileConvention.ProjectFileExtension} extension.");
+        }
+
+        return projectFiles;
     }
 
     private static bool IsProjectFilePath(string path)
     {
         return path.EndsWith(
             AutomationProjectFileConvention.ProjectFileExtension,
-            StringComparison.OrdinalIgnoreCase);
+            StringComparison.Ordinal);
+    }
+
+    private static void RejectNonCanonicalProjectFileExtension(string path)
+    {
+        if (path.EndsWith(
+                AutomationProjectFileConvention.ProjectFileExtension,
+                StringComparison.OrdinalIgnoreCase)
+            && !IsProjectFilePath(path))
+        {
+            throw new InvalidDataException(
+                $"Project target '{path}' must use the canonical lowercase "
+                + $"{AutomationProjectFileConvention.ProjectFileExtension} extension.");
+        }
     }
 
     private static string GetApplicationProjectRelativePath(
@@ -636,9 +870,10 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             : Path.GetFullPath(Path.Combine(
                 projectRoot,
                 applicationProjectTarget.Trim().Replace('/', Path.DirectorySeparatorChar)));
-        var root = Path.GetFullPath(projectRoot)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var rootPrefix = root + Path.DirectorySeparatorChar;
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(projectRoot));
+        var rootPrefix = Path.EndsInDirectorySeparator(root)
+            ? root
+            : root + Path.DirectorySeparatorChar;
         if (!fullPath.StartsWith(rootPrefix, PathComparison))
         {
             throw new InvalidDataException(
@@ -649,38 +884,27 @@ public sealed class FileSystemAutomationProjectManifestStore : IAutomationProjec
             Path.GetRelativePath(root, fullPath));
     }
 
-    private static void CreateApplicationDirectories(string applicationRoot)
+    private static (string Path, string Description)[] GetApplicationDirectories(
+        string applicationRoot)
     {
-        Directory.CreateDirectory(applicationRoot);
-        Directory.CreateDirectory(Path.Combine(applicationRoot, "topology"));
-        Directory.CreateDirectory(Path.Combine(applicationRoot, "layouts"));
-        Directory.CreateDirectory(Path.Combine(applicationRoot, "flows"));
-        Directory.CreateDirectory(Path.Combine(applicationRoot, "blocks", "custom"));
-        Directory.CreateDirectory(Path.Combine(applicationRoot, "configuration"));
-    }
-
-    private static void EnsureProjectPathHasNoReparsePoints(
-        string projectRoot,
-        string relativePath)
-    {
-        var current = Path.GetFullPath(projectRoot);
-        foreach (var segment in relativePath.Split('/').SkipLast(1))
-        {
-            current = Path.Combine(current, segment);
-            if (Directory.Exists(current))
-            {
-                EnsureDirectoryIsNotReparsePoint(current, $"Project directory '{segment}'");
-            }
-        }
-    }
-
-    private static void EnsureDirectoryIsNotReparsePoint(string path, string description)
-    {
-        if (Directory.Exists(path)
-            && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-        {
-            throw new InvalidDataException($"{description} cannot be a symbolic link or reparse point.");
-        }
+        return
+        [
+            (applicationRoot, "Application root"),
+            (Path.Combine(applicationRoot, "topology"), "Application topology directory"),
+            (Path.Combine(applicationRoot, "layouts"), "Application layouts directory"),
+            (Path.Combine(applicationRoot, "flows"), "Application flows directory"),
+            (
+                Path.Combine(applicationRoot, "blocks", "custom"),
+                "Application custom blocks directory"),
+            (
+                Path.Combine(applicationRoot, "configuration"),
+                "Application configuration directory"),
+            (
+                Path.Combine(
+                    applicationRoot,
+                    ProjectApplicationPluginPackageReferenceContract.PluginsDirectoryName),
+                "Application plugins directory")
+        ];
     }
 
     private static string[] NormalizeStrings(IEnumerable<string> values)

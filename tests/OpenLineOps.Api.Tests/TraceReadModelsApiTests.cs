@@ -1,18 +1,20 @@
 using System.Net;
-using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace OpenLineOps.Api.Tests;
 
-public sealed class TraceReadModelsApiTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class TraceReadModelsApiTests : IClassFixture<OpenLineOpsApiWebApplicationFactory>
 {
     private static readonly DateTimeOffset BaseTimeUtc = new(2026, 6, 29, 8, 0, 0, TimeSpan.Zero);
+    private readonly OpenLineOpsApiWebApplicationFactory _factory;
     private readonly HttpClient _client;
 
-    public TraceReadModelsApiTests(WebApplicationFactory<Program> factory)
+    public TraceReadModelsApiTests(OpenLineOpsApiWebApplicationFactory factory)
     {
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        _factory = factory;
+        _client = factory.CreateAuthenticatedClient(
+            new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
     }
 
     [Fact]
@@ -20,16 +22,16 @@ public sealed class TraceReadModelsApiTests : IClassFixture<WebApplicationFactor
     {
         var suffix = Guid.NewGuid().ToString("N");
         var stationSystemId = $"station-system-dashboard-{suffix}";
-        using var passed = await _client.PostAsJsonAsync(
-            "/api/traceability/records",
+        var passed = await TraceRecordsApiTests.ProjectTraceAsync(
+            _factory,
             TraceRecordsApiTests.CreateTraceRequest(
                 Guid.NewGuid(),
                 $"SMX-DASH-P-{suffix}",
                 $"batch-p-{suffix}",
                 BaseTimeUtc.AddMinutes(1),
                 stationSystemId: stationSystemId));
-        using var nonconforming = await _client.PostAsJsonAsync(
-            "/api/traceability/records",
+        var nonconforming = await TraceRecordsApiTests.ProjectTraceAsync(
+            _factory,
             TraceRecordsApiTests.CreateTraceRequest(
                 Guid.NewGuid(),
                 $"SMX-DASH-F-{suffix}",
@@ -37,8 +39,8 @@ public sealed class TraceReadModelsApiTests : IClassFixture<WebApplicationFactor
                 BaseTimeUtc.AddMinutes(2),
                 judgement: "Failed",
                 stationSystemId: stationSystemId));
-        using var systemFailure = await _client.PostAsJsonAsync(
-            "/api/traceability/records",
+        var systemFailure = await TraceRecordsApiTests.ProjectTraceAsync(
+            _factory,
             TraceRecordsApiTests.CreateTraceRequest(
                 Guid.NewGuid(),
                 $"SMX-DASH-U-{suffix}",
@@ -51,11 +53,9 @@ public sealed class TraceReadModelsApiTests : IClassFixture<WebApplicationFactor
             $"/api/traceability/read-models/station-dashboard?stationSystemId={stationSystemId}&recentLimit=3");
         using var body = await ReadJsonAsync(response);
 
-        Assert.True(
-            passed.StatusCode == HttpStatusCode.Created,
-            $"Passed trace returned {(int)passed.StatusCode}: {await passed.Content.ReadAsStringAsync()}");
-        Assert.Equal(HttpStatusCode.Created, nonconforming.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, systemFailure.StatusCode);
+        Assert.True(passed.IsSuccess, passed.Error.Message);
+        Assert.True(nonconforming.IsSuccess, nonconforming.Error.Message);
+        Assert.True(systemFailure.IsSuccess, systemFailure.Error.Message);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(3, body.RootElement.GetProperty("totalCount").GetInt64());
         Assert.Equal(1, body.RootElement.GetProperty("passedCount").GetInt64());
@@ -83,8 +83,8 @@ public sealed class TraceReadModelsApiTests : IClassFixture<WebApplicationFactor
     {
         var suffix = Guid.NewGuid().ToString("N");
         var lotId = $"lot-engineering-{suffix}";
-        using var first = await _client.PostAsJsonAsync(
-            "/api/traceability/records",
+        var first = await TraceRecordsApiTests.ProjectTraceAsync(
+            _factory,
             TraceRecordsApiTests.CreateTraceRequest(
                 Guid.NewGuid(),
                 $"SMX-ENG-P-{suffix}",
@@ -92,8 +92,8 @@ public sealed class TraceReadModelsApiTests : IClassFixture<WebApplicationFactor
                 BaseTimeUtc.AddMinutes(1),
                 stationSystemId: "station-system-engineering-a",
                 processVersionId: "process-api-read-model@1.0.0"));
-        using var second = await _client.PostAsJsonAsync(
-            "/api/traceability/records",
+        var second = await TraceRecordsApiTests.ProjectTraceAsync(
+            _factory,
             TraceRecordsApiTests.CreateTraceRequest(
                 Guid.NewGuid(),
                 $"SMX-ENG-F-{suffix}",
@@ -110,8 +110,8 @@ public sealed class TraceReadModelsApiTests : IClassFixture<WebApplicationFactor
         var results = body.RootElement.GetProperty("results");
         var facets = body.RootElement.GetProperty("facets");
 
-        Assert.Equal(HttpStatusCode.Created, first.StatusCode);
-        Assert.Equal(HttpStatusCode.Created, second.StatusCode);
+        Assert.True(first.IsSuccess, first.Error.Message);
+        Assert.True(second.IsSuccess, second.Error.Message);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(2, results.GetProperty("totalCount").GetInt64());
         Assert.All(results.GetProperty("items").EnumerateArray(), row =>

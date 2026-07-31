@@ -18,6 +18,7 @@ namespace OpenLineOps.Api.Tests;
 public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPackageWebApplicationFactory>
 {
     private static readonly string[] SnapshotBlockVersionIds = ["block.motion.axis.move@1.0.0"];
+    private static readonly string[] RecipeScanModes = ["Automatic", "Manual"];
 
     private readonly HttpClient _client;
     private readonly StationPackageWebApplicationFactory _factory;
@@ -25,14 +26,14 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
     public AutomationProjectWorkspaceApiTests(StationPackageWebApplicationFactory factory)
     {
         _factory = factory;
-        _client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        _client = factory.CreateAuthenticatedClient(new WebApplicationFactoryClientOptions
         {
             AllowAutoRedirect = false
         });
     }
 
     [Fact]
-    public async Task ImportedApplicationPublishesSignedPackageInAnotherProjectWithoutFileRewrite()
+    public async Task ImportedApplicationPublishesDeploysRunsAndTracesInAnotherProjectWithoutFileRewrite()
     {
         var suffix = Guid.NewGuid().ToString("N");
         var sourceProjectId = $"project-portable-source-{suffix}";
@@ -44,6 +45,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
         var processVersionId = $"{processDefinitionId}@1.0.0";
         var configurationSnapshotId = $"configuration-portable-{suffix}";
         var productionLineDefinitionId = $"line-scoped-{suffix}";
+        var snapshotId = $"snapshot-portable-{suffix}";
         var sourceDirectory = ProjectReleaseTestDirectory($"source-{suffix}");
         var targetDirectory = ProjectReleaseTestDirectory($"target-{suffix}");
         try
@@ -96,7 +98,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                 $"/api/automation-projects/{targetProjectId}/snapshots",
                 new
                 {
-                    snapshotId = $"snapshot-portable-{suffix}",
+                    snapshotId,
                     applicationId,
                     productionLineDefinitionId
                 });
@@ -122,6 +124,76 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
             Assert.Contains(
                 Directory.EnumerateFiles(_factory.DeploymentCatalogDirectory, "*.json"),
                 path => File.ReadAllText(path).Contains(targetProjectId, StringComparison.Ordinal));
+
+            var contextPath = $"/api/automation-projects/{targetProjectId}/snapshots/{snapshotId}/production-run-context";
+            using var contextResponse = await _client.GetAsync(contextPath);
+            using var contextBody = await ReadJsonAsync(contextResponse);
+            Assert.Equal(HttpStatusCode.OK, contextResponse.StatusCode);
+            var productModelId = contextBody.RootElement.GetProperty("productModelId").GetString();
+            var identityInputKey = contextBody.RootElement.GetProperty("productModelIdentityInputKey").GetString();
+            var entryStationId = contextBody.RootElement.GetProperty("entryStationId").GetString()
+                ?? throw new InvalidDataException("Portable entry physical Station ID is null.");
+            var entryStationSystemId = contextBody.RootElement.GetProperty("entryStationSystemId").GetString()
+                ?? throw new InvalidDataException("Portable entry Station System ID is null.");
+            var packageContentSha256 = contextBody.RootElement
+                .GetProperty("entryStationPackageContentSha256")
+                .GetString()
+                ?? throw new InvalidDataException("Portable entry Station package SHA-256 is null.");
+
+            var productionUnitId = Guid.NewGuid();
+            var productionRunId = Guid.NewGuid();
+            var expectedActorId = ApiTestAuthentication.StandardActorId;
+            using var registerUnitResponse = await _client.PostAsJsonAsync(
+                "/api/production-units",
+                new
+                {
+                    productionUnitId,
+                    productModelId,
+                    identityKey = identityInputKey,
+                    identityValue = $"PORTABLE-{suffix}",
+                    lotId = (string?)null,
+                    occurredAtUtc = DateTimeOffset.UtcNow
+                });
+            Assert.Equal(HttpStatusCode.Created, registerUnitResponse.StatusCode);
+
+            using var arriveUnitResponse = await _client.PostAsJsonAsync(
+                $"/api/production-units/{productionUnitId:D}/arrivals",
+                new FrozenDeploymentMaterialArrival(
+                    targetProjectId,
+                    applicationId,
+                    snapshotId,
+                    packageContentSha256,
+                    entryStationId,
+                    productionLineDefinitionId,
+                    entryStationSystemId,
+                    DateTimeOffset.UtcNow));
+            Assert.Equal(HttpStatusCode.OK, arriveUnitResponse.StatusCode);
+
+            using var startResponse = await _client.PostAsJsonAsync(
+                "/api/production-runs",
+                new
+                {
+                    projectId = targetProjectId,
+                    projectSnapshotId = snapshotId,
+                    productionRunId = productionRunId.ToString("D"),
+                    productionUnitId = productionUnitId.ToString("D")
+                });
+            Assert.Equal(HttpStatusCode.Accepted, startResponse.StatusCode);
+            using var productionRunBody = await WaitForTerminalProductionRunAsync(_client, productionRunId);
+            Assert.Equal("Completed", productionRunBody.RootElement.GetProperty("executionStatus").GetString());
+            Assert.Equal(targetProjectId, productionRunBody.RootElement.GetProperty("projectId").GetString());
+            Assert.Equal(applicationId, productionRunBody.RootElement.GetProperty("applicationId").GetString());
+            Assert.Equal(
+                expectedActorId,
+                productionRunBody.RootElement.GetProperty("actorId").GetString());
+
+            using var traceBody = await WaitForEngineeringTraceAsync(_client, snapshotId);
+            var traceRow = Assert.Single(
+                traceBody.RootElement.GetProperty("results").GetProperty("items").EnumerateArray());
+            Assert.Equal(productionRunId, traceRow.GetProperty("productionRunId").GetGuid());
+            Assert.Equal(targetProjectId, traceRow.GetProperty("projectId").GetString());
+            Assert.Equal(applicationId, traceRow.GetProperty("applicationId").GetString());
+            Assert.Equal(before, ApplicationFileInventory(targetApplication));
         }
         finally
         {
@@ -264,7 +336,8 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                   "displayName": "Copied Application",
                   "resourceLayoutVersion": 1,
                   "topologyId": null,
-                  "processDefinitionIds": []
+                  "processDefinitionIds": [],
+                  "pluginPackageReferences": []
                 }
                 """);
 
@@ -540,7 +613,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
 
             using (var restartedFactory = new StationPackageWebApplicationFactory(
                        _factory.RootDirectory))
-            using (var restartedClient = restartedFactory.CreateClient(
+            using (var restartedClient = restartedFactory.CreateAuthenticatedClient(
                        new WebApplicationFactoryClientOptions { AllowAutoRedirect = false }))
             {
                 using var openResponse = await restartedClient.PostAsJsonAsync(
@@ -578,7 +651,6 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                         carrierId = restartedCarrierId,
                         carrierTypeId = "carrier-type.cold-restart",
                         capacity = 4,
-                        actorId = "api-test",
                         occurredAtUtc = restartedOccurredAtUtc
                     });
                 Assert.Equal(HttpStatusCode.Created, restartedCarrierRegisterResponse.StatusCode);
@@ -598,14 +670,13 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                             "Restarted entry physical Station ID is null."),
                         productionLineDefinitionId,
                         frozenEntryStationSystemId,
-                        "api-test",
                         restartedOccurredAtUtc.AddMilliseconds(1)));
                 Assert.Equal(HttpStatusCode.OK, restartedCarrierArrivalResponse.StatusCode);
             }
 
             var productionRunId = Guid.NewGuid();
             var productionUnitId = Guid.NewGuid();
-            const string actorId = "api-test";
+            var expectedActorId = ApiTestAuthentication.StandardActorId;
             using var registerUnitResponse = await _client.PostAsJsonAsync(
                 "/api/production-units",
                 new
@@ -615,7 +686,6 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                     identityKey = frozenIdentityInputKey,
                     identityValue = $"UNIT-{suffix}",
                     lotId = (string?)null,
-                    actorId,
                     occurredAtUtc = DateTimeOffset.UtcNow
                 });
             Assert.Equal(HttpStatusCode.Created, registerUnitResponse.StatusCode);
@@ -628,7 +698,6 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                 frozenEntryStationId,
                 productionLineDefinitionId,
                 frozenEntryStationSystemId,
-                actorId,
                 arrivalOccurredAtUtc);
             foreach (var spoofedArrival in new[]
                      {
@@ -660,7 +729,6 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                     carrierId,
                     carrierTypeId = "carrier-type.board-tray",
                     capacity = 8,
-                    actorId,
                     occurredAtUtc = arrivalOccurredAtUtc.AddMilliseconds(-1)
                 });
             Assert.Equal(HttpStatusCode.Created, registerCarrierResponse.StatusCode);
@@ -676,8 +744,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                     projectId,
                     projectSnapshotId = snapshotId,
                     productionRunId = productionRunId.ToString("D"),
-                    productionUnitId = productionUnitId.ToString("D"),
-                    actorId
+                    productionUnitId = productionUnitId.ToString("D")
                 });
             using var startBody = await ReadJsonAsync(startResponse);
             Assert.Equal(HttpStatusCode.Accepted, startResponse.StatusCode);
@@ -695,7 +762,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
             Assert.Equal(
                 $"UNIT-{suffix}",
                 startBody.RootElement.GetProperty("productionUnitIdentity").GetProperty("value").GetString());
-            Assert.Equal(actorId, startBody.RootElement.GetProperty("actorId").GetString());
+            Assert.Equal(expectedActorId, startBody.RootElement.GetProperty("actorId").GetString());
             Assert.Equal(JsonValueKind.Null, startBody.RootElement.GetProperty("lotId").ValueKind);
             Assert.Equal(JsonValueKind.Null, startBody.RootElement.GetProperty("carrierId").ValueKind);
             Assert.Equal("Pending", startBody.RootElement.GetProperty("executionStatus").GetString());
@@ -703,7 +770,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
 
             using var productionRunBody = await WaitForTerminalProductionRunAsync(_client, productionRunId);
             Assert.Equal(productionRunId, productionRunBody.RootElement.GetProperty("productionRunId").GetGuid());
-            Assert.Equal("api-test", productionRunBody.RootElement.GetProperty("actorId").GetString());
+            Assert.Equal(expectedActorId, productionRunBody.RootElement.GetProperty("actorId").GetString());
             Assert.Equal($"UNIT-{suffix}", productionRunBody.RootElement
                 .GetProperty("productionUnitIdentity")
                 .GetProperty("value")
@@ -743,7 +810,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
             Assert.Equal(operation.GetProperty("stationSystemId").GetString(), sessionBody.RootElement
                 .GetProperty("stationSystemId")
                 .GetString());
-            Assert.Equal("api-test", sessionBody.RootElement.GetProperty("actorId").GetString());
+            Assert.Equal(expectedActorId, sessionBody.RootElement.GetProperty("actorId").GetString());
             Assert.Equal($"UNIT-{suffix}", sessionBody.RootElement
                 .GetProperty("productionUnitIdentity")
                 .GetProperty("value")
@@ -854,7 +921,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                 }
 
                 using var restartedFactory = new StationPackageWebApplicationFactory();
-                using var restartedClient = restartedFactory.CreateClient(
+                using var restartedClient = restartedFactory.CreateAuthenticatedClient(
                     new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
                 using var openResponse = await restartedClient.PostAsJsonAsync(
                     "/api/automation-project-workspaces/open",
@@ -1026,6 +1093,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                                     stationSystemId = "station.main",
                                     flowDefinitionId = processDefinitionId,
                                     configurationSnapshotId = firstConfigurationId,
+                                    inputMappings = Array.Empty<object>(),
                                     resources = StationResources("first")
                                 },
                                 new
@@ -1035,6 +1103,7 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                                     stationSystemId = "station.main",
                                     flowDefinitionId = processDefinitionId,
                                     configurationSnapshotId = secondConfigurationId,
+                                    inputMappings = Array.Empty<object>(),
                                     resources = StationResources("second")
                                 }
                             },
@@ -1044,11 +1113,28 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                                 {
                                     transitionId = "transition.first-to-second",
                                     sourceOperationId = "operation.first",
-                                    targetOperationId = "operation.second",
+                                    targetOperationId = (string?)"operation.second",
+                                    terminalDisposition = (string?)null,
+                                    kind = "Sequence"
+                                },
+                                new
+                                {
+                                    transitionId = "transition.second-completed",
+                                    sourceOperationId = "operation.second",
+                                    targetOperationId = (string?)null,
+                                    terminalDisposition = (string?)"Completed",
                                     kind = "Sequence"
                                 }
                             },
-                           lineControllerAuthorizations = Array.Empty<object>()
+                           lineControllerAuthorizations = Array.Empty<object>(),
+                           routeLayout = new
+                           {
+                               operationPositions = new[]
+                               {
+                                   new { operationId = "operation.first", x = 120, y = 80 },
+                                   new { operationId = "operation.second", x = 400, y = 80 }
+                               }
+                           }
                        }))
             {
                 Assert.Equal(HttpStatusCode.OK, replaceLineResponse.StatusCode);
@@ -1255,6 +1341,116 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
         Assert.Equal(HttpStatusCode.Conflict, secondResponse.StatusCode);
     }
 
+    [Fact]
+    public async Task TypedRecipeRequiresValidatedApprovedReleasedLifecycle()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var projectId = $"project-typed-recipe-{suffix}";
+        var applicationId = $"application-typed-recipe-{suffix}";
+        var recipeId = $"recipe-typed-{suffix}";
+        var projectDirectory = ProjectReleaseTestDirectory($"typed-recipe-{suffix}");
+
+        try
+        {
+            using var createWorkspace = await _client.PostAsJsonAsync(
+                "/api/automation-project-workspaces",
+                new
+                {
+                    projectId,
+                    displayName = "Typed Recipe Project",
+                    projectPath = projectDirectory,
+                    defaultApplicationId = applicationId,
+                    defaultApplicationName = "Test Application"
+                });
+            Assert.Equal(HttpStatusCode.Created, createWorkspace.StatusCode);
+
+            var engineeringBase =
+                $"/api/automation-projects/{projectId}/applications/{applicationId}/engineering";
+            using var createRecipe = await _client.PostAsJsonAsync(
+                $"{engineeringBase}/recipes",
+                new
+                {
+                    recipeId,
+                    versionId = $"{recipeId}@1.0.0",
+                    displayName = "Typed Functional Test",
+                    parameters = new object[]
+                    {
+                        new
+                        {
+                            key = "voltage.target",
+                            value = "24.5000",
+                            type = "Decimal",
+                            unit = "V",
+                            minimum = 20m,
+                            maximum = 28m,
+                            required = true
+                        },
+                        new
+                        {
+                            key = "scan.mode",
+                            value = "Automatic",
+                            type = "Enum",
+                            allowedValues = RecipeScanModes,
+                            required = true
+                        }
+                    }
+                });
+            using var createdDocument = await ReadJsonAsync(createRecipe);
+            Assert.Equal(HttpStatusCode.Created, createRecipe.StatusCode);
+            var voltageParameter = createdDocument.RootElement
+                .GetProperty("parameters")
+                .EnumerateArray()
+                .Single(parameter => string.Equals(
+                    parameter.GetProperty("key").GetString(),
+                    "voltage.target",
+                    StringComparison.Ordinal));
+            Assert.Equal(
+                "24.5",
+                voltageParameter.GetProperty("value").GetString());
+            Assert.Equal(
+                "Decimal",
+                voltageParameter.GetProperty("type").GetString());
+
+            using var compatibilityPublish = await _client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/publish",
+                content: null);
+            using var prematureRelease = await _client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/release",
+                content: null);
+            Assert.Equal(HttpStatusCode.Conflict, compatibilityPublish.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, prematureRelease.StatusCode);
+
+            using var validate = await _client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/validate",
+                content: null);
+            using var approve = await _client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/approve",
+                content: null);
+            using var release = await _client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/release",
+                content: null);
+            using var releaseDocument = await ReadJsonAsync(release);
+
+            Assert.Equal(HttpStatusCode.OK, validate.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, approve.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, release.StatusCode);
+            Assert.Equal("Released", releaseDocument.RootElement.GetProperty("status").GetString());
+            Assert.False(string.IsNullOrWhiteSpace(
+                releaseDocument.RootElement.GetProperty("approvedBy").GetString()));
+
+            using var retire = await _client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/retire",
+                content: null);
+            using var retiredDocument = await ReadJsonAsync(retire);
+            Assert.Equal(HttpStatusCode.OK, retire.StatusCode);
+            Assert.Equal("Retired", retiredDocument.RootElement.GetProperty("status").GetString());
+        }
+        finally
+        {
+            DeleteProjectDirectory(projectDirectory);
+        }
+    }
+
     private async Task CreateScopedReleaseSourceAsync(
         string projectDirectory,
         string projectId,
@@ -1401,11 +1597,29 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                             stationSystemId = "station.main",
                             flowDefinitionId = processDefinitionId,
                             configurationSnapshotId,
+                            inputMappings = Array.Empty<object>(),
                             resources = StationResources("main")
                         }
                     },
-                    transitions = Array.Empty<object>(),
-                    lineControllerAuthorizations = Array.Empty<object>()
+                    transitions = new[]
+                    {
+                        new
+                        {
+                            transitionId = "operation.main-completed",
+                            sourceOperationId = "operation.main",
+                            targetOperationId = (string?)null,
+                            terminalDisposition = "Completed",
+                            kind = "Sequence"
+                        }
+                    },
+                    lineControllerAuthorizations = Array.Empty<object>(),
+                    routeLayout = new
+                    {
+                        operationPositions = new[]
+                        {
+                            new { operationId = "operation.main", x = 120, y = 80 }
+                        }
+                    }
                 });
             Assert.Equal(HttpStatusCode.Created, createProductionLineResponse.StatusCode);
         }
@@ -1454,8 +1668,14 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                 displayName = "Release Recipe",
                 parameters = new[] { new { key = "scan.mode", value = "release" } }
             });
-        using var publishRecipeResponse = await _client.PostAsync(
-            $"{engineeringBase}/recipes/{recipeId}/publish",
+        using var validateRecipeResponse = await _client.PostAsync(
+            $"{engineeringBase}/recipes/{recipeId}/validate",
+            content: null);
+        using var approveRecipeResponse = await _client.PostAsync(
+            $"{engineeringBase}/recipes/{recipeId}/approve",
+            content: null);
+        using var releaseRecipeResponse = await _client.PostAsync(
+            $"{engineeringBase}/recipes/{recipeId}/release",
             content: null);
         using var createStationResponse = await _client.PostAsJsonAsync(
             $"{engineeringBase}/station-profiles",
@@ -1496,7 +1716,9 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
 
         Assert.Equal(HttpStatusCode.Created, createWorkspaceResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, createRecipeResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, publishRecipeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, validateRecipeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, approveRecipeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, releaseRecipeResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, createStationResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, createProjectResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, publishSnapshotResponse.StatusCode);
@@ -1765,7 +1987,6 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
         string StationId,
         string LineId,
         string StationSystemId,
-        string ActorId,
         DateTimeOffset OccurredAtUtc);
 
     private sealed class FixedStationDeploymentResolver(StationDeploymentRoute route) :

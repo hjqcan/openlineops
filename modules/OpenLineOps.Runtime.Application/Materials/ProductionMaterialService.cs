@@ -790,7 +790,7 @@ public sealed class ProductionMaterialService
                     ProductionMaterialTimelineEntry.Location(
                         command.EvidenceId,
                         command.Material,
-                        entry.Aggregate.ActiveProductionRunId,
+                        ProductionUnitRunContext(entry.Aggregate),
                         null,
                         command.StationLocation,
                         command.ActorId,
@@ -908,7 +908,7 @@ public sealed class ProductionMaterialService
                 slots: slotUpdate is null ? null : [slotUpdate],
                 timeline: CreateTransferTimeline(
                     MaterialReference.ForProductionUnit(unit.Aggregate.Id),
-                    unit.Aggregate.ActiveProductionRunId,
+                    ProductionUnitRunContext(unit.Aggregate),
                     expectedLocation,
                     destination,
                     occurredAtUtc,
@@ -983,7 +983,7 @@ public sealed class ProductionMaterialService
                     ProductionMaterialTimelineEntry.Disposition(
                         Guid.NewGuid(),
                         entry.Aggregate.Id,
-                        entry.Aggregate.ActiveProductionRunId,
+                        ProductionUnitRunContext(entry.Aggregate),
                         previousDisposition,
                         entry.Aggregate.Disposition,
                         entry.Aggregate.DispositionReason,
@@ -1070,7 +1070,12 @@ public sealed class ProductionMaterialService
     }
 
     private static ProductionRunId? MaterialProductionRunId(MaterialState material) =>
-        material.ProductionUnitFence?.Aggregate.ActiveProductionRunId;
+        material.ProductionUnitFence is null
+            ? null
+            : ProductionUnitRunContext(material.ProductionUnitFence.Aggregate);
+
+    private static ProductionRunId? ProductionUnitRunContext(ProductionUnit unit) =>
+        unit.ActiveProductionRunId ?? unit.LastProductionRunId;
 
     private async ValueTask<MaterialState> GetMaterialStateAsync(
         MaterialReference material,

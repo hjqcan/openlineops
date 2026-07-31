@@ -19,6 +19,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         IEnumerable<OperationDefinition> operations,
         IEnumerable<RouteTransition> transitions,
         IEnumerable<LineControllerAuthorization> lineControllerAuthorizations,
+        ProductionRouteLayout routeLayout,
         DateTimeOffset createdAtUtc,
         DateTimeOffset updatedAtUtc)
         : base(id ?? throw new ArgumentNullException(nameof(id)))
@@ -38,6 +39,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
                 nameof(lineControllerAuthorizations))
             .OrderBy(authorization => authorization.Id.Value, StringComparer.Ordinal)
             .ToList();
+        RouteLayout = routeLayout ?? throw new ArgumentNullException(nameof(routeLayout));
         EnsureValidComposition();
         if (createdAtUtc.Offset != TimeSpan.Zero || updatedAtUtc.Offset != TimeSpan.Zero)
         {
@@ -68,6 +70,8 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
     public IReadOnlyCollection<LineControllerAuthorization> LineControllerAuthorizations =>
         _lineControllerAuthorizations.AsReadOnly();
 
+    public ProductionRouteLayout RouteLayout { get; }
+
     public DateTimeOffset CreatedAtUtc { get; }
 
     public DateTimeOffset UpdatedAtUtc { get; }
@@ -81,6 +85,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         IEnumerable<OperationDefinition> operations,
         IEnumerable<RouteTransition> transitions,
         IEnumerable<LineControllerAuthorization> lineControllerAuthorizations,
+        ProductionRouteLayout routeLayout,
         DateTimeOffset createdAtUtc)
     {
         return Restore(
@@ -92,6 +97,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
             operations,
             transitions,
             lineControllerAuthorizations,
+            routeLayout,
             createdAtUtc,
             createdAtUtc);
     }
@@ -105,6 +111,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         IEnumerable<OperationDefinition> operations,
         IEnumerable<RouteTransition> transitions,
         IEnumerable<LineControllerAuthorization> lineControllerAuthorizations,
+        ProductionRouteLayout routeLayout,
         DateTimeOffset createdAtUtc,
         DateTimeOffset updatedAtUtc)
     {
@@ -121,6 +128,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
             operations,
             transitions,
             lineControllerAuthorizations,
+            routeLayout,
             createdAtUtc,
             updatedAtUtc);
     }
@@ -137,6 +145,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         EnsureUnique(
             _lineControllerAuthorizations.Select(authorization => authorization.Id.Value),
             "Line Controller authorization ids");
+        EnsureRouteLayoutMatchesOperations();
         if (_operations.All(operation => operation.Id != EntryOperationId))
         {
             throw new ArgumentException(
@@ -179,10 +188,11 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         foreach (var transition in _transitions)
         {
             if (!operationIds.Contains(transition.SourceOperationId)
-                || !operationIds.Contains(transition.TargetOperationId))
+                || transition.TargetOperationId is { } targetOperationId
+                    && !operationIds.Contains(targetOperationId))
             {
                 throw new ArgumentException(
-                    $"Route transition {transition.Id} must reference existing source and target operations.");
+                    $"Route transition {transition.Id} must reference existing Operations.");
             }
         }
 
@@ -190,6 +200,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
             .GroupBy(transition => (
                 transition.SourceOperationId,
                 transition.TargetOperationId,
+                transition.TerminalDisposition,
                 transition.Kind))
             .FirstOrDefault(group => group.Count() > 1);
         if (duplicateEdge is not null)
@@ -200,7 +211,10 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         var forwardTransitions = _transitions
             .Where(transition => transition.Kind != RouteTransitionKind.Rework)
             .ToArray();
-        if (forwardTransitions.Any(transition => transition.TargetOperationId == EntryOperationId))
+        var forwardOperationTransitions = forwardTransitions
+            .Where(transition => transition.TargetOperationId is not null)
+            .ToArray();
+        if (forwardOperationTransitions.Any(transition => transition.TargetOperationId == EntryOperationId))
         {
             throw new ArgumentException(
                 "Production line entry operation cannot have an incoming forward transition.");
@@ -208,10 +222,107 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
 
         EnsureOutgoingShapes();
         EnsureAllOperationsReachable();
-        EnsureForwardRouteIsAcyclic(forwardTransitions);
+        EnsureForwardRouteIsAcyclic(forwardOperationTransitions);
         EnsureEveryOperationCanComplete(forwardTransitions);
-        EnsureReworkTransitionsAreBackwardAndBounded(forwardTransitions);
-        EnsureParallelForkJoinGroups(forwardTransitions);
+        EnsureReworkTransitionsAreBackwardAndBounded(forwardOperationTransitions);
+        EnsureParallelForkJoinGroups(forwardOperationTransitions);
+        EnsureOperationInputMappings(forwardOperationTransitions);
+    }
+
+    private void EnsureOperationInputMappings(
+        IReadOnlyCollection<RouteTransition> forwardTransitions)
+    {
+        var operationIds = _operations.Select(static operation => operation.Id).ToHashSet();
+        var incoming = forwardTransitions.ToLookup(
+            static transition => transition.TargetOperationId!);
+        var outgoing = forwardTransitions.ToLookup(
+            static transition => transition.SourceOperationId);
+        var indegrees = _operations.ToDictionary(
+            static operation => operation.Id,
+            operation => incoming[operation.Id].Count());
+        var pending = new Queue<OperationDefinitionId>(
+            indegrees.Where(static pair => pair.Value == 0).Select(static pair => pair.Key));
+        var definiteBefore = _operations.ToDictionary(
+            static operation => operation.Id,
+            static _ => new HashSet<OperationDefinitionId>());
+        while (pending.TryDequeue(out var operationId))
+        {
+            var incomingTransitions = incoming[operationId].ToArray();
+            if (incomingTransitions.Length > 0)
+            {
+                var predecessorSets = incomingTransitions.Select(transition =>
+                {
+                    var completed = new HashSet<OperationDefinitionId>(
+                        definiteBefore[transition.SourceOperationId]);
+                    completed.Add(transition.SourceOperationId);
+                    return completed;
+                }).ToArray();
+                var isAndJoin = incomingTransitions.Length >= 2
+                    && incomingTransitions.All(static transition =>
+                        transition.Kind == RouteTransitionKind.ParallelJoin)
+                    && incomingTransitions.Select(static transition => transition.ParallelGroupId)
+                        .Distinct(StringComparer.Ordinal).Count() == 1;
+                var guaranteed = new HashSet<OperationDefinitionId>(predecessorSets[0]);
+                foreach (var predecessorSet in predecessorSets.Skip(1))
+                {
+                    if (isAndJoin)
+                    {
+                        guaranteed.UnionWith(predecessorSet);
+                    }
+                    else
+                    {
+                        guaranteed.IntersectWith(predecessorSet);
+                    }
+                }
+
+                definiteBefore[operationId] = guaranteed;
+            }
+
+            foreach (var transition in outgoing[operationId])
+            {
+                indegrees[transition.TargetOperationId!]--;
+                if (indegrees[transition.TargetOperationId!] == 0)
+                {
+                    pending.Enqueue(transition.TargetOperationId!);
+                }
+            }
+        }
+
+        foreach (var operation in _operations)
+        {
+            foreach (var mapping in operation.InputMappings)
+            {
+                if (!operationIds.Contains(mapping.SourceOperationId))
+                {
+                    throw new ArgumentException(
+                        $"Operation {operation.Id} input {mapping.TargetInputKey} references missing source Operation {mapping.SourceOperationId}.");
+                }
+
+                if (mapping.SourceOperationId == operation.Id
+                    || !definiteBefore[operation.Id].Contains(mapping.SourceOperationId))
+                {
+                    throw new ArgumentException(
+                        $"Operation {operation.Id} input {mapping.TargetInputKey} source {mapping.SourceOperationId} must definitely complete first; conditional bypasses and sibling-branch reads before an AND join are not allowed.");
+                }
+            }
+        }
+    }
+
+    private void EnsureRouteLayoutMatchesOperations()
+    {
+        var operationIds = _operations
+            .Select(operation => operation.Id.Value)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var positionIds = RouteLayout.OperationPositions
+            .Select(position => position.OperationId.Value)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (!operationIds.SequenceEqual(positionIds, StringComparer.Ordinal))
+        {
+            throw new ArgumentException(
+                "Production route layout must contain exactly one position for every Operation.");
+        }
     }
 
     private void EnsureOutgoingShapes()
@@ -223,7 +334,8 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
                 .ToArray();
             if (outgoing.Length == 0)
             {
-                continue;
+                throw new ArgumentException(
+                    $"Operation {operation.Id} requires an explicit route to an Operation or terminal disposition.");
             }
 
             if (outgoing.Length == 1
@@ -233,33 +345,69 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
                 continue;
             }
 
-            if (outgoing.All(transition => transition.Kind is
-                    RouteTransitionKind.Judgement or RouteTransitionKind.Rework))
+            var judgementRoutes = outgoing.Where(transition => transition.Kind is
+                RouteTransitionKind.Judgement or RouteTransitionKind.Rework).ToArray();
+            var sequenceFallbacks = outgoing
+                .Where(transition => transition.Kind == RouteTransitionKind.Sequence)
+                .ToArray();
+            if (judgementRoutes.Length > 0
+                && judgementRoutes.Length + sequenceFallbacks.Length == outgoing.Length)
             {
-                var judgements = outgoing.Select(transition => transition.RequiredJudgement!.Value).ToArray();
-                if (judgements.Distinct().Count() != judgements.Length)
+                if (sequenceFallbacks.Length > 1
+                    || judgementRoutes
+                        .Where(transition => transition.Kind == RouteTransitionKind.Judgement)
+                        .GroupBy(transition => transition.RequiredJudgement)
+                        .Any(group => group.Count() > 1)
+                    || judgementRoutes
+                        .Where(transition => transition.Kind == RouteTransitionKind.Rework)
+                        .GroupBy(transition => transition.RequiredJudgement)
+                        .Any(group => group.Count() > 1))
                 {
                     throw new ArgumentException(
-                        $"Operation {operation.Id} route judgements must be unique.");
+                        $"Operation {operation.Id} route judgements and bounded rework routes must be deterministic.");
+                }
+
+                var judgementFallbacks = judgementRoutes
+                    .Where(transition => transition.Kind == RouteTransitionKind.Judgement)
+                    .Select(transition => transition.RequiredJudgement!.Value)
+                    .ToHashSet();
+                if (judgementRoutes.Any(transition => transition.Kind == RouteTransitionKind.Rework
+                    && !judgementFallbacks.Contains(transition.RequiredJudgement!.Value)))
+                {
+                    throw new ArgumentException(
+                        $"Operation {operation.Id} bounded rework requires an explicit judgement fallback after its traversal limit.");
+                }
+
+                if (sequenceFallbacks.Length == 0
+                    && Enum.GetValues<RouteJudgement>().Any(judgement =>
+                        !judgementFallbacks.Contains(judgement)))
+                {
+                    throw new ArgumentException(
+                        $"Operation {operation.Id} judgement routes require an explicit sequence fallback or one branch for every judgement.");
                 }
 
                 continue;
             }
 
-            if (outgoing.All(transition => transition.Kind == RouteTransitionKind.Condition))
+            var conditions = outgoing
+                .Where(transition => transition.Kind == RouteTransitionKind.Condition)
+                .ToArray();
+            if (conditions.Length > 0
+                && conditions.Length + sequenceFallbacks.Length == outgoing.Length)
             {
-                var outputKeys = outgoing
+                var outputKeys = conditions
                     .Select(transition => transition.OutputCondition!.OutputKey)
                     .Distinct(StringComparer.Ordinal)
                     .ToArray();
-                var expectedValues = outgoing
+                var expectedValues = conditions
                     .Select(transition => transition.OutputCondition!.ExpectedValue)
                     .ToArray();
                 if (outputKeys.Length != 1
-                    || expectedValues.Distinct().Count() != expectedValues.Length)
+                    || expectedValues.Distinct().Count() != expectedValues.Length
+                    || sequenceFallbacks.Length != 1)
                 {
                     throw new ArgumentException(
-                        $"Operation {operation.Id} condition routes must use one output key and unique typed expected values.");
+                        $"Operation {operation.Id} condition routes must use one output key, unique typed expected values, and one explicit sequence fallback.");
                 }
 
                 continue;
@@ -274,7 +422,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
             }
 
             throw new ArgumentException(
-                $"Operation {operation.Id} must use exactly one sequence/join edge, one unique judgement or typed condition branch set, or one parallel fork group.");
+                $"Operation {operation.Id} must use one deterministic sequence/join route, judgement routes, typed conditions with fallback, or one parallel fork group.");
         }
     }
 
@@ -294,7 +442,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         var indegrees = _operations.ToDictionary(operation => operation.Id, _ => 0);
         foreach (var transition in forwardTransitions)
         {
-            indegrees[transition.TargetOperationId]++;
+            indegrees[transition.TargetOperationId!]++;
         }
 
         var queue = new Queue<OperationDefinitionId>(
@@ -306,10 +454,10 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
             foreach (var transition in forwardTransitions.Where(candidate =>
                          candidate.SourceOperationId == operationId))
             {
-                indegrees[transition.TargetOperationId]--;
-                if (indegrees[transition.TargetOperationId] == 0)
+                indegrees[transition.TargetOperationId!]--;
+                if (indegrees[transition.TargetOperationId!] == 0)
                 {
-                    queue.Enqueue(transition.TargetOperationId);
+                    queue.Enqueue(transition.TargetOperationId!);
                 }
             }
         }
@@ -324,14 +472,14 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
     private void EnsureEveryOperationCanComplete(
         IReadOnlyCollection<RouteTransition> forwardTransitions)
     {
-        var terminals = _operations
-            .Where(operation => forwardTransitions.All(transition =>
-                transition.SourceOperationId != operation.Id))
-            .Select(operation => operation.Id)
+        var terminals = forwardTransitions
+            .Where(transition => transition.TerminalDisposition is not null)
+            .Select(transition => transition.SourceOperationId)
+            .Distinct()
             .ToArray();
         if (terminals.Length == 0)
         {
-            throw new ArgumentException("Production line route requires at least one terminal operation.");
+            throw new ArgumentException("Production line route requires at least one explicit terminal disposition.");
         }
 
         var completable = new HashSet<OperationDefinitionId>(terminals);
@@ -362,7 +510,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
         foreach (var rework in _transitions.Where(transition =>
                      transition.Kind == RouteTransitionKind.Rework))
         {
-            var reachableFromTarget = TraverseFrom(rework.TargetOperationId, forwardTransitions);
+            var reachableFromTarget = TraverseFrom(rework.TargetOperationId!, forwardTransitions);
             if (!reachableFromTarget.Contains(rework.SourceOperationId))
             {
                 throw new ArgumentException(
@@ -396,7 +544,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
             }
 
             var forkSource = forks[0].SourceOperationId;
-            var joinTarget = joins[0].TargetOperationId;
+            var joinTarget = joins[0].TargetOperationId!;
             if (forkSource == joinTarget)
             {
                 throw new ArgumentException(
@@ -409,7 +557,7 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
             foreach (var fork in forks)
             {
                 var branch = TraverseUntil(
-                    fork.TargetOperationId,
+                    fork.TargetOperationId!,
                     joinTarget,
                     forwardTransitions);
                 var branchJoinSources = branch.Where(joinSources.Contains).ToArray();
@@ -433,11 +581,13 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
                 }
 
                 var branchTerminal = branch.FirstOrDefault(operationId =>
-                    forwardTransitions.All(transition => transition.SourceOperationId != operationId));
+                    _transitions.Any(transition =>
+                        transition.SourceOperationId == operationId
+                        && transition.TerminalDisposition is not null));
                 if (branchTerminal is not null)
                 {
                     throw new ArgumentException(
-                        $"Parallel group {group.Key} branch {fork.TargetOperationId} can terminate before its join.");
+                        $"Parallel group {group.Key} branch {fork.TargetOperationId} can reach a terminal disposition before its join.");
                 }
 
                 if (branchSets.Any(existing => existing.Overlaps(branch)))
@@ -522,7 +672,10 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
 
             foreach (var transition in edges[operationId])
             {
-                queue.Enqueue(transition.TargetOperationId);
+                if (transition.TargetOperationId is { } targetOperationId)
+                {
+                    queue.Enqueue(targetOperationId);
+                }
             }
         }
 
@@ -547,7 +700,10 @@ public sealed class ProductionLineDefinition : AggregateRoot<ProductionLineDefin
 
             foreach (var transition in edges[operationId])
             {
-                queue.Enqueue(transition.TargetOperationId);
+                if (transition.TargetOperationId is { } targetOperationId)
+                {
+                    queue.Enqueue(targetOperationId);
+                }
             }
         }
 

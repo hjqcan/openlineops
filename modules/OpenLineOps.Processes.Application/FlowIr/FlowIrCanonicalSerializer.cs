@@ -90,6 +90,12 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         return document with
         {
             Nodes = document.Nodes
+                .Select(node => node with
+                {
+                    Actions = node.Actions
+                        .Select(NormalizeAction)
+                        .ToImmutableArray()
+                })
                 .OrderBy(node => node.NodeId, StringComparer.Ordinal)
                 .ToImmutableArray(),
             Transitions = document.Transitions
@@ -98,6 +104,30 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
             BlockDependencies = document.BlockDependencies
                 .OrderBy(dependency => dependency.BlockType, StringComparer.Ordinal)
                 .ToImmutableArray()
+        };
+    }
+
+    private static FlowIrAction NormalizeAction(FlowIrAction action)
+    {
+        if (action.OperationalPolicy is null)
+        {
+            return action;
+        }
+
+        return action with
+        {
+            OperationalPolicy = action.OperationalPolicy with
+            {
+                ResourceLocks = action.OperationalPolicy.ResourceLocks
+                    .OrderBy(resource => resource.ResourceId, StringComparer.Ordinal)
+                    .ToImmutableArray(),
+                EvidenceRequirements = action.OperationalPolicy.EvidenceRequirements
+                    .OrderBy(requirement => requirement.EvidenceKind, StringComparer.Ordinal)
+                    .ToImmutableArray(),
+                AllowedStationModes = action.OperationalPolicy.AllowedStationModes
+                    .OrderBy(mode => mode)
+                    .ToImmutableArray()
+            }
         };
     }
 
@@ -338,12 +368,17 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
 
             if (compiledAction.Execution.TimeoutMilliseconds <= 0
                 || compiledAction.Execution.TimeoutMilliseconds > TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerMillisecond
-                || compiledAction.Execution.RetryLimit != 0
+                || compiledAction.Execution.RetryLimit is < 0 or > 10
                 || compiledAction.Execution.CancellationMode != FlowIrCancellationMode.Cooperative)
             {
                 return Invalid($"Action {compiledAction.ActionId} execution policy is not supported by the Flow IR contract.");
             }
 
+            var operationalError = ValidateOperationalPolicy(compiledAction);
+            if (operationalError is not null)
+            {
+                return operationalError;
+            }
         }
 
         if (node.Kind == FlowIrNodeKind.Blockly)
@@ -424,6 +459,92 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
             {
                 return sourceError;
             }
+        }
+
+        return null;
+    }
+
+    private static ApplicationError? ValidateOperationalPolicy(FlowIrAction action)
+    {
+        var policy = action.OperationalPolicy;
+        if (policy is null)
+        {
+            return action.Execution.RetryLimit == 0
+                ? null
+                : Invalid(
+                    $"Legacy action {action.ActionId} cannot declare retries without an operational policy.");
+        }
+
+        if (!Enum.IsDefined(policy.IdempotencyClass)
+            || !Enum.IsDefined(policy.RecoveryPolicy)
+            || !Enum.IsDefined(policy.FailurePolicy)
+            || policy.ResourceLocks.IsDefault
+            || policy.EvidenceRequirements.IsDefault
+            || policy.AllowedStationModes.IsDefaultOrEmpty)
+        {
+            return Invalid($"Action {action.ActionId} operational policy is incomplete.");
+        }
+
+        if (policy.RecoveryPolicy == FlowIrRecoveryPolicy.AutomaticReplay
+            && policy.IdempotencyClass != FlowIrIdempotencyClass.Idempotent)
+        {
+            return Invalid(
+                $"Action {action.ActionId} cannot automatically replay unless it is idempotent.");
+        }
+
+        if (policy.IdempotencyClass == FlowIrIdempotencyClass.NonIdempotent
+            && policy.RecoveryPolicy is not FlowIrRecoveryPolicy.ManualAuthorization
+                and not FlowIrRecoveryPolicy.NeverReplay)
+        {
+            return Invalid(
+                $"Non-idempotent action {action.ActionId} requires manual authorization or no replay.");
+        }
+
+        if ((policy.FailurePolicy == FlowIrFailurePolicy.Retry)
+            != (action.Execution.RetryLimit > 0))
+        {
+            return Invalid(
+                $"Action {action.ActionId} retry limit and failure policy must be declared together.");
+        }
+
+        if (policy.FailurePolicy == FlowIrFailurePolicy.Retry
+            && policy.IdempotencyClass != FlowIrIdempotencyClass.Idempotent)
+        {
+            return Invalid(
+                $"Action {action.ActionId} cannot retry unless it is idempotent.");
+        }
+
+        var resourceIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var resource in policy.ResourceLocks)
+        {
+            if (resource is null
+                || !IsCanonicalValue(resource.ResourceId)
+                || !Enum.IsDefined(resource.Mode)
+                || !resourceIds.Add(resource.ResourceId))
+            {
+                return Invalid($"Action {action.ActionId} contains invalid or duplicate resource locks.");
+            }
+        }
+
+        var evidenceKinds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var evidence in policy.EvidenceRequirements)
+        {
+            if (evidence is null
+                || !IsCanonicalValue(evidence.EvidenceKind)
+                || evidence.MinimumCount <= 0
+                || !evidenceKinds.Add(evidence.EvidenceKind))
+            {
+                return Invalid(
+                    $"Action {action.ActionId} contains invalid or duplicate evidence requirements.");
+            }
+        }
+
+        if (policy.AllowedStationModes.Any(mode => !Enum.IsDefined(mode))
+            || policy.AllowedStationModes.Distinct().Count()
+            != policy.AllowedStationModes.Length)
+        {
+            return Invalid(
+                $"Action {action.ActionId} contains invalid or duplicate allowed station modes.");
         }
 
         return null;
@@ -583,6 +704,12 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
         writer.WriteNumber("retryLimit", action.Execution.RetryLimit);
         writer.WriteString("cancellationMode", CancellationMode(action.Execution.CancellationMode));
         writer.WriteEndObject();
+        if (action.OperationalPolicy is not null)
+        {
+            writer.WritePropertyName("operationalPolicy");
+            WriteOperationalPolicy(writer, action.OperationalPolicy);
+        }
+
         writer.WritePropertyName("pythonScript");
         if (action.PythonScript is null)
         {
@@ -595,6 +722,47 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
 
         writer.WritePropertyName("source");
         WriteSource(writer, action.Source);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteOperationalPolicy(
+        Utf8JsonWriter writer,
+        FlowIrOperationalPolicy policy)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("idempotencyClass", IdempotencyClass(policy.IdempotencyClass));
+        writer.WriteString("recoveryPolicy", RecoveryPolicy(policy.RecoveryPolicy));
+        writer.WriteString("failurePolicy", FailurePolicy(policy.FailurePolicy));
+        writer.WritePropertyName("resourceLocks");
+        writer.WriteStartArray();
+        foreach (var resource in policy.ResourceLocks)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("resourceId", resource.ResourceId);
+            writer.WriteString("mode", ResourceLockMode(resource.Mode));
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
+        writer.WritePropertyName("evidenceRequirements");
+        writer.WriteStartArray();
+        foreach (var evidence in policy.EvidenceRequirements)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("evidenceKind", evidence.EvidenceKind);
+            writer.WriteNumber("minimumCount", evidence.MinimumCount);
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
+        writer.WritePropertyName("allowedStationModes");
+        writer.WriteStartArray();
+        foreach (var mode in policy.AllowedStationModes)
+        {
+            writer.WriteStringValue(StationMode(mode));
+        }
+
+        writer.WriteEndArray();
         writer.WriteEndObject();
     }
 
@@ -687,6 +855,57 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
     {
         FlowIrCancellationMode.Cooperative => "cooperative",
         _ => throw new InvalidOperationException($"Unsupported Flow IR cancellation mode {value}.")
+    };
+
+    private static string IdempotencyClass(FlowIrIdempotencyClass value) => value switch
+    {
+        FlowIrIdempotencyClass.Idempotent => "idempotent",
+        FlowIrIdempotencyClass.Conditional => "conditional",
+        FlowIrIdempotencyClass.NonIdempotent => "nonIdempotent",
+        _ => throw new InvalidOperationException(
+            $"Unsupported Flow IR idempotency class {value}.")
+    };
+
+    private static string RecoveryPolicy(FlowIrRecoveryPolicy value) => value switch
+    {
+        FlowIrRecoveryPolicy.AutomaticReplay => "automaticReplay",
+        FlowIrRecoveryPolicy.ResumeFromCheckpoint => "resumeFromCheckpoint",
+        FlowIrRecoveryPolicy.ManualAuthorization => "manualAuthorization",
+        FlowIrRecoveryPolicy.NeverReplay => "neverReplay",
+        _ => throw new InvalidOperationException(
+            $"Unsupported Flow IR recovery policy {value}.")
+    };
+
+    private static string FailurePolicy(FlowIrFailurePolicy value) => value switch
+    {
+        FlowIrFailurePolicy.Continue => "continue",
+        FlowIrFailurePolicy.Skip => "skip",
+        FlowIrFailurePolicy.Retry => "retry",
+        FlowIrFailurePolicy.Rework => "rework",
+        FlowIrFailurePolicy.ManualDisposition => "manualDisposition",
+        FlowIrFailurePolicy.Hold => "hold",
+        FlowIrFailurePolicy.Terminate => "terminate",
+        _ => throw new InvalidOperationException(
+            $"Unsupported Flow IR failure policy {value}.")
+    };
+
+    private static string ResourceLockMode(FlowIrResourceLockMode value) => value switch
+    {
+        FlowIrResourceLockMode.Shared => "shared",
+        FlowIrResourceLockMode.Exclusive => "exclusive",
+        _ => throw new InvalidOperationException(
+            $"Unsupported Flow IR resource lock mode {value}.")
+    };
+
+    private static string StationMode(FlowIrStationMode value) => value switch
+    {
+        FlowIrStationMode.Automatic => "automatic",
+        FlowIrStationMode.Manual => "manual",
+        FlowIrStationMode.Setup => "setup",
+        FlowIrStationMode.Maintenance => "maintenance",
+        FlowIrStationMode.Simulation => "simulation",
+        _ => throw new InvalidOperationException(
+            $"Unsupported Flow IR station mode {value}.")
     };
 
     private static string LoopPolicy(FlowIrLoopPolicy value) => value switch

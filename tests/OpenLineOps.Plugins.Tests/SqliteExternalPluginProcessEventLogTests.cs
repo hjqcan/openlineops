@@ -1,169 +1,134 @@
-using System.Globalization;
+using Microsoft.Data.Sqlite;
 using OpenLineOps.Plugins.Infrastructure.Lifecycle;
 
 namespace OpenLineOps.Plugins.Tests;
 
 public sealed class SqliteExternalPluginProcessEventLogTests
 {
+    private const string ProjectId = "project.alpha";
+    private const string ApplicationId = "application.alpha";
+    private static readonly string PackageHash = new('a', 64);
+
     [Fact]
-    public async Task RecordPersistsProcessEventsForNewLogInstance()
+    public async Task ListAsyncPersistsAndReturnsOnlyExactScopedPackageEvents()
     {
-        using var database = TemporarySqliteDatabase.Create();
-        var firstEventTime = DateTimeOffset.Parse("2026-06-29T08:00:00Z", CultureInfo.InvariantCulture);
-        var secondEventTime = DateTimeOffset.Parse("2026-06-29T08:00:01Z", CultureInfo.InvariantCulture);
+        using var database = TestDatabase.Create();
+        using var log = new SqliteExternalPluginProcessEventLog(database.ConnectionString);
+        var occurred = new DateTimeOffset(2026, 7, 15, 1, 2, 3, TimeSpan.Zero);
+        log.Record(Event(ProjectId, ApplicationId, PackageHash, "plugin.alpha", occurred));
+        log.Record(Event("project.other", ApplicationId, PackageHash, "plugin.alpha", occurred));
+        log.Record(Event(ProjectId, "application.other", PackageHash, "plugin.alpha", occurred));
+        log.Record(Event(ProjectId, ApplicationId, new string('b', 64), "plugin.alpha", occurred));
 
-        using (var log = new SqliteExternalPluginProcessEventLog(database.ConnectionString))
-        {
-            log.Record(new ExternalPluginProcessEvent(
-                ExternalPluginProcessEventKind.TrustRejected,
-                "plugin-alpha",
-                "Plugin package trust policy rejected activation.",
-                firstEventTime,
-                "sha256-not-configured"));
-            log.Record(new ExternalPluginProcessEvent(
-                ExternalPluginProcessEventKind.CommandTimedOut,
-                "plugin-beta",
-                "External plugin process 'plugin-beta' command timed out after 50ms.",
-                secondEventTime));
-        }
+        var events = await log.ListAsync(Query());
 
-        using var restartedLog = new SqliteExternalPluginProcessEventLog(database.ConnectionString);
-
-        var events = await restartedLog.ListAsync();
-
-        Assert.Collection(
-            events,
-            processEvent =>
-            {
-                Assert.Equal(ExternalPluginProcessEventKind.TrustRejected, processEvent.Kind);
-                Assert.Equal("plugin-alpha", processEvent.PluginId);
-                Assert.Equal("Plugin package trust policy rejected activation.", processEvent.Message);
-                Assert.Equal(firstEventTime, processEvent.OccurredAtUtc);
-                Assert.Equal("sha256-not-configured", processEvent.Detail);
-            },
-            processEvent =>
-            {
-                Assert.Equal(ExternalPluginProcessEventKind.CommandTimedOut, processEvent.Kind);
-                Assert.Equal("plugin-beta", processEvent.PluginId);
-                Assert.Null(processEvent.Detail);
-            });
+        var processEvent = Assert.Single(events);
+        Assert.Equal(ProjectId, processEvent.ProjectId);
+        Assert.Equal(ApplicationId, processEvent.ApplicationId);
+        Assert.Equal(PackageHash, processEvent.PackageContentSha256);
+        Assert.Equal("plugin.alpha", processEvent.PluginId);
+        Assert.Equal(occurred, processEvent.OccurredAtUtc);
     }
 
     [Fact]
-    public async Task ListAsyncFiltersByPluginKindTimeAndUsesStablePagination()
+    public async Task ListAsyncFiltersKindAndUsesStableTimeOrdering()
     {
-        using var database = TemporarySqliteDatabase.Create();
+        using var database = TestDatabase.Create();
         using var log = new SqliteExternalPluginProcessEventLog(database.ConnectionString);
-        var baseTime = DateTimeOffset.Parse("2026-06-29T09:00:00Z", CultureInfo.InvariantCulture);
-        log.Record(new ExternalPluginProcessEvent(
-            ExternalPluginProcessEventKind.Starting,
-            "plugin-alpha",
-            "starting",
-            baseTime));
-        log.Record(new ExternalPluginProcessEvent(
-            ExternalPluginProcessEventKind.Started,
-            "plugin-alpha",
-            "started",
-            baseTime.AddSeconds(1)));
-        log.Record(new ExternalPluginProcessEvent(
-            ExternalPluginProcessEventKind.Started,
-            "plugin-beta",
-            "started",
-            baseTime.AddSeconds(2)));
-        log.Record(new ExternalPluginProcessEvent(
-            ExternalPluginProcessEventKind.ProcessKilled,
-            "plugin-alpha",
-            "killed",
-            baseTime.AddSeconds(3)));
+        var first = new DateTimeOffset(2026, 7, 15, 1, 0, 0, TimeSpan.Zero);
+        log.Record(Event(ProjectId, ApplicationId, PackageHash, "plugin.alpha", first,
+            ExternalPluginProcessEventKind.Starting));
+        log.Record(Event(ProjectId, ApplicationId, PackageHash, "plugin.alpha", first.AddSeconds(1),
+            ExternalPluginProcessEventKind.Started));
 
-        var events = await log.ListAsync(new ExternalPluginProcessEventQuery(
-            PluginId: "plugin-alpha",
-            Kind: ExternalPluginProcessEventKind.Started,
-            OccurredFromUtc: baseTime.AddMilliseconds(500),
-            OccurredToUtc: baseTime.AddSeconds(2),
-            Skip: 0,
-            Take: 1));
+        var events = await log.ListAsync(Query(ExternalPluginProcessEventKind.Started));
 
         var processEvent = Assert.Single(events);
         Assert.Equal(ExternalPluginProcessEventKind.Started, processEvent.Kind);
-        Assert.Equal("plugin-alpha", processEvent.PluginId);
-        Assert.Equal("started", processEvent.Message);
     }
 
     [Theory]
-    [InlineData("")]
-    [InlineData(" ")]
-    [InlineData(" plugin-alpha")]
-    [InlineData("plugin-alpha ")]
-    public async Task ListAsyncRejectsNonCanonicalPluginIdQueries(string pluginId)
+    [InlineData(" project.alpha ", "application.alpha")]
+    [InlineData("project.alpha", " application.alpha ")]
+    public async Task ListAsyncRejectsNonCanonicalScope(string projectId, string applicationId)
     {
-        using var database = TemporarySqliteDatabase.Create();
+        using var database = TestDatabase.Create();
         using var log = new SqliteExternalPluginProcessEventLog(database.ConnectionString);
 
         await Assert.ThrowsAsync<ArgumentException>(async () =>
-            await log.ListAsync(new ExternalPluginProcessEventQuery(PluginId: pluginId)));
+            await log.ListAsync(new ExternalPluginProcessEventQuery(
+                projectId,
+                applicationId,
+                PackageHash)));
     }
 
     [Fact]
-    public async Task ListAsyncMatchesPluginIdWithExactCasing()
+    public void RecordRejectsInvalidPackageHash()
     {
-        using var database = TemporarySqliteDatabase.Create();
+        using var database = TestDatabase.Create();
         using var log = new SqliteExternalPluginProcessEventLog(database.ConnectionString);
-        log.Record(new ExternalPluginProcessEvent(
-            ExternalPluginProcessEventKind.Started,
-            "plugin-alpha",
-            "started",
-            DateTimeOffset.Parse("2026-06-29T09:00:00Z", CultureInfo.InvariantCulture)));
 
-        var exact = await log.ListAsync(new ExternalPluginProcessEventQuery(PluginId: "plugin-alpha"));
-        var caseAlias = await log.ListAsync(new ExternalPluginProcessEventQuery(PluginId: "Plugin-Alpha"));
-
-        Assert.Single(exact);
-        Assert.Empty(caseAlias);
+        Assert.Throws<ArgumentException>(() => log.Record(Event(
+            ProjectId,
+            ApplicationId,
+            "invalid",
+            "plugin.alpha",
+            DateTimeOffset.UtcNow)));
     }
 
-    [Theory]
-    [InlineData("")]
-    [InlineData(" ")]
-    [InlineData(" plugin-alpha ")]
-    public void RecordRejectsNonCanonicalPluginId(string pluginId)
-    {
-        using var database = TemporarySqliteDatabase.Create();
-        using var log = new SqliteExternalPluginProcessEventLog(database.ConnectionString);
-        var processEvent = new ExternalPluginProcessEvent(
-            ExternalPluginProcessEventKind.Started,
-            pluginId,
-            "started",
-            DateTimeOffset.Parse("2026-06-29T09:00:00Z", CultureInfo.InvariantCulture));
+    private static ExternalPluginProcessEvent Event(
+        string projectId,
+        string applicationId,
+        string hash,
+        string pluginId,
+        DateTimeOffset occurredAtUtc,
+        ExternalPluginProcessEventKind kind = ExternalPluginProcessEventKind.Started) => new(
+        kind,
+        projectId,
+        applicationId,
+        pluginId,
+        hash,
+        $"{kind} {pluginId}",
+        occurredAtUtc,
+        "detail");
 
-        Assert.Throws<ArgumentException>(() => log.Record(processEvent));
-    }
+    private static ExternalPluginProcessEventQuery Query(
+        ExternalPluginProcessEventKind? kind = null) => new(
+        ProjectId,
+        ApplicationId,
+        PackageHash,
+        kind);
 
-    private sealed class TemporarySqliteDatabase : IDisposable
+    private sealed class TestDatabase : IDisposable
     {
-        private TemporarySqliteDatabase(string directory, string databasePath)
+        private TestDatabase(string path)
         {
-            Directory = directory;
-            ConnectionString = $"Data Source={databasePath};Pooling=False";
+            Path = path;
+            ConnectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = path,
+                Mode = SqliteOpenMode.ReadWriteCreate,
+                Pooling = false
+            }.ToString();
         }
 
-        private string Directory { get; }
+        public string Path { get; }
 
         public string ConnectionString { get; }
 
-        public static TemporarySqliteDatabase Create()
+        public static TestDatabase Create()
         {
-            var directory = Path.Combine(Path.GetTempPath(), "OpenLineOps", Guid.NewGuid().ToString("N"));
-            var databasePath = Path.Combine(directory, "plugins.db");
-
-            return new TemporarySqliteDatabase(directory, databasePath);
+            var path = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                $"openlineops-plugin-events-{Guid.NewGuid():N}.sqlite");
+            return new TestDatabase(path);
         }
 
         public void Dispose()
         {
-            if (System.IO.Directory.Exists(Directory))
+            if (File.Exists(Path))
             {
-                System.IO.Directory.Delete(Directory, recursive: true);
+                File.Delete(Path);
             }
         }
     }

@@ -3,7 +3,7 @@
 This file is generated from `OpenLineOps.sln` NuGet restore metadata and the Electron desktop package lock.
 Run `powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-third-party-license-metadata.ps1 -UpdateNotice` after dependency changes.
 
-Counts: NuGet 132, NPM 259, unique license values 16.
+Counts: NuGet 137, NPM 259, unique license values 16.
 
 ## Review Policy
 
@@ -91,6 +91,7 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | Microsoft.Extensions.Hosting.Abstractions | 10.0.0 | MIT | nuget:license:expression |
 | Microsoft.Extensions.Hosting.Abstractions | 10.0.9 | MIT | nuget:license:expression |
 | Microsoft.Extensions.Hosting.WindowsServices | 10.0.9 | MIT | nuget:license:expression |
+| Microsoft.Extensions.Http | 10.0.9 | MIT | nuget:license:expression |
 | Microsoft.Extensions.Logging | 10.0.9 | MIT | nuget:license:expression |
 | Microsoft.Extensions.Logging.Abstractions | 10.0.0 | MIT | nuget:license:expression |
 | Microsoft.Extensions.Logging.Abstractions | 10.0.9 | MIT | nuget:license:expression |
@@ -123,13 +124,17 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | SharpZipLib | 1.4.2 | MIT | nuget:license:expression |
 | SourceGear.sqlite3 | 3.50.4.5 | LICENSE.txt | nuget:license:file |
 | System.CodeDom | 6.0.0 | MIT | nuget:license:expression |
+| System.Collections.Immutable | 9.0.0 | MIT | nuget:license:expression |
 | System.Composition | 9.0.0 | MIT | nuget:license:expression |
 | System.Composition.AttributedModel | 9.0.0 | MIT | nuget:license:expression |
 | System.Composition.Convention | 9.0.0 | MIT | nuget:license:expression |
 | System.Composition.Hosting | 9.0.0 | MIT | nuget:license:expression |
 | System.Composition.Runtime | 9.0.0 | MIT | nuget:license:expression |
 | System.Composition.TypedParts | 9.0.0 | MIT | nuget:license:expression |
+| System.Diagnostics.DiagnosticSource | 10.0.9 | MIT | nuget:license:expression |
 | System.Diagnostics.EventLog | 10.0.9 | MIT | nuget:license:expression |
+| System.IO.Pipelines | 9.0.0 | MIT | nuget:license:expression |
+| System.Reflection.Metadata | 9.0.0 | MIT | nuget:license:expression |
 | System.ServiceProcess.ServiceController | 10.0.9 | MIT | nuget:license:expression |
 | System.Threading.RateLimiting | 8.0.0 | MIT | nuget:license:expression |
 | Testcontainers | 4.12.0 | MIT | nuget:license:expression |
@@ -223,6 +228,7 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | @jridgewell/sourcemap-codec | 1.5.5 | MIT | npm:package-lock |
 | @jridgewell/trace-mapping | 0.3.31 | MIT | npm:package-lock |
 | @microsoft/signalr | 10.0.0 | MIT | npm:package-lock |
+| @microsoft/signalr/node_modules/ws | 7.5.13 | MIT | npm:package-lock |
 | @rolldown/pluginutils | 1.0.0-beta.27 | MIT | npm:package-lock |
 | @rollup/rollup-android-arm-eabi | 4.62.2 | MIT | npm:package-lock |
 | @rollup/rollup-android-arm64 | 4.62.2 | MIT | npm:package-lock |
@@ -276,7 +282,7 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | color-convert | 2.0.1 | MIT | npm:package-lock |
 | color-name | 1.1.4 | MIT | npm:package-lock |
 | combined-stream | 1.0.8 | MIT | npm:package-lock |
-| concurrently | 9.2.3 | MIT | npm:package-lock |
+| concurrently | 9.2.4 | MIT | npm:package-lock |
 | concurrently/node_modules/rxjs | 7.8.2 | Apache-2.0 | npm:package-lock |
 | convert-source-map | 2.0.0 | MIT | npm:package-lock |
 | css-tree | 3.2.1 | MIT | npm:package-lock |
@@ -338,7 +344,6 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | jsdom/node_modules/tr46 | 6.0.0 | MIT | npm:package-lock |
 | jsdom/node_modules/webidl-conversions | 8.0.1 | BSD-2-Clause | npm:package-lock |
 | jsdom/node_modules/whatwg-url | 15.1.0 | MIT | npm:package-lock |
-| jsdom/node_modules/ws | 8.21.0 | MIT | npm:package-lock |
 | jsesc | 3.1.0 | MIT | npm:package-lock |
 | json5 | 2.2.3 | MIT | npm:package-lock |
 | lodash | 4.18.1 | MIT | npm:package-lock |
@@ -350,13 +355,13 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | mime-types | 2.1.35 | MIT | npm:package-lock |
 | minimist | 1.2.8 | MIT | npm:package-lock |
 | ms | 2.1.3 | MIT | npm:package-lock |
-| nanoid | 3.3.15 | MIT | npm:package-lock |
+| nanoid | 3.3.16 | MIT | npm:package-lock |
 | node-fetch | 2.7.0 | MIT | npm:package-lock |
 | node-releases | 2.0.50 | MIT | npm:package-lock |
 | parse5 | 8.0.1 | MIT | npm:package-lock |
 | picocolors | 1.1.1 | ISC | npm:package-lock |
 | picomatch | 4.0.4 | MIT | npm:package-lock |
-| postcss | 8.5.16 | MIT | npm:package-lock |
+| postcss | 8.5.23 | MIT | npm:package-lock |
 | progress | 2.0.3 | MIT | npm:package-lock |
 | proxy-from-env | 2.1.0 | MIT | npm:package-lock |
 | psl | 1.15.0 | MIT | npm:package-lock |
@@ -373,7 +378,7 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | scheduler | 0.27.0 | MIT | npm:package-lock |
 | semver | 6.3.1 | ISC | npm:package-lock |
 | set-cookie-parser | 2.7.2 | MIT | npm:package-lock |
-| shell-quote | 1.8.4 | MIT | npm:package-lock |
+| shell-quote | 1.9.0 | MIT | npm:package-lock |
 | source-map-js | 1.2.1 | BSD-3-Clause | npm:package-lock |
 | string-width | 4.2.3 | MIT | npm:package-lock |
 | strip-ansi | 6.0.1 | MIT | npm:package-lock |
@@ -402,7 +407,7 @@ This notice is a release engineering aid, not legal advice. The verification gat
 | whatwg-mimetype | 4.0.0 | MIT | npm:package-lock |
 | whatwg-url | 5.0.0 | MIT | npm:package-lock |
 | wrap-ansi | 7.0.0 | MIT | npm:package-lock |
-| ws | 7.5.11 | MIT | npm:package-lock |
+| ws | 8.21.1 | MIT | npm:package-lock |
 | xml-name-validator | 5.0.0 | Apache-2.0 | npm:package-lock |
 | xmlchars | 2.2.0 | MIT | npm:package-lock |
 | y18n | 5.0.8 | ISC | npm:package-lock |

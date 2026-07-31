@@ -248,7 +248,7 @@ public sealed class StationSafetyAcknowledgementCorrelator
             || !string.Equals(delivery.AppId, agentId, StringComparison.Ordinal)
             || !string.Equals(
                 delivery.RoutingKey,
-                $"station.{stationId}.{routeSuffix}",
+                StationTransportRoute.Event(agentId, stationId, routeSuffix),
                 StringComparison.Ordinal)
             || !Guid.TryParseExact(delivery.MessageId, "D", out var envelopeMessageId)
             || envelopeMessageId != messageId

@@ -14,8 +14,9 @@ public static class ProcessGraphValidator
         var issues = new List<ProcessGraphValidationIssue>();
         var nodes = definition.Nodes.ToDictionary(node => node.Id);
         var transitions = definition.Transitions.ToList();
+        var graphTargetId = definition.Id.Value;
 
-        ValidateNodeSet(nodes, issues);
+        ValidateNodeSet(nodes, graphTargetId, issues);
         ValidateCommandExecutionMetadata(nodes.Values, issues);
         ValidateBlocklyMetadata(nodes.Values, issues);
         ValidatePythonScriptMetadata(nodes.Values, issues);
@@ -29,20 +30,23 @@ public static class ProcessGraphValidator
             ValidateReachability(nodes, validTransitions, startNodes[0], issues);
         }
 
-        ValidateAcyclic(nodes.Keys, validTransitions, issues);
+        ValidateAcyclic(nodes.Keys, validTransitions, graphTargetId, issues);
 
         return new ProcessGraphValidationReport(issues);
     }
 
     private static void ValidateNodeSet(
         Dictionary<ProcessNodeId, ProcessNode> nodes,
+        string graphTargetId,
         List<ProcessGraphValidationIssue> issues)
     {
         if (nodes.Count == 0)
         {
             issues.Add(Error(
                 "Processes.GraphHasNoNodes",
-                "Process graph must contain at least one node."));
+                "Process graph must contain at least one node.",
+                ProcessGraphValidationTargetKind.Graph,
+                graphTargetId));
         }
 
         var startNodeCount = nodes.Values.Count(node => node.Kind == ProcessNodeKind.Start);
@@ -50,7 +54,9 @@ public static class ProcessGraphValidator
         {
             issues.Add(Error(
                 "Processes.GraphStartNodeCountInvalid",
-                "Process graph must contain exactly one start node."));
+                "Process graph must contain exactly one start node.",
+                ProcessGraphValidationTargetKind.Graph,
+                graphTargetId));
         }
     }
 
@@ -64,35 +70,45 @@ public static class ProcessGraphValidator
             {
                 issues.Add(Error(
                     "Processes.CommandCapabilityMissing",
-                    $"Command node {node.Id} must declare a required capability."));
+                    $"Command node {node.Id} must declare a required capability.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
 
             if (string.IsNullOrWhiteSpace(node.CommandName))
             {
                 issues.Add(Error(
                     "Processes.CommandNameMissing",
-                    $"Command node {node.Id} must declare a command name."));
+                    $"Command node {node.Id} must declare a command name.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
 
             if (node.TargetKind is null)
             {
                 issues.Add(Error(
                     "Processes.CommandTargetKindMissing",
-                    $"Command node {node.Id} must declare a target kind."));
+                    $"Command node {node.Id} must declare a target kind.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
 
             if (string.IsNullOrWhiteSpace(node.TargetId))
             {
                 issues.Add(Error(
                     "Processes.CommandTargetIdMissing",
-                    $"Command node {node.Id} must declare a target id."));
+                    $"Command node {node.Id} must declare a target id.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
 
             if (node.CommandTimeout is null || node.CommandTimeout <= TimeSpan.Zero)
             {
                 issues.Add(Error(
                     "Processes.CommandTimeoutInvalid",
-                    $"Command node {node.Id} must declare a positive command timeout."));
+                    $"Command node {node.Id} must declare a positive command timeout.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
         }
     }
@@ -107,35 +123,45 @@ public static class ProcessGraphValidator
             {
                 issues.Add(Error(
                     "Processes.PythonScriptLanguageInvalid",
-                    $"Python script node {node.Id} must declare Python as the script language."));
+                    $"Python script node {node.Id} must declare Python as the script language.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
 
             if (string.IsNullOrWhiteSpace(node.ScriptSourceCode))
             {
                 issues.Add(Error(
                     "Processes.PythonScriptSourceMissing",
-                    $"Python script node {node.Id} must persist Python source code."));
+                    $"Python script node {node.Id} must persist Python source code.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
 
             if (string.IsNullOrWhiteSpace(node.ScriptSourceHash))
             {
                 issues.Add(Error(
                     "Processes.PythonScriptSourceHashMissing",
-                    $"Python script node {node.Id} must persist a source hash."));
+                    $"Python script node {node.Id} must persist a source hash.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
 
             if (string.IsNullOrWhiteSpace(node.ScriptVersion))
             {
                 issues.Add(Error(
                     "Processes.PythonScriptVersionMissing",
-                    $"Python script node {node.Id} must declare a script version."));
+                    $"Python script node {node.Id} must declare a script version.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
 
             if (node.ScriptTimeout is null || node.ScriptTimeout <= TimeSpan.Zero)
             {
                 issues.Add(Error(
                     "Processes.PythonScriptTimeoutInvalid",
-                    $"Python script node {node.Id} must declare a positive script timeout."));
+                    $"Python script node {node.Id} must declare a positive script timeout.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
         }
     }
@@ -150,14 +176,18 @@ public static class ProcessGraphValidator
             {
                 issues.Add(Error(
                     "Processes.BlocklyWorkspaceMissing",
-                    $"Blockly node {node.Id} must persist workspace JSON."));
+                    $"Blockly node {node.Id} must persist workspace JSON.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
 
             if (node.CommandTimeout is null || node.CommandTimeout <= TimeSpan.Zero)
             {
                 issues.Add(Error(
                     "Processes.BlocklyTimeoutInvalid",
-                    $"Blockly node {node.Id} must declare a positive execution timeout."));
+                    $"Blockly node {node.Id} must declare a positive execution timeout.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
 
             if (!string.IsNullOrWhiteSpace(node.ScriptLanguage)
@@ -168,7 +198,9 @@ public static class ProcessGraphValidator
             {
                 issues.Add(Error(
                     "Processes.BlocklyScriptMetadataForbidden",
-                    $"Blockly node {node.Id} cannot contain Python script metadata."));
+                    $"Blockly node {node.Id} cannot contain Python script metadata.",
+                    ProcessGraphValidationTargetKind.Node,
+                    node.Id.Value));
             }
         }
     }
@@ -189,14 +221,18 @@ public static class ProcessGraphValidator
             {
                 issues.Add(Error(
                     "Processes.TransitionSourceMissing",
-                    $"Transition {transition.Id} references missing source node {transition.FromNodeId}."));
+                    $"Transition {transition.Id} references missing source node {transition.FromNodeId}.",
+                    ProcessGraphValidationTargetKind.Transition,
+                    transition.Id.Value));
             }
 
             if (!toExists)
             {
                 issues.Add(Error(
                     "Processes.TransitionTargetMissing",
-                    $"Transition {transition.Id} references missing target node {transition.ToNodeId}."));
+                    $"Transition {transition.Id} references missing target node {transition.ToNodeId}.",
+                    ProcessGraphValidationTargetKind.Transition,
+                    transition.Id.Value));
             }
 
             if (fromExists && toExists)
@@ -220,7 +256,9 @@ public static class ProcessGraphValidator
         {
             issues.Add(Error(
                 "Processes.NodeUnreachable",
-                $"Process node {nodeId} cannot be reached from the start node."));
+                $"Process node {nodeId} cannot be reached from the start node.",
+                ProcessGraphValidationTargetKind.Node,
+                nodeId.Value));
         }
     }
 
@@ -237,7 +275,9 @@ public static class ProcessGraphValidator
                 {
                     issues.Add(Error(
                         "Processes.LoopPolicyMaxTraversalsWithoutPolicy",
-                        $"Transition {transition.Id} declares max traversals without an explicit loop policy."));
+                        $"Transition {transition.Id} declares max traversals without an explicit loop policy.",
+                        ProcessGraphValidationTargetKind.Transition,
+                        transition.Id.Value));
                 }
 
                 continue;
@@ -247,7 +287,9 @@ public static class ProcessGraphValidator
             {
                 issues.Add(Error(
                     "Processes.LoopPolicyUnsupported",
-                    $"Transition {transition.Id} declares unsupported loop policy {transition.LoopPolicy}."));
+                    $"Transition {transition.Id} declares unsupported loop policy {transition.LoopPolicy}.",
+                    ProcessGraphValidationTargetKind.Transition,
+                    transition.Id.Value));
                 continue;
             }
 
@@ -255,7 +297,9 @@ public static class ProcessGraphValidator
             {
                 issues.Add(Error(
                     "Processes.LoopPolicyMaxTraversalsInvalid",
-                    $"Counted loop transition {transition.Id} must declare a positive max traversal count."));
+                    $"Counted loop transition {transition.Id} must declare a positive max traversal count.",
+                    ProcessGraphValidationTargetKind.Transition,
+                    transition.Id.Value));
             }
 
             if (nodes.TryGetValue(transition.FromNodeId, out var sourceNode)
@@ -263,14 +307,18 @@ public static class ProcessGraphValidator
             {
                 issues.Add(Error(
                     "Processes.LoopPolicySourceMustBeDecision",
-                    $"Counted loop transition {transition.Id} must originate from a decision node."));
+                    $"Counted loop transition {transition.Id} must originate from a decision node.",
+                    ProcessGraphValidationTargetKind.Transition,
+                    transition.Id.Value));
             }
 
             if (!TransitionCanCreateCycle(transition, transitions))
             {
                 issues.Add(Error(
                     "Processes.LoopPolicyTransitionNotCyclic",
-                    $"Counted loop transition {transition.Id} does not route back to an earlier reachable node."));
+                    $"Counted loop transition {transition.Id} does not route back to an earlier reachable node.",
+                    ProcessGraphValidationTargetKind.Transition,
+                    transition.Id.Value));
             }
         }
     }
@@ -278,6 +326,7 @@ public static class ProcessGraphValidator
     private static void ValidateAcyclic(
         IEnumerable<ProcessNodeId> nodeIds,
         IEnumerable<ProcessTransition> transitions,
+        string graphTargetId,
         List<ProcessGraphValidationIssue> issues)
     {
         var adjacency = BuildAdjacency(transitions
@@ -287,7 +336,9 @@ public static class ProcessGraphValidator
         {
             issues.Add(Error(
                 "Processes.GraphCycleDetected",
-                "Process graph contains a cycle, but loop policy is not explicit."));
+                "Process graph contains a cycle, but loop policy is not explicit.",
+                ProcessGraphValidationTargetKind.Graph,
+                graphTargetId));
         }
     }
 
@@ -439,9 +490,18 @@ public static class ProcessGraphValidator
         return false;
     }
 
-    private static ProcessGraphValidationIssue Error(string code, string message)
+    private static ProcessGraphValidationIssue Error(
+        string code,
+        string message,
+        ProcessGraphValidationTargetKind targetKind,
+        string targetId)
     {
-        return new ProcessGraphValidationIssue(ProcessGraphValidationSeverity.Error, code, message);
+        return new ProcessGraphValidationIssue(
+            ProcessGraphValidationSeverity.Error,
+            code,
+            message,
+            targetKind,
+            targetId);
     }
 
     private enum VisitState

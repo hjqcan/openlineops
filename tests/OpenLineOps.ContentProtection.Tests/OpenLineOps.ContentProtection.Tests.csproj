@@ -20,6 +20,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\shared\OpenLineOps.ContentProtection\OpenLineOps.ContentProtection.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.ProcessIsolation\OpenLineOps.ProcessIsolation.csproj" />
+    <ProjectReference Include="..\..\shared\OpenLineOps.WindowsSecurity\OpenLineOps.WindowsSecurity.csproj" />
   </ItemGroup>
 
 </Project>

@@ -30,7 +30,7 @@ public sealed class AutomationProjectServiceTests
         var published = await service.PublishSnapshotAsync(
             "project.main",
             new PublishProjectSnapshotRequest(
-                "snapshot.main.v1",
+                "snapshot.main",
                 "application.main",
                 "topology.main",
                 ["layout.main"],
@@ -54,7 +54,7 @@ public sealed class AutomationProjectServiceTests
         Assert.True(withTopology.IsSuccess);
         Assert.True(withProcess.IsSuccess);
         Assert.True(published.IsSuccess);
-        Assert.Equal("snapshot.main.v1", published.Value.ActiveSnapshotId);
+        Assert.Equal("snapshot.main", published.Value.ActiveSnapshotId);
         Assert.Single(published.Value.Applications);
         Assert.Single(published.Value.Snapshots);
         Assert.True(repository.SaveCount >= 5);

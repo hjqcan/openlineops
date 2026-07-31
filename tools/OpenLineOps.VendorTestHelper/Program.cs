@@ -3,6 +3,8 @@ using System.Globalization;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
@@ -19,6 +21,9 @@ public static class Program
     public const string CancellationFileName = "cancel.request";
     public const string ProcessIdFileName = "vendor-process-id.txt";
     public const string ChildProcessIdFileName = "child-process-id.txt";
+    public const string AtomicOutputResidueFileName =
+        ".result.json.0123456789abcdef0123456789abcdef.tmp";
+    public const string AtomicOutputResidueMarker = "atomic output residue ready";
 
     public const int UsageExitCode = 64;
     public const int CrashExitCode = 23;
@@ -27,6 +32,8 @@ public static class Program
     private const int DefaultDelayMilliseconds = 300_000;
     private const int MaximumDelayMilliseconds = 3_600_000;
     private const int CancellationPollMilliseconds = 50;
+    private const string ForceChildPidPublicationFailureEnvironmentVariable =
+        "OPENLINEOPS_VENDOR_TEST_HELPER_FORCE_CHILD_PID_PUBLICATION_FAILURE";
 
     private static readonly UTF8Encoding Utf8WithoutBom = new(encoderShouldEmitUTF8Identifier: false);
     private static readonly JsonSerializerOptions ResultJsonOptions = new(JsonSerializerDefaults.Web);
@@ -43,6 +50,24 @@ public static class Program
             return await ObserveSandboxProcessAsync(args[1..]).ConfigureAwait(false);
         }
 
+        if (args.Length > 0
+            && string.Equals(
+                args[0],
+                "sandbox-probe-immutable-content",
+                StringComparison.Ordinal))
+        {
+            return OperatingSystem.IsWindows()
+                ? await ProbeImmutableContentAsync(args[1..]).ConfigureAwait(false)
+                : UsageExitCode;
+        }
+
+        if (args.Length > 0
+            && (string.Equals(args[0], "emergency-stop", StringComparison.Ordinal)
+                || string.Equals(args[0], "safe-stop", StringComparison.Ordinal)))
+        {
+            return 0;
+        }
+
         if (args.Length > 0 && string.Equals(args[0], "sandbox-check-handles", StringComparison.Ordinal))
         {
             return await CheckSandboxHandlesAsync(args[1..]).ConfigureAwait(false);
@@ -56,6 +81,12 @@ public static class Program
         if (args.Length > 0 && string.Equals(args[0], "sandbox-exit", StringComparison.Ordinal))
         {
             return SandboxExit(args[1..]);
+        }
+
+        if (args.Length > 0
+            && string.Equals(args[0], "sandbox-atomic-output-residue", StringComparison.Ordinal))
+        {
+            return await LeaveAtomicOutputResidueAsync(args[1..]).ConfigureAwait(false);
         }
 
         if (args.Length > 0 && string.Equals(args[0], "sandbox-connect", StringComparison.Ordinal))
@@ -117,7 +148,19 @@ public static class Program
         Console.CancelKeyPress += cancellationHandler;
         try
         {
-            return await RunAsync(options, invocation, cancellationSource.Token).ConfigureAwait(false);
+            try
+            {
+                return await RunAsync(options, invocation, cancellationSource.Token).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is IOException
+                                               or UnauthorizedAccessException
+                                               or InvalidOperationException)
+            {
+                await Console.Error.WriteLineAsync(
+                        $"Vendor helper execution failure: {exception.Message}")
+                    .ConfigureAwait(false);
+                return CrashExitCode;
+            }
         }
         finally
         {
@@ -421,10 +464,9 @@ public static class Program
         InvocationContext invocation,
         CancellationToken cancellationToken)
     {
-        await File.WriteAllTextAsync(
+        await WriteTextAtomicallyAsync(
                 Path.Combine(invocation.OutputDirectory, ProcessIdFileName),
                 Environment.ProcessId.ToString(CultureInfo.InvariantCulture),
-                Utf8WithoutBom,
                 cancellationToken)
             .ConfigureAwait(false);
         await File.WriteAllTextAsync(
@@ -545,15 +587,25 @@ public static class Program
                           ?? throw new InvalidOperationException("Vendor helper child process could not be started.");
         var childStandardOutput = child.StandardOutput.ReadToEndAsync(CancellationToken.None);
         var childStandardError = child.StandardError.ReadToEndAsync(CancellationToken.None);
-        await File.WriteAllTextAsync(
-                Path.Combine(outputDirectory, ChildProcessIdFileName),
-                child.Id.ToString(CultureInfo.InvariantCulture),
-                Utf8WithoutBom,
-                cancellationToken)
-            .ConfigureAwait(false);
 
         try
         {
+            await Console.Error.WriteLineAsync(
+                    $"Vendor helper started child process {child.Id.ToString(CultureInfo.InvariantCulture)}.")
+                .ConfigureAwait(false);
+            if (string.Equals(
+                    Environment.GetEnvironmentVariable(ForceChildPidPublicationFailureEnvironmentVariable),
+                    "1",
+                    StringComparison.Ordinal))
+            {
+                throw new IOException("Vendor helper simulated child PID publication failure.");
+            }
+
+            await WriteTextAtomicallyAsync(
+                    Path.Combine(outputDirectory, ChildProcessIdFileName),
+                    child.Id.ToString(CultureInfo.InvariantCulture),
+                    cancellationToken)
+                .ConfigureAwait(false);
             return await WaitForDelayAsync(outputDirectory, delayMilliseconds, cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -647,6 +699,68 @@ public static class Program
         return 0;
     }
 
+    [SupportedOSPlatform("windows")]
+    private static async Task<int> ProbeImmutableContentAsync(string[] arguments)
+    {
+        if (arguments.Length != 6
+            || !arguments.Skip(1).All(File.Exists))
+        {
+            return UsageExitCode;
+        }
+
+        var writeSucceeded = TryMutation(() =>
+            File.WriteAllText(arguments[1], "mutated", Utf8WithoutBom));
+        var renameSucceeded = TryMutation(() =>
+            File.Move(arguments[2], arguments[2] + ".moved"));
+        var deleteSucceeded = TryMutation(() => File.Delete(arguments[3]));
+        var changePermissionsSucceeded = TryMutation(() =>
+        {
+            var file = new FileInfo(arguments[4]);
+            var security = FileSystemAclExtensions.GetAccessControl(file);
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.WorldSid, null),
+                FileSystemRights.FullControl,
+                AccessControlType.Allow));
+            FileSystemAclExtensions.SetAccessControl(file, security);
+        });
+        var takeOwnershipSucceeded = TryMutation(() =>
+        {
+            var file = new FileInfo(arguments[5]);
+            var security = FileSystemAclExtensions.GetAccessControl(file);
+            security.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null));
+            FileSystemAclExtensions.SetAccessControl(file, security);
+        });
+
+        await Console.Out.WriteAsync(JsonSerializer.Serialize(
+                new ImmutableContentMutationObservation(
+                    IsAppContainerProcess(),
+                    HasTokenCapability(arguments[0]),
+                    writeSucceeded,
+                    renameSucceeded,
+                    deleteSucceeded,
+                    changePermissionsSucceeded,
+                    takeOwnershipSucceeded),
+                ResultJsonOptions))
+            .ConfigureAwait(false);
+        return 0;
+    }
+
+    private static bool TryMutation(Action mutation)
+    {
+        try
+        {
+            mutation();
+            return true;
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException
+                                          or IOException
+                                          or System.Security.SecurityException
+                                          or PrivilegeNotHeldException)
+        {
+            return false;
+        }
+    }
+
     private static async Task<int> CheckSandboxHandlesAsync(string[] arguments)
     {
         if (!OperatingSystem.IsWindows() || arguments.Length == 0)
@@ -702,6 +816,35 @@ public static class Program
         }
 
         return exitCode;
+    }
+
+    private static async Task<int> LeaveAtomicOutputResidueAsync(string[] arguments)
+    {
+        if (arguments.Length != 1
+            || !int.TryParse(
+                arguments[0],
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var delayMilliseconds)
+            || delayMilliseconds < 0
+            || delayMilliseconds > MaximumDelayMilliseconds)
+        {
+            return UsageExitCode;
+        }
+
+        var outputDirectory = RequireAbsoluteEnvironmentPath(OutputDirectoryEnvironmentVariable);
+        await File.WriteAllTextAsync(
+                Path.Combine(outputDirectory, AtomicOutputResidueFileName),
+                "uncommitted",
+                Utf8WithoutBom)
+            .ConfigureAwait(false);
+        await Console.Error.WriteLineAsync(AtomicOutputResidueMarker).ConfigureAwait(false);
+        if (delayMilliseconds > 0)
+        {
+            await Task.Delay(delayMilliseconds).ConfigureAwait(false);
+        }
+
+        return 0;
     }
 
     private static async Task<int> TrySandboxConnectionAsync(string[] arguments)
@@ -767,10 +910,10 @@ public static class Program
             args[1],
             "delayMilliseconds",
             MaximumDelayMilliseconds);
-        await File.WriteAllTextAsync(
+        await WriteTextAtomicallyAsync(
                 pidFile,
                 Environment.ProcessId.ToString(CultureInfo.InvariantCulture),
-                Utf8WithoutBom)
+                CancellationToken.None)
             .ConfigureAwait(false);
         await Task.Delay(delayMilliseconds).ConfigureAwait(false);
         return 0;
@@ -803,6 +946,37 @@ public static class Program
 
         await Task.Delay(delayMilliseconds).ConfigureAwait(false);
         return 0;
+    }
+
+    private static async Task WriteTextAtomicallyAsync(
+        string path,
+        string content,
+        CancellationToken cancellationToken)
+    {
+        var destinationPath = Path.GetFullPath(path);
+        var directory = Path.GetDirectoryName(destinationPath)
+                        ?? throw new InvalidOperationException("Atomic output path has no parent directory.");
+        var temporaryPath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(destinationPath)}.{Guid.NewGuid():N}.tmp");
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                    temporaryPath,
+                    content,
+                    Utf8WithoutBom,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            File.Move(temporaryPath, destinationPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
     }
 
     private enum VendorTestMode
@@ -849,6 +1023,15 @@ public static class Program
         IReadOnlyDictionary<string, string> Environment,
         bool IsAppContainer,
         bool HasInternetClientCapability);
+
+    private sealed record ImmutableContentMutationObservation(
+        bool IsAppContainer,
+        bool HasExpectedContentCapability,
+        bool WriteSucceeded,
+        bool RenameSucceeded,
+        bool DeleteSucceeded,
+        bool ChangePermissionsSucceeded,
+        bool TakeOwnershipSucceeded);
 
     private static bool IsAppContainerProcess()
     {

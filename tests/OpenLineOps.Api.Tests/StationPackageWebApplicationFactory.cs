@@ -43,6 +43,7 @@ public class StationPackageWebApplicationFactory : WebApplicationFactory<Program
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        ApiTestAuthentication.Configure(builder);
         builder.UseSetting(
             "OpenLineOps:Projects:StationPackages:DistributionDirectory",
             DistributionDirectory);
@@ -58,6 +59,24 @@ public class StationPackageWebApplicationFactory : WebApplicationFactory<Program
         builder.UseSetting(
             "OpenLineOps:Runtime:AgentTransport:DeploymentCatalogDirectory",
             DeploymentCatalogDirectory);
+        builder.UseSetting(
+            "OpenLineOps:Quality:Persistence:DatabasePath",
+            Path.Combine(_root, "quality.sqlite"));
+        builder.UseSetting(
+            "OpenLineOps:Commissioning:Persistence:DatabasePath",
+            Path.Combine(_root, "commissioning.sqlite"));
+        builder.UseSetting(
+            "OpenLineOps:Integration:Persistence:DatabasePath",
+            Path.Combine(_root, "integration.sqlite"));
+        builder.UseSetting(
+            "OpenLineOps:Maintenance:Persistence:DatabasePath",
+            Path.Combine(_root, "maintenance.sqlite"));
+        builder.UseSetting(
+            "OpenLineOps:OperationsMetrics:ConnectionString",
+            $"Data Source={Path.Combine(_root, "operations-metrics.sqlite")};Pooling=False");
+        builder.UseSetting(
+            "OpenLineOps:Recipes:ConnectionString",
+            $"Data Source={Path.Combine(_root, "recipes.sqlite")};Pooling=False");
     }
 
     protected override void Dispose(bool disposing)

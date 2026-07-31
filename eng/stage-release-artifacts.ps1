@@ -16,23 +16,32 @@ param(
 
     [string] $CodeSigningSignToolPath,
 
-    [string] $CodeSigningCertificatePath,
-
-    [string] $CodeSigningCertificatePassword,
-
     [string] $CodeSigningCertificateThumbprint,
 
     [switch] $CodeSigningAutoSelectCertificate,
 
     [switch] $CodeSigningStoreMachine,
 
-    [string] $CodeSigningTimestampUrl = "http://timestamp.digicert.com"
+    [string] $CodeSigningTimestampUrl = "http://timestamp.digicert.com",
+
+    [switch] $RequireCleanGitWorkTree,
+
+    [string] $ExpectedGitCommit
 )
 
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$RequiredKinds = @("source", "api", "agent", "runner", "desktop", "plugin-host", "script-worker", "sample-plugin")
+$RequiredKinds = @(
+    "source",
+    "api",
+    "agent",
+    "runner",
+    "desktop",
+    "plugin-host",
+    "script-worker",
+    "sample-plugin",
+    "device-sessions-plugin")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -97,8 +106,23 @@ function Format-CommandArgumentsForLog {
             continue
         }
 
+        $absoluteUri = $null
+        if ([System.Uri]::TryCreate($argument, [System.UriKind]::Absolute, [ref]$absoluteUri) `
+            -and (-not [string]::IsNullOrEmpty($absoluteUri.UserInfo) `
+                -or $absoluteUri.Query -match '(?i)(password|passphrase|token|secret|credential|api[-_]?key)=')) {
+            $formatted += "<redacted-uri>"
+            continue
+        }
+
+        if ($argument -match '^(?<name>[^=:\s]+)(?<separator>=|:)(?<value>.*)$' `
+            -and $Matches.name -match '(?i)(password|passphrase|token|secret|credential|api[-_]?key)') {
+            $formatted += "$($Matches.name)$($Matches.separator)<redacted>"
+            continue
+        }
+
         $formatted += $argument
-        if ($argument -in @("-CertificatePassword", "/p")) {
+        if ($argument -match '(?i)(password|passphrase|token|secret|credential|api[-_]?key)' `
+            -or $argument -ceq "/p") {
             $maskNext = $true
         }
     }
@@ -126,16 +150,18 @@ function Invoke-CheckedCommand {
     }
 
     Write-Host "> $FilePath $((Format-CommandArgumentsForLog -Arguments $Arguments) -join ' ')"
-    $process = Start-Process `
-        -FilePath $resolvedFilePath `
-        -ArgumentList $Arguments `
-        -WorkingDirectory $WorkingDirectory `
-        -NoNewWindow `
-        -Wait `
-        -PassThru
+    Push-Location $WorkingDirectory
+    try {
+        & $resolvedFilePath @Arguments | Out-Host
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        Pop-Location
+    }
 
-    if ($process.ExitCode -ne 0) {
-        throw "Command failed with exit code $($process.ExitCode): $FilePath $($Arguments -join ' ')"
+    if ($exitCode -ne 0) {
+        $safeArguments = Format-CommandArgumentsForLog -Arguments $Arguments
+        throw "Command failed with exit code ${exitCode}: $FilePath $($safeArguments -join ' ')"
     }
 }
 
@@ -147,20 +173,23 @@ function Invoke-ExpectedExitCode {
         [string] $WorkingDirectory = $RepoRoot
     )
 
-    Write-Host "> $FilePath $($Arguments -join ' ') (expected exit $ExpectedExitCode)"
-    $startProcessArguments = @{
-        FilePath = $FilePath
-        WorkingDirectory = $WorkingDirectory
-        NoNewWindow = $true
-        Wait = $true
-        PassThru = $true
+    $formattedArguments = if ($Arguments.Count -eq 0) {
+        ""
     }
-    if ($Arguments.Count -gt 0) {
-        $startProcessArguments.ArgumentList = $Arguments
+    else {
+        (Format-CommandArgumentsForLog -Arguments $Arguments) -join ' '
     }
-    $process = Start-Process @startProcessArguments
-    if ($process.ExitCode -ne $ExpectedExitCode) {
-        throw "Command exited $($process.ExitCode), expected ${ExpectedExitCode}: $FilePath"
+    Write-Host "> $FilePath $formattedArguments (expected exit $ExpectedExitCode)"
+    Push-Location $WorkingDirectory
+    try {
+        & $FilePath @Arguments | Out-Host
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        Pop-Location
+    }
+    if ($exitCode -ne $ExpectedExitCode) {
+        throw "Command exited ${exitCode}, expected ${ExpectedExitCode}: $FilePath"
     }
 }
 
@@ -177,7 +206,8 @@ function Publish-DotNetProject {
         $Configuration,
         "-o",
         $OutputDirectory,
-        "/p:UseAppHost=false"
+        "/p:UseAppHost=false",
+        "/p:TreatWarningsAsErrors=true"
     )
 
     if ($NoRestore) {
@@ -190,7 +220,8 @@ function Publish-DotNetProject {
 function Publish-WindowsSelfContainedProject {
     param(
         [Parameter(Mandatory = $true)][string] $ProjectPath,
-        [Parameter(Mandatory = $true)][string] $OutputDirectory
+        [Parameter(Mandatory = $true)][string] $OutputDirectory,
+        [switch] $SingleFile
     )
 
     $arguments = @(
@@ -204,8 +235,17 @@ function Publish-WindowsSelfContainedProject {
         "true",
         "-o",
         $OutputDirectory,
-        "/p:UseAppHost=true"
+        "/p:UseAppHost=true",
+        "/p:TreatWarningsAsErrors=true"
     )
+
+    if ($SingleFile) {
+        $arguments += @(
+            "/p:PublishSingleFile=true",
+            "/p:IncludeNativeLibrariesForSelfExtract=true",
+            "/p:EnableCompressionInSingleFile=true"
+        )
+    }
 
     if ($NoRestore) {
         $arguments += "--no-restore"
@@ -333,6 +373,60 @@ function Assert-AgentBundleConfiguration {
     }
 
     $configuration = Get-Content -LiteralPath $configurationPath -Raw | ConvertFrom-Json
+    $openLineOpsConfiguration = $configuration.OpenLineOps
+    $openLineOpsConfigurationProperties = @(
+        $openLineOpsConfiguration.PSObject.Properties.Name)
+    if (-not ($openLineOpsConfigurationProperties -ccontains "WindowsServiceName") `
+        -or $openLineOpsConfiguration.WindowsServiceName -isnot [string] `
+        -or $openLineOpsConfiguration.WindowsServiceName -cne "") {
+        throw "OpenLineOps:WindowsServiceName must be present and empty in the release template for deployment-time binding."
+    }
+    $agentConfiguration = $configuration.OpenLineOps.Agent
+    $agentConfigurationProperties = @($agentConfiguration.PSObject.Properties.Name)
+    if (-not ($agentConfigurationProperties -ccontains "StationSystemId") `
+        -or $agentConfiguration.StationSystemId -isnot [string] `
+        -or $agentConfiguration.StationSystemId -cne "") {
+        throw "OpenLineOps:Agent:StationSystemId must be present and empty in the release template for deployment-time binding."
+    }
+    if (-not ($agentConfigurationProperties -ccontains "HeartbeatInterval") `
+        -or $agentConfiguration.HeartbeatInterval -cne "00:00:05") {
+        throw "OpenLineOps:Agent:HeartbeatInterval must be exactly '00:00:05' in the release template."
+    }
+    if (-not ($agentConfigurationProperties -ccontains "PackageCacheDirectory") `
+        -or $agentConfiguration.PackageCacheDirectory -isnot [string] `
+        -or $agentConfiguration.PackageCacheDirectory -cne "") {
+        throw "OpenLineOps:Agent:PackageCacheDirectory must be present and empty in the release template for explicit administrator provisioning."
+    }
+    if ($agentConfiguration.RequireBrokerTls -ne $true `
+        -or $agentConfiguration.BrokerUri -isnot [string]) {
+        throw "The Station Agent release template must require an explicit TLS RabbitMQ broker URI."
+    }
+    $brokerUri = $null
+    if (-not [System.Uri]::TryCreate(
+            $agentConfiguration.BrokerUri,
+            [System.UriKind]::Absolute,
+            [ref]$brokerUri) `
+        -or $brokerUri.Scheme -cne "amqps" `
+        -or -not [string]::IsNullOrEmpty($brokerUri.UserInfo)) {
+        throw "The Station Agent release template BrokerUri must be an amqps URI without embedded placeholder credentials."
+    }
+    $coordinatorUri = $null
+    if (-not ($agentConfigurationProperties -ccontains "CoordinatorBaseUri") `
+        -or $agentConfiguration.CoordinatorBaseUri -isnot [string] `
+        -or -not [System.Uri]::TryCreate(
+            $agentConfiguration.CoordinatorBaseUri,
+            [System.UriKind]::Absolute,
+            [ref]$coordinatorUri) `
+        -or $coordinatorUri.Scheme -cne "https" `
+        -or -not [string]::IsNullOrEmpty($coordinatorUri.UserInfo) `
+        -or -not [string]::IsNullOrEmpty($coordinatorUri.Query) `
+        -or -not [string]::IsNullOrEmpty($coordinatorUri.Fragment) `
+        -or $agentConfiguration.ArtifactUploadTimeout -cne "00:05:00") {
+        throw "The Station Agent release template must use a credential-free HTTPS CoordinatorBaseUri and a 00:05:00 artifact upload timeout."
+    }
+    if ($agentConfigurationProperties -ccontains "ArtifactUploadBearerToken") {
+        throw "The Station Agent release template must not embed ArtifactUploadBearerToken."
+    }
     $runtimeExecutablePath = $configuration.OpenLineOps.Agent.RuntimeExecutablePath
     if ($runtimeExecutablePath -cne "OpenLineOps.StationRuntime.exe") {
         throw "OpenLineOps:Agent:RuntimeExecutablePath must be exactly 'OpenLineOps.StationRuntime.exe' in the release bundle."
@@ -342,13 +436,214 @@ function Assert-AgentBundleConfiguration {
         throw "The configured Station Runtime executable is missing from the Agent bundle."
     }
 
-    $agentExecutablePath = Join-Path $Root "OpenLineOps.Agent.exe"
-    $runtimeExecutableFullPath = Join-Path $Root $runtimeExecutablePath
-    if (-not (Test-Path -LiteralPath $agentExecutablePath -PathType Leaf)) {
-        throw "The Station Agent executable is missing from its release bundle."
+    $pluginHostExecutablePath = $configuration.OpenLineOps.Agent.PluginHostExecutablePath
+    if ($pluginHostExecutablePath -cne "OpenLineOps.PluginHost.exe") {
+        throw "OpenLineOps:Agent:PluginHostExecutablePath must be exactly 'OpenLineOps.PluginHost.exe' in the release bundle."
     }
-    if ((Get-FileSha256 $agentExecutablePath) -ceq (Get-FileSha256 $runtimeExecutableFullPath)) {
-        throw "The Station Agent and Station Runtime executable payloads must be distinct."
+
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $pluginHostExecutablePath) -PathType Leaf)) {
+        throw "The configured Plugin Host executable is missing from the Agent bundle."
+    }
+
+    $pythonScript = $configuration.OpenLineOps.Agent.PythonScript
+    if ($null -eq $pythonScript) {
+        throw "The Station Agent bundle is missing its typed PythonScript configuration."
+    }
+
+    $pythonScriptProperties = @($pythonScript.PSObject.Properties.Name)
+    if (-not ($pythonScriptProperties -ccontains "HostPythonRuntimeDllPath") `
+        -or $pythonScriptProperties -ccontains "PythonRuntimeDllPath") {
+        throw "The Station Agent bundle must declare HostPythonRuntimeDllPath and must not contain the removed PythonRuntimeDllPath setting."
+    }
+
+    $scriptWorkerExecutablePath = $pythonScript.WorkerExecutablePath
+    if ($scriptWorkerExecutablePath -cne "OpenLineOps.ScriptWorker.exe") {
+        throw "OpenLineOps:Agent:PythonScript:WorkerExecutablePath must be exactly 'OpenLineOps.ScriptWorker.exe' in the release bundle."
+    }
+
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $scriptWorkerExecutablePath) -PathType Leaf)) {
+        throw "The configured Python Script Worker executable is missing from the Agent bundle."
+    }
+
+    if ($pythonScript.Sandbox.LeastPrivilegeIdentity -cne "PerExecutionAppContainer") {
+        throw "The Station Agent release bundle must use the fixed PerExecutionAppContainer Python identity."
+    }
+    $leastPrivilegeLauncherPath = $pythonScript.Sandbox.LeastPrivilegeLauncherExecutable
+    if ($leastPrivilegeLauncherPath -cne "OpenLineOps.LeastPrivilegeLauncher.exe") {
+        throw "OpenLineOps:Agent:PythonScript:Sandbox:LeastPrivilegeLauncherExecutable must be exactly 'OpenLineOps.LeastPrivilegeLauncher.exe' in the release bundle."
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $leastPrivilegeLauncherPath) -PathType Leaf)) {
+        throw "The configured Least Privilege Launcher executable is missing from the Agent bundle."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($pythonScript.Sandbox.LeastPrivilegeArgumentsTemplate)) {
+        throw "The Station Agent release bundle must not configure a custom Python least-privilege launcher template."
+    }
+    if ($pythonScript.Sandbox.LeastPrivilegeNoInteractivePrompt -ne $true) {
+        throw "The Station Agent release bundle must require a non-interactive Python least-privilege launch."
+    }
+
+    if (-not ($agentConfigurationProperties -ccontains "SafetyExecutablePath")) {
+        throw "The Station Agent release template must declare SafetyExecutablePath."
+    }
+    if ($configuration.OpenLineOps.Agent.SafetyExecutablePath -isnot [string] `
+        -or $configuration.OpenLineOps.Agent.SafetyExecutablePath -cne "") {
+        throw "OpenLineOps:Agent:SafetyExecutablePath must be empty in the release template and configured to the independently reviewed machine safety actuator during deployment."
+    }
+
+    $pythonSandbox = $pythonScript.Sandbox
+    if ($null -eq $pythonSandbox `
+        -or $pythonSandbox.RequireLeastPrivilegeExecution -ne $true `
+        -or $pythonSandbox.IsolationMode -cne "LeastPrivilegeIdentity") {
+        throw "The Station Agent release bundle must default Python execution to required LeastPrivilegeIdentity isolation."
+    }
+
+    $removedContainerProperties = @($pythonSandbox.PSObject.Properties.Name | Where-Object {
+        $_ -clike "Container*" -or $_ -ceq "AdditionalContainerRunArguments"
+    })
+    if ($removedContainerProperties.Count -ne 0) {
+        throw "The Station Agent release bundle must not expose removed Python Container settings."
+    }
+
+    $deploymentPath = Join-Path $Root "DEPLOYMENT.md"
+    if (-not (Test-Path -LiteralPath $deploymentPath -PathType Leaf)) {
+        throw "The Station Agent release bundle is missing DEPLOYMENT.md."
+    }
+    $deployment = Get-Content -LiteralPath $deploymentPath -Raw
+    foreach ($requiredProvisioningContract in @(
+            "--provision-content-cache",
+            "--remove-content-cache-package",
+            "OpenLineOps:WindowsServiceName",
+            "OpenLineOps:Agent:PackageCacheDirectory",
+            "dedicated content-cache namespace")) {
+        if ($deployment -cnotmatch [regex]::Escape($requiredProvisioningContract)) {
+            throw "The Station Agent deployment guide is missing content-cache provisioning contract '$requiredProvisioningContract'."
+        }
+    }
+
+    $executablePaths = @(
+        "OpenLineOps.Agent.exe",
+        $runtimeExecutablePath,
+        $pluginHostExecutablePath,
+        $scriptWorkerExecutablePath,
+        $leastPrivilegeLauncherPath
+    )
+    $executableHashes = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    foreach ($executablePath in $executablePaths) {
+        $fullPath = Join-Path $Root $executablePath
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            throw "The Station Agent executable is missing from its release bundle: $executablePath"
+        }
+        if (-not $executableHashes.Add((Get-FileSha256 $fullPath))) {
+            throw "Every Station Agent executable payload must have a distinct SHA-256: $executablePath"
+        }
+    }
+}
+
+function Assert-NoDevelopmentOnlyPayload {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $ArtifactKind
+    )
+
+    $sourceOrProjectExtensions = @(
+        ".cs",
+        ".fs",
+        ".vb",
+        ".csproj",
+        ".fsproj",
+        ".vbproj",
+        ".sln",
+        ".slnx")
+    $testBinaryMarkers = @(
+        "Microsoft.NET.Test.Sdk",
+        "Microsoft.TestPlatform",
+        "testhost.dll",
+        "xunit",
+        "coverlet.collector")
+    foreach ($entry in Get-ChildItem -LiteralPath $Root -Force -Recurse) {
+        $relativePath = (Get-RelativePathUnderDirectory `
+                -Root $Root `
+                -Path $entry.FullName).Replace('\', '/')
+        $segments = @($relativePath.Split('/', [System.StringSplitOptions]::RemoveEmptyEntries))
+        $hasTestDirectory = @($segments | Where-Object {
+                $_ -imatch '^(?:tests?|test-results|testresults)$'
+            }).Count -gt 0
+        $hasTestFileName = -not $entry.PSIsContainer `
+            -and $entry.Name -imatch '(?:^|[._-])tests?(?:[._-]|$)|^(?:testhost|xunit|coverlet)(?:[._-]|$)'
+        $hasSourceOrProjectExtension = -not $entry.PSIsContainer `
+            -and $sourceOrProjectExtensions -icontains $entry.Extension
+        $containsTestBinaryIdentity = $false
+        if (-not $entry.PSIsContainer) {
+            foreach ($marker in $testBinaryMarkers) {
+                if (Test-PortableExecutableContainsAsciiMarker `
+                        -Path $entry.FullName `
+                        -Marker $marker) {
+                    $containsTestBinaryIdentity = $true
+                    break
+                }
+            }
+        }
+        if ($hasSourceOrProjectExtension) {
+            throw "The $ArtifactKind release payload contains a source or project file: $relativePath"
+        }
+        if ($hasTestDirectory -or $hasTestFileName -or $containsTestBinaryIdentity) {
+            throw "The $ArtifactKind release payload contains test-only content: $relativePath"
+        }
+    }
+}
+
+function Test-PortableExecutableContainsAsciiMarker {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Marker
+    )
+
+    $stream = [System.IO.File]::Open(
+        $Path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read -bor [System.IO.FileShare]::Delete)
+    try {
+        if ($stream.Length -lt 2) {
+            return $false
+        }
+
+        $buffer = [byte[]]::new(65kb + $Marker.Length)
+        $carried = 0
+        $firstChunk = $true
+        while (($read = $stream.Read($buffer, $carried, 65kb)) -gt 0) {
+            $total = $carried + $read
+            if ($firstChunk) {
+                if ($total -lt 2) {
+                    $carried = $total
+                    continue
+                }
+
+                $firstChunk = $false
+                if ($buffer[0] -ne 0x4d -or $buffer[1] -ne 0x5a) {
+                    return $false
+                }
+            }
+
+            $text = [System.Text.Encoding]::ASCII.GetString($buffer, 0, $total)
+            if ($text.IndexOf($Marker, [System.StringComparison]::Ordinal) -ge 0) {
+                return $true
+            }
+
+            $carried = [Math]::Min($Marker.Length - 1, $total)
+            [System.Buffer]::BlockCopy(
+                $buffer,
+                $total - $carried,
+                $buffer,
+                0,
+                $carried)
+        }
+
+        return $false
+    }
+    finally {
+        $stream.Dispose()
     }
 }
 
@@ -531,13 +826,42 @@ function Get-GitProvenance {
     }
 }
 
+function Assert-GitSourceState {
+    param(
+        [Parameter(Mandatory = $true)]$Provenance,
+        [switch] $RequireClean,
+        [string] $ExpectedCommit
+    )
+
+    if ($Provenance.available -ne $true `
+        -or $Provenance.commit -isnot [string] `
+        -or $Provenance.commit -cnotmatch '^[0-9a-f]{40,64}$') {
+        throw "Release source staging requires a Git worktree with a resolvable HEAD commit."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedCommit)) {
+        $normalizedExpectedCommit = $ExpectedCommit.Trim().ToLowerInvariant()
+        if ($normalizedExpectedCommit -cnotmatch '^[0-9a-f]{40,64}$') {
+            throw "ExpectedGitCommit must be a full lowercase Git object id."
+        }
+        if ($Provenance.commit -cne $normalizedExpectedCommit) {
+            throw "Release source HEAD '$($Provenance.commit)' does not match ExpectedGitCommit '$normalizedExpectedCommit'."
+        }
+    }
+
+    if ($RequireClean -and $Provenance.dirty -ne $false) {
+        throw "Formal release staging requires a clean Git worktree. Commit or discard every tracked and untracked change before publication."
+    }
+}
+
 function Write-ReleaseProvenance {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
         [Parameter(Mandatory = $true)][string] $ManifestPath,
         [Parameter(Mandatory = $true)][string] $ChecksumsPath,
         [Parameter(Mandatory = $true)][string] $ReleaseNotesPath,
-        [Parameter(Mandatory = $true)][string] $DependencyInventoryPath
+        [Parameter(Mandatory = $true)][string] $DependencyInventoryPath,
+        [Parameter(Mandatory = $true)]$SourceProvenance
     )
 
     $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
@@ -556,7 +880,7 @@ function Write-ReleaseProvenance {
         product = "OpenLineOps"
         version = $Version
         generatedAtUtc = [System.DateTimeOffset]::UtcNow.ToString("O")
-        source = Get-GitProvenance
+        source = $SourceProvenance
         build = [ordered]@{
             configuration = $Configuration
             noRestore = [bool]$NoRestore
@@ -624,46 +948,7 @@ function Test-IsExcludedSourcePath {
     param([Parameter(Mandatory = $true)][string] $RelativePath)
 
     $normalizedPath = $RelativePath.Replace([System.IO.Path]::DirectorySeparatorChar, '/')
-    $segments = $normalizedPath.Split('/', [System.StringSplitOptions]::RemoveEmptyEntries)
-    $excludedSegments = @(
-        ".git",
-        ".vs",
-        ".vscode",
-        ".idea",
-        "artifacts",
-        "output",
-        "data",
-    "logs",
-    "node_modules",
-    "bin",
-    "obj",
-    "dist",
-    "dist-electron",
-    "release",
-    "TestResults",
-    "coverage"
-    )
-
-    foreach ($segment in $segments) {
-        if ($excludedSegments -contains $segment) {
-            return $true
-        }
-    }
-
-    $fileName = [System.IO.Path]::GetFileName($normalizedPath)
-    if ($fileName -match '\.(user|suo|rsuser|userosscache|sln\.docstates|tsbuildinfo|trx|coverage)$') {
-        return $true
-    }
-
-    if ($fileName -like ".env*" -and $fileName -ne ".env.example") {
-        return $true
-    }
-
-    if (Test-IsSensitiveSourcePath $normalizedPath) {
-        return $true
-    }
-
-    return $false
+    return Test-IsSensitiveSourcePath $normalizedPath
 }
 
 function Test-IsSensitiveSourcePath {
@@ -713,32 +998,89 @@ function Copy-SourceArchiveContent {
 
     New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
 
-    $sourceFiles = @(
-        foreach ($topLevelEntry in Get-ChildItem -LiteralPath $RepoRoot -Force) {
-            $topLevelRelativePath = Get-RepoRelativePath $topLevelEntry.FullName
-            if (Test-IsExcludedSourcePath $topLevelRelativePath) {
-                continue
-            }
-
-            if (-not $topLevelEntry.PSIsContainer) {
-                $topLevelEntry
-                continue
-            }
-
-            Get-ChildItem -LiteralPath $topLevelEntry.FullName -Recurse -File -Force |
-                Where-Object {
-                    $relativePath = Get-RepoRelativePath $_.FullName
-                    -not (Test-IsExcludedSourcePath $relativePath)
-                }
+    Push-Location $RepoRoot
+    try {
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $trackedPaths = @(& git -c core.quotePath=false ls-files --cached --full-name 2>&1)
+            $gitExitCode = $LASTEXITCODE
         }
-    )
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+    }
+    finally {
+        Pop-Location
+    }
 
-    foreach ($file in $sourceFiles) {
-        $relativePath = Get-RepoRelativePath $file.FullName
+    if ($gitExitCode -ne 0) {
+        throw "Cannot enumerate tracked source files from the Git index."
+    }
+
+    $canonicalTrackedPaths = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal)
+    $expectedSourcePaths = [System.Collections.Generic.List[string]]::new()
+    foreach ($trackedPathValue in $trackedPaths) {
+        $relativePath = $trackedPathValue.ToString().Replace('\', '/')
+        if ([string]::IsNullOrWhiteSpace($relativePath) `
+            -or [System.IO.Path]::IsPathRooted($relativePath) `
+            -or $relativePath.StartsWith('../', [System.StringComparison]::Ordinal) `
+            -or $relativePath.Contains('/../') `
+            -or -not $canonicalTrackedPaths.Add($relativePath)) {
+            throw "Git returned a non-canonical or duplicate tracked source path."
+        }
+
+        if (Test-IsExcludedSourcePath $relativePath) {
+            continue
+        }
+
+        $sourcePath = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $relativePath))
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            # A tracked path deleted in a developer worktree is intentionally absent.
+            if ($RequireCleanGitWorkTree) {
+                throw "Formal release source path '$relativePath' is absent from the worktree. Sparse or incomplete checkouts cannot be published."
+            }
+            continue
+        }
+
+        $sourcePathCursor = $RepoRoot
+        foreach ($pathSegment in $relativePath.Split('/')) {
+            $sourcePathCursor = Join-Path $sourcePathCursor $pathSegment
+            $sourcePathItem = Get-Item -LiteralPath $sourcePathCursor -Force
+            if ($sourcePathItem.Attributes.HasFlag([System.IO.FileAttributes]::ReparsePoint)) {
+                throw "Tracked source path '$relativePath' traverses a reparse point and cannot be archived."
+            }
+        }
+
         $destinationPath = Join-Path $DestinationDirectory $relativePath
         $destinationParent = Split-Path $destinationPath -Parent
         New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
-        Copy-Item -LiteralPath $file.FullName -Destination $destinationPath -Force
+        Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
+        $expectedSourcePaths.Add($relativePath) | Out-Null
+    }
+
+    $expectedPaths = [string[]]$expectedSourcePaths.ToArray()
+    [System.Array]::Sort($expectedPaths, [System.StringComparer]::Ordinal)
+    $actualPaths = [string[]]@(
+        Get-ChildItem -LiteralPath $DestinationDirectory -Recurse -File -Force |
+            ForEach-Object {
+                (Get-RelativePathUnderDirectory `
+                        -Root $DestinationDirectory `
+                        -Path $_.FullName).Replace(
+                    [System.IO.Path]::DirectorySeparatorChar,
+                    '/')
+            }
+    )
+    [System.Array]::Sort($actualPaths, [System.StringComparer]::Ordinal)
+    if ($actualPaths.Count -ne $expectedPaths.Count) {
+        throw "Source staging path set does not exactly match the non-sensitive Git index: copied $($actualPaths.Count), expected $($expectedPaths.Count)."
+    }
+
+    for ($index = 0; $index -lt $expectedPaths.Count; $index++) {
+        if ($actualPaths[$index] -cne $expectedPaths[$index]) {
+            throw "Source staging path set does not exactly match the non-sensitive Git index at '$($expectedPaths[$index])'."
+        }
     }
 }
 
@@ -747,22 +1089,56 @@ $resolvedWorkRoot = Resolve-RepoPath $WorkRoot
 Assert-UnderRepoRoot $resolvedArtifactsRoot
 Assert-UnderRepoRoot $resolvedWorkRoot
 
+$sourceGitProvenance = Get-GitProvenance
+Assert-GitSourceState `
+    -Provenance $sourceGitProvenance `
+    -RequireClean:$RequireCleanGitWorkTree `
+    -ExpectedCommit $ExpectedGitCommit
+
+$timestampUri = $null
+if (-not [System.Uri]::TryCreate(
+        $CodeSigningTimestampUrl,
+        [System.UriKind]::Absolute,
+        [ref]$timestampUri) `
+    -or $timestampUri.Scheme -notin @("http", "https") `
+    -or -not [string]::IsNullOrEmpty($timestampUri.UserInfo) `
+    -or $timestampUri.Query -match '(?i)(password|passphrase|token|secret|credential|api[-_]?key)=') {
+    throw "CodeSigningTimestampUrl must be an absolute HTTP(S) URL without embedded credentials or secret-bearing query parameters."
+}
+
+if ($SignWindowsPackages) {
+    $signingSelectorCount = 0
+    if (-not [string]::IsNullOrWhiteSpace($CodeSigningCertificateThumbprint)) {
+        $signingSelectorCount++
+    }
+    if ($CodeSigningAutoSelectCertificate) {
+        $signingSelectorCount++
+    }
+    if ($signingSelectorCount -ne 1) {
+        throw "Signed release staging requires exactly one certificate-store selector: -CodeSigningCertificateThumbprint or -CodeSigningAutoSelectCertificate."
+    }
+}
+
 New-CleanDirectory $resolvedArtifactsRoot
 New-CleanDirectory $resolvedWorkRoot
-
 $safeVersion = $Version -replace "[^A-Za-z0-9._-]", "_"
 
 $apiPublish = Join-Path $resolvedWorkRoot "api"
 $agentPublish = Join-Path $resolvedWorkRoot "agent"
 $stationRuntimePublish = Join-Path $resolvedWorkRoot "station-runtime"
+$stationScriptWorkerPublish = Join-Path $resolvedWorkRoot "station-script-worker"
+$stationPluginHostPublish = Join-Path $resolvedWorkRoot "station-plugin-host"
+$stationLeastPrivilegeLauncherPublish = Join-Path $resolvedWorkRoot "station-least-privilege-launcher"
 $runnerPublish = Join-Path $resolvedWorkRoot "runner"
 $pluginHostPublish = Join-Path $resolvedWorkRoot "plugin-host"
 $scriptWorkerPublish = Join-Path $resolvedWorkRoot "script-worker"
 $samplePluginPublish = Join-Path $resolvedWorkRoot "sample-plugin"
+$deviceSessionsPluginBuild = Join-Path $resolvedWorkRoot "device-sessions-plugin-build"
+$deviceSessionsPluginPublish = Join-Path $resolvedWorkRoot "device-sessions-plugin"
 $desktopStage = Join-Path $resolvedWorkRoot "desktop"
 $sourceStage = Join-Path $resolvedWorkRoot "source"
 
-Publish-DotNetProject `
+Publish-WindowsSelfContainedProject `
     -ProjectPath "src/OpenLineOps.Api/OpenLineOps.Api.csproj" `
     -OutputDirectory $apiPublish
 Publish-WindowsSelfContainedProject `
@@ -770,9 +1146,31 @@ Publish-WindowsSelfContainedProject `
     -OutputDirectory $agentPublish
 Publish-WindowsSelfContainedProject `
     -ProjectPath "src/OpenLineOps.StationRuntime/OpenLineOps.StationRuntime.csproj" `
-    -OutputDirectory $stationRuntimePublish
+    -OutputDirectory $stationRuntimePublish `
+    -SingleFile
 Merge-DirectoryContents `
     -SourceDirectory $stationRuntimePublish `
+    -DestinationDirectory $agentPublish
+Publish-WindowsSelfContainedProject `
+    -ProjectPath "src/OpenLineOps.ScriptWorker/OpenLineOps.ScriptWorker.csproj" `
+    -OutputDirectory $stationScriptWorkerPublish `
+    -SingleFile
+Merge-DirectoryContents `
+    -SourceDirectory $stationScriptWorkerPublish `
+    -DestinationDirectory $agentPublish
+Publish-WindowsSelfContainedProject `
+    -ProjectPath "src/OpenLineOps.PluginHost/OpenLineOps.PluginHost.csproj" `
+    -OutputDirectory $stationPluginHostPublish `
+    -SingleFile
+Merge-DirectoryContents `
+    -SourceDirectory $stationPluginHostPublish `
+    -DestinationDirectory $agentPublish
+Publish-WindowsSelfContainedProject `
+    -ProjectPath "src/OpenLineOps.LeastPrivilegeLauncher/OpenLineOps.LeastPrivilegeLauncher.csproj" `
+    -OutputDirectory $stationLeastPrivilegeLauncherPublish `
+    -SingleFile
+Merge-DirectoryContents `
+    -SourceDirectory $stationLeastPrivilegeLauncherPublish `
     -DestinationDirectory $agentPublish
 Publish-WindowsSelfContainedProject `
     -ProjectPath "src/OpenLineOps.Runner/OpenLineOps.Runner.csproj" `
@@ -786,10 +1184,22 @@ Publish-DotNetProject `
 Publish-DotNetProject `
     -ProjectPath "samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj" `
     -OutputDirectory $samplePluginPublish
+Publish-DotNetProject `
+    -ProjectPath "plugins/builtin/OpenLineOps.BuiltinPlugins.DeviceSessions/OpenLineOps.BuiltinPlugins.DeviceSessions.csproj" `
+    -OutputDirectory $deviceSessionsPluginBuild
 
 Copy-Item `
     -LiteralPath (Resolve-RepoPath "samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/manifest.json") `
     -Destination (Join-Path $samplePluginPublish "manifest.json") `
+    -Force
+New-Item -ItemType Directory -Path $deviceSessionsPluginPublish -Force | Out-Null
+Copy-Item `
+    -LiteralPath (Resolve-RepoPath "plugins/builtin/OpenLineOps.BuiltinPlugins.DeviceSessions/manifest.json") `
+    -Destination (Join-Path $deviceSessionsPluginPublish "manifest.json") `
+    -Force
+Copy-Item `
+    -LiteralPath (Join-Path $deviceSessionsPluginBuild "OpenLineOps.BuiltinPlugins.DeviceSessions.dll") `
+    -Destination (Join-Path $deviceSessionsPluginPublish "OpenLineOps.BuiltinPlugins.DeviceSessions.dll") `
     -Force
 
 foreach ($bundle in @($agentPublish, $runnerPublish)) {
@@ -816,7 +1226,6 @@ Invoke-ExpectedExitCode `
     -FilePath (Join-Path $agentPublish "OpenLineOps.StationRuntime.exe") `
     -ExpectedExitCode 64 `
     -WorkingDirectory $agentPublish
-
 if (-not $SkipDesktopBuild) {
     Invoke-CheckedCommand -FilePath "npm" -Arguments @("run", "build") -WorkingDirectory (Resolve-RepoPath "apps/desktop")
 }
@@ -833,7 +1242,8 @@ if ($SignWindowsPackages) {
     $signingRoots = @(
         (Join-Path $desktopPackageOutput "win-unpacked"),
         $agentPublish,
-        $runnerPublish
+        $runnerPublish,
+        $deviceSessionsPluginPublish
     )
     foreach ($signingRoot in $signingRoots) {
         $signArguments = @(
@@ -852,14 +1262,6 @@ if ($SignWindowsPackages) {
             $signArguments += @("-SignToolPath", $CodeSigningSignToolPath)
         }
 
-        if (-not [string]::IsNullOrWhiteSpace($CodeSigningCertificatePath)) {
-            $signArguments += @("-CertificatePath", $CodeSigningCertificatePath)
-        }
-
-        if (-not [string]::IsNullOrWhiteSpace($CodeSigningCertificatePassword)) {
-            $signArguments += @("-CertificatePassword", $CodeSigningCertificatePassword)
-        }
-
         if (-not [string]::IsNullOrWhiteSpace($CodeSigningCertificateThumbprint)) {
             $signArguments += @("-CertificateThumbprint", $CodeSigningCertificateThumbprint)
         }
@@ -876,12 +1278,22 @@ if ($SignWindowsPackages) {
     }
 }
 
+Invoke-CheckedCommand `
+    -FilePath "node" `
+    -Arguments @(
+        "scripts/write-package-content-manifest.mjs",
+        "--package-root",
+        (Join-Path $desktopPackageOutput "win-unpacked")) `
+    -WorkingDirectory (Resolve-RepoPath "apps/desktop")
+
 Write-WindowsBundleMetadata `
     -Root $agentPublish `
     -ArtifactKind "agent" `
     -EntryPoints @(
         [ordered]@{ role = "station-agent-service"; relativePath = "OpenLineOps.Agent.exe" },
-        [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" }
+        [ordered]@{ role = "station-runtime"; relativePath = "OpenLineOps.StationRuntime.exe" },
+        [ordered]@{ role = "plugin-host"; relativePath = "OpenLineOps.PluginHost.exe" },
+        [ordered]@{ role = "python-script-worker"; relativePath = "OpenLineOps.ScriptWorker.exe" }
     )
 Write-WindowsBundleMetadata `
     -Root $runnerPublish `
@@ -897,7 +1309,17 @@ Copy-DirectoryContents -SourceDirectory (Resolve-RepoPath "apps/desktop/dist-ele
 Copy-Item -LiteralPath (Resolve-RepoPath "apps/desktop/package.json") -Destination (Join-Path $desktopStage "package.json") -Force
 Copy-Item -LiteralPath (Resolve-RepoPath "apps/desktop/README.md") -Destination (Join-Path $desktopStage "README.md") -Force
 
+$currentSourceProvenance = Get-GitProvenance
+Assert-GitSourceState `
+    -Provenance $currentSourceProvenance `
+    -RequireClean:$RequireCleanGitWorkTree `
+    -ExpectedCommit $sourceGitProvenance.commit
 Copy-SourceArchiveContent -DestinationDirectory $sourceStage
+$finalSourceProvenance = Get-GitProvenance
+Assert-GitSourceState `
+    -Provenance $finalSourceProvenance `
+    -RequireClean:$RequireCleanGitWorkTree `
+    -ExpectedCommit $sourceGitProvenance.commit
 
 $archives = @(
     @{
@@ -939,10 +1361,20 @@ $archives = @(
         Kind = "sample-plugin"
         Source = $samplePluginPublish
         Archive = "sample-plugin-loopback-device-$safeVersion.zip"
+    },
+    @{
+        Kind = "device-sessions-plugin"
+        Source = $deviceSessionsPluginPublish
+        Archive = "device-sessions-plugin-openlineops-$safeVersion.zip"
     }
 )
 
 foreach ($archive in $archives) {
+    if ($archive.Kind -cne "source") {
+        Assert-NoDevelopmentOnlyPayload `
+            -Root $archive.Source `
+            -ArtifactKind $archive.Kind
+    }
     $artifactKindDirectory = Join-Path $resolvedArtifactsRoot $archive.Kind
     Compress-StagedDirectory `
         -SourceDirectory $archive.Source `
@@ -961,6 +1393,8 @@ $manifestArguments = @(
     "run",
     "--project",
     $manifestProject,
+    "--configuration",
+    $Configuration,
     "--",
     "--version",
     $Version,
@@ -1012,7 +1446,8 @@ Write-ReleaseProvenance `
     -ManifestPath $manifestPath `
     -ChecksumsPath $checksumsPath `
     -ReleaseNotesPath $notesPath `
-    -DependencyInventoryPath $dependencyInventoryPath
+    -DependencyInventoryPath $dependencyInventoryPath `
+    -SourceProvenance $sourceGitProvenance
 
 Write-ReleaseMetadataChecksums `
     -Path $metadataChecksumsPath `

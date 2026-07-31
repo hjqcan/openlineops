@@ -448,10 +448,11 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
         await using var connection = CreateConnection();
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
-        var selectors = new List<string>();
+        var scopeSelectors = new List<string>();
+        var materialSelectors = new List<string>();
         if (query.ProductionUnitId is { } productionUnitId)
         {
-            selectors.Add("(production_unit_id = $production_unit_id OR genealogy_parent_unit_id = $production_unit_id OR genealogy_child_unit_id = $production_unit_id)");
+            materialSelectors.Add("(production_unit_id = $production_unit_id OR genealogy_parent_unit_id = $production_unit_id OR genealogy_child_unit_id = $production_unit_id)");
             command.Parameters.AddWithValue(
                 "$production_unit_id",
                 productionUnitId.Value.ToString("D"));
@@ -459,14 +460,19 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
 
         if (query.ProductionRunId is { } productionRunId)
         {
-            selectors.Add("production_run_id = $production_run_id");
+            scopeSelectors.Add("production_run_id = $production_run_id");
             command.Parameters.AddWithValue("$production_run_id", productionRunId.Value.ToString("D"));
         }
 
         if (query.CarrierId is { } carrierId)
         {
-            selectors.Add("carrier_id = $carrier_id");
+            materialSelectors.Add("carrier_id = $carrier_id");
             command.Parameters.AddWithValue("$carrier_id", carrierId.Value);
+        }
+
+        if (materialSelectors.Count > 0)
+        {
+            scopeSelectors.Insert(0, "(" + string.Join(" OR ", materialSelectors) + ")");
         }
 
         var through = query.ThroughUtc is null ? string.Empty : " AND occurred_at_utc <= $through_utc";
@@ -475,9 +481,10 @@ public sealed class SqliteProductionMaterialRepository : IProductionMaterialRepo
             command.Parameters.AddWithValue("$through_utc", FormatTimestamp(throughUtc));
         }
 
-        command.CommandText = "SELECT document_json FROM production_material_timeline WHERE ("
-            + string.Join(" OR ", selectors)
-            + ")"
+        command.CommandText = "SELECT document_json FROM production_material_timeline WHERE "
+            + "(" + string.Join(
+                query.Mode == ProductionMaterialTimelineQueryMode.UnionScope ? " OR " : " AND ",
+                scopeSelectors) + ")"
             + through
             + " ORDER BY occurred_at_utc, evidence_id;";
         var result = new List<ProductionMaterialTimelineEntry>();
