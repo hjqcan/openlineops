@@ -524,6 +524,8 @@ public sealed class SqliteCommissioningSessionRepository :
 
     public void Dispose()
     {
+        using var connection = new SqliteConnection(_connectionString);
+        SqliteConnection.ClearPool(connection);
         _schemaLock.Dispose();
     }
 

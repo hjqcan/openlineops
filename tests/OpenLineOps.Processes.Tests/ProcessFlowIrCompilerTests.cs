@@ -328,6 +328,44 @@ public sealed class ProcessFlowIrCompilerTests
     }
 
     [Fact]
+    public void CanonicalSerializerRejectsRetryForNonIdempotentAction()
+    {
+        var definition = CreateCommandDefinition(reverseInsertionOrder: false);
+        Publish(definition);
+        var compilation = _compiler.Compile(definition);
+        var invalid = compilation.Value.Document with
+        {
+            Nodes = compilation.Value.Document.Nodes
+                .Select(node => node.NodeId != "inspect"
+                    ? node
+                    : node with
+                    {
+                        Actions =
+                        [
+                            node.Actions[0] with
+                            {
+                                Execution = node.Actions[0].Execution with
+                                {
+                                    RetryLimit = 1
+                                },
+                                OperationalPolicy = node.Actions[0].OperationalPolicy! with
+                                {
+                                    FailurePolicy = FlowIrFailurePolicy.Retry
+                                }
+                            }
+                        ]
+                    })
+                .ToImmutableArray()
+        };
+
+        var result = new FlowIrCanonicalSerializer().Serialize(invalid);
+
+        Assert.True(result.IsFailure);
+        Assert.Contains("cannot retry unless it is idempotent", result.Error.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void CanonicalSerializerRejectsPythonSourceHashMismatch()
     {
         var definition = CreatePythonDefinition();

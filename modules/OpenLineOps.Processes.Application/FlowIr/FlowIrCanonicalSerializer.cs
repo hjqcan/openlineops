@@ -507,6 +507,13 @@ public sealed class FlowIrCanonicalSerializer : IFlowIrCanonicalSerializer
                 $"Action {action.ActionId} retry limit and failure policy must be declared together.");
         }
 
+        if (policy.FailurePolicy == FlowIrFailurePolicy.Retry
+            && policy.IdempotencyClass != FlowIrIdempotencyClass.Idempotent)
+        {
+            return Invalid(
+                $"Action {action.ActionId} cannot retry unless it is idempotent.");
+        }
+
         var resourceIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var resource in policy.ResourceLocks)
         {

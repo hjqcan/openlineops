@@ -4,6 +4,10 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using OpenLineOps.Runtime.Application.Stations;
+using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Infrastructure.Persistence;
 
 namespace OpenLineOps.Api.Tests;
@@ -12,6 +16,10 @@ public sealed class StationLifecycleApiTests :
     IClassFixture<OpenLineOpsApiWebApplicationFactory>,
     IDisposable
 {
+    private const string AgentInstanceId =
+        "11111111-1111-4111-8111-111111111111";
+    private const string LeaseHandle =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     private readonly WebApplicationFactory<Program> _factory;
 
     public StationLifecycleApiTests(OpenLineOpsApiWebApplicationFactory factory)
@@ -31,6 +39,12 @@ public sealed class StationLifecycleApiTests :
                     ["OpenLineOps:Runtime:StationExecution:Provider"] = "InProcess"
                 });
             });
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IStationRecipeStartAuthority>();
+                services.AddSingleton<IStationRecipeStartAuthority,
+                    TestStationRecipeStartAuthority>();
+            });
         });
     }
 
@@ -41,6 +55,9 @@ public sealed class StationLifecycleApiTests :
         using var engineering = Client(ApiTestAuthentication.EngineeringToken);
         using var operatorClient = Client(ApiTestAuthentication.OperatorToken);
         using var agent = Client(ApiTestAuthentication.StationAgentToken);
+        agent.DefaultRequestHeaders.Add(
+            "X-OpenLineOps-Agent-Lease",
+            LeaseHandle);
 
         using var created = await engineering.PutAsJsonAsync(
             Route(stationId),
@@ -50,6 +67,21 @@ public sealed class StationLifecycleApiTests :
         Assert.Equal(Route(stationId), created.Headers.Location?.OriginalString);
         Assert.Equal(0, createdJson.RootElement.GetProperty("revision").GetInt64());
         Assert.Equal("Stopped", createdJson.RootElement.GetProperty("state").GetString());
+        var agentFencingToken = await AcquireLeaseAsync(agent, stationId);
+
+        using var controllerReady = await agent.PostAsJsonAsync(
+            $"{Route(stationId)}/controller-handshake",
+            ControllerHandshakeBody(
+                "controller.lifecycle",
+                heartbeatSequence: 1,
+                commandSequence: 0,
+                acknowledgedCommandSequence: 0,
+                completed: false,
+                commandId: null,
+                commandFencingToken: 0,
+                observedState: "Stopped",
+                reason: "controller ready"));
+        Assert.Equal(HttpStatusCode.OK, controllerReady.StatusCode);
 
         using var resetting = await operatorClient.PostAsJsonAsync(
             CommandRoute(stationId, "reset"),
@@ -58,10 +90,57 @@ public sealed class StationLifecycleApiTests :
         Assert.Equal(HttpStatusCode.OK, resetting.StatusCode);
         Assert.Equal("Resetting", resettingJson.RootElement.GetProperty("state").GetString());
         Assert.Equal(1, resettingJson.RootElement.GetProperty("revision").GetInt64());
+        var resetCommand = resettingJson.RootElement
+            .GetProperty("pendingControllerCommand");
+        var resetSequence = resetCommand
+            .GetProperty("expectedCommandSequence")
+            .GetInt64();
+        var resetCommandId = resetCommand.GetProperty("commandId").GetString();
+        var resetFencingToken = resetCommand
+            .GetProperty("fencingToken")
+            .GetInt64();
+
+        using var polledReset = await agent.GetAsync(
+            $"{Route(stationId)}/controller-command"
+            + $"?ownerInstanceId={AgentInstanceId}"
+            + $"&fencingToken={agentFencingToken}");
+        using var polledResetJson = await ReadJsonAsync(polledReset);
+        Assert.Equal(HttpStatusCode.OK, polledReset.StatusCode);
+        Assert.Equal(
+            resetCommand.GetProperty("commandId").GetString(),
+            polledResetJson.RootElement
+                .GetProperty("command")
+                .GetProperty("commandId")
+                .GetString());
+
+        using var resetCompleted = await agent.PostAsJsonAsync(
+            $"{Route(stationId)}/controller-handshake",
+            ControllerHandshakeBody(
+                "controller.lifecycle",
+                heartbeatSequence: 2,
+                commandSequence: resetSequence,
+                acknowledgedCommandSequence: resetSequence,
+                completed: true,
+                commandId: resetCommandId,
+                commandFencingToken: resetFencingToken,
+                observedState: "Idle",
+                reason: "reset controller command complete"));
+        Assert.Equal(HttpStatusCode.OK, resetCompleted.StatusCode);
 
         using var idle = await agent.PostAsJsonAsync(
             CommandRoute(stationId, "acknowledge"),
-            new { reason = "reset handshake complete" });
+            new
+            {
+                ownerInstanceId = AgentInstanceId,
+                fencingToken = agentFencingToken,
+                commandId = resetCommandId,
+                controllerSessionId = "controller.lifecycle",
+                commandSequence = resetSequence,
+                observedMode = "Automatic",
+                observedState = "Idle",
+                stateSequence = 2,
+                reason = "reset handshake complete"
+            });
         using var idleJson = await ReadJsonAsync(idle);
         Assert.Equal(HttpStatusCode.OK, idle.StatusCode);
         Assert.Equal("Idle", idleJson.RootElement.GetProperty("state").GetString());
@@ -69,10 +148,61 @@ public sealed class StationLifecycleApiTests :
         using var starting = await operatorClient.PostAsJsonAsync(
             CommandRoute(stationId, "start"),
             new { reason = "start production cycle" });
+        using var startingJson = await ReadJsonAsync(starting);
         Assert.Equal(HttpStatusCode.OK, starting.StatusCode);
+        var startSequence = startingJson.RootElement
+            .GetProperty("pendingControllerCommand")
+            .GetProperty("expectedCommandSequence")
+            .GetInt64();
+        var startCommand = startingJson.RootElement
+            .GetProperty("pendingControllerCommand");
+        Assert.Equal(
+            "11111111-1111-1111-1111-111111111111",
+            startCommand.GetProperty("recipeAssignmentId").GetGuid()
+                .ToString("D"));
+        Assert.Equal(
+            "22222222-2222-2222-2222-222222222222",
+            startCommand.GetProperty("recipeDeploymentId").GetGuid()
+                .ToString("D"));
+        Assert.Equal(
+            64,
+            startCommand.GetProperty("recipeConfigurationSha256")
+                .GetString()!
+                .Length);
+        using var polledStart = await agent.GetAsync(
+            $"{Route(stationId)}/controller-command"
+            + $"?ownerInstanceId={AgentInstanceId}"
+            + $"&fencingToken={agentFencingToken}");
+        Assert.Equal(HttpStatusCode.OK, polledStart.StatusCode);
+        using var startCompleted = await agent.PostAsJsonAsync(
+            $"{Route(stationId)}/controller-handshake",
+            ControllerHandshakeBody(
+                "controller.lifecycle",
+                heartbeatSequence: 3,
+                commandSequence: startSequence,
+                acknowledgedCommandSequence: startSequence,
+                completed: true,
+                commandId: startCommand.GetProperty("commandId").GetString(),
+                commandFencingToken: startCommand
+                    .GetProperty("fencingToken")
+                    .GetInt64(),
+                observedState: "Execute",
+                reason: "start controller command complete"));
+        Assert.Equal(HttpStatusCode.OK, startCompleted.StatusCode);
         using var executing = await agent.PostAsJsonAsync(
             CommandRoute(stationId, "acknowledge"),
-            new { reason = "start handshake complete" });
+            new
+            {
+                ownerInstanceId = AgentInstanceId,
+                fencingToken = agentFencingToken,
+                commandId = startCommand.GetProperty("commandId").GetString(),
+                controllerSessionId = "controller.lifecycle",
+                commandSequence = startSequence,
+                observedMode = "Automatic",
+                observedState = "Execute",
+                stateSequence = 3,
+                reason = "start handshake complete"
+            });
         using var executingJson = await ReadJsonAsync(executing);
         Assert.Equal(HttpStatusCode.OK, executing.StatusCode);
         Assert.Equal("Execute", executingJson.RootElement.GetProperty("state").GetString());
@@ -87,7 +217,7 @@ public sealed class StationLifecycleApiTests :
         using var safetyJson = await ReadJsonAsync(safetyLoss);
         Assert.Equal(HttpStatusCode.OK, safetyLoss.StatusCode);
         Assert.Equal("Aborting", safetyJson.RootElement.GetProperty("state").GetString());
-        Assert.Equal(5, safetyJson.RootElement.GetProperty("revision").GetInt64());
+        Assert.Equal(7, safetyJson.RootElement.GetProperty("revision").GetInt64());
         Assert.False(safetyJson.RootElement
             .GetProperty("readiness")
             .GetProperty("safetyPermitGranted")
@@ -109,6 +239,16 @@ public sealed class StationLifecycleApiTests :
         Assert.Equal(
             safetyJson.RootElement.GetProperty("transitionAudit").GetRawText(),
             getJson.RootElement.GetProperty("transitionAudit").GetRawText());
+
+        using var facts = await operatorClient.GetAsync(
+            $"{Route(stationId)}/facts?afterSequence=0&pageSize=100");
+        using var factsJson = await ReadJsonAsync(facts);
+        Assert.Equal(HttpStatusCode.OK, facts.StatusCode);
+        var factItems = factsJson.RootElement.EnumerateArray().ToArray();
+        Assert.Equal(8, factItems.Length);
+        Assert.Equal(
+            factItems[^2].GetProperty("factSha256").GetString(),
+            factItems[^1].GetProperty("previousFactSha256").GetString());
     }
 
     [Fact]
@@ -171,6 +311,9 @@ public sealed class StationLifecycleApiTests :
         using var engineering = Client(ApiTestAuthentication.EngineeringToken);
         using var operatorClient = Client(ApiTestAuthentication.OperatorToken);
         using var agent = Client(ApiTestAuthentication.StationAgentToken);
+        agent.DefaultRequestHeaders.Add(
+            "X-OpenLineOps-Agent-Lease",
+            LeaseHandle);
 
         using var operatorCreate = await operatorClient.PutAsJsonAsync(
             Route(stationId),
@@ -214,6 +357,10 @@ public sealed class StationLifecycleApiTests :
                 reason = "agent cannot report another station"
             });
         Assert.Equal(HttpStatusCode.Forbidden, wrongStationAgent.StatusCode);
+        using var wrongStationCommand = await agent.GetAsync(
+            $"{Route(stationId)}/controller-command"
+            + $"?ownerInstanceId={AgentInstanceId}&fencingToken=1");
+        Assert.Equal(HttpStatusCode.Forbidden, wrongStationCommand.StatusCode);
 
         using var engineeringGet = await engineering.GetAsync(Route(stationId));
         Assert.Equal(HttpStatusCode.Forbidden, engineeringGet.StatusCode);
@@ -286,8 +433,77 @@ public sealed class StationLifecycleApiTests :
         safetyPermitGranted
     };
 
+    private static object ControllerHandshakeBody(
+        string controllerSessionId,
+        long heartbeatSequence,
+        long commandSequence,
+        long acknowledgedCommandSequence,
+        bool completed,
+        string? commandId,
+        long commandFencingToken,
+        string observedState,
+        string reason) => new
+    {
+        ownerInstanceId = AgentInstanceId,
+        agentFencingToken = 1,
+        controllerSessionId,
+        heartbeatSequence,
+        commandSequence,
+        acknowledgedCommandSequence,
+        commandId,
+        commandFencingToken,
+        observedMode = "Automatic",
+        observedState,
+        stateSequence = heartbeatSequence,
+        busy = false,
+        completed,
+        error = false,
+        errorCode = (string?)null,
+        recipeConfirmed = true,
+        confirmedRecipeId = "recipe.lifecycle",
+        confirmedRecipeVersion = "1",
+        safetyPermitGranted = true,
+        sourceTimestampUtc = DateTimeOffset.UtcNow,
+        reason
+    };
+
+    private static async Task<long> AcquireLeaseAsync(
+        HttpClient agent,
+        string stationId)
+    {
+        using var response = await agent.PostAsJsonAsync(
+            $"/api/stations/{stationId}/agent-control-lease/acquire",
+            new { ownerInstanceId = AgentInstanceId });
+        response.EnsureSuccessStatusCode();
+        using var json = await ReadJsonAsync(response);
+        return json.RootElement.GetProperty("fencingToken").GetInt64();
+    }
+
     private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response)
     {
         return await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+    }
+
+    private sealed class TestStationRecipeStartAuthority
+        : IStationRecipeStartAuthority
+    {
+        public ValueTask<StationRecipeStartAuthorityDecision> ResolveAsync(
+            StationId stationId,
+            DateTimeOffset evaluatedAtUtc,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(
+                StationRecipeStartAuthorityDecision.Allow(
+                    new StationRecipeStartAuthority(
+                        "recipe.lifecycle",
+                        "1",
+                        Guid.Parse(
+                            "11111111-1111-1111-1111-111111111111"),
+                        Guid.Parse(
+                            "22222222-2222-2222-2222-222222222222"),
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")));
+        }
     }
 }

@@ -515,6 +515,10 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
             allowedValues: null,
             required: true)));
         AssertAccepted(recipe.AddOrUpdateParameter("axis.speed", speed));
+        AssertAccepted(recipe.Validate(publishedAtUtc.AddSeconds(-2)));
+        AssertAccepted(recipe.Approve(
+            "engineer.fixture",
+            publishedAtUtc.AddSeconds(-1)));
         AssertAccepted(recipe.Publish(publishedAtUtc));
 
         var station = StationProfile.Create(

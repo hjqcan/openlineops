@@ -5,6 +5,7 @@ using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Application.Stations;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Materials;
@@ -912,7 +913,9 @@ public sealed class PostgresProductionCoordinationColdStartIntegrationTests(
             entry => entry.Run.Id == run.Id);
 
         var operationSnapshot = Assert.Single(run.ToSnapshot().Operations);
-        var readiness = await new ProductionOperationReadinessEvaluator(materials)
+        var readiness = await new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance)
             .EvaluateAsync(run.ToSnapshot(), operationSnapshot);
         Assert.Equal(ProductionOperationReadinessKind.Ready, readiness.Kind);
         Assert.Equal(

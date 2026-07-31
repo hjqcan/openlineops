@@ -1,3 +1,5 @@
+using OpenLineOps.Integration.Application.Serialization;
+
 namespace OpenLineOps.Integration.Application.Outbox;
 
 public sealed class IntegrationOutboxDispatcher(
@@ -15,11 +17,26 @@ public sealed class IntegrationOutboxDispatcher(
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCount);
         ApplicationGuard.Utc(nowUtc, nameof(nowUtc));
+        cancellationToken.ThrowIfCancellationRequested();
+        if (connector is IIntegrationConnectorReadiness { IsReady: false })
+        {
+            return 0;
+        }
+
         var pending = await store.ListReadyAsync(maximumCount, nowUtc, cancellationToken)
             .ConfigureAwait(false);
         var delivered = 0;
         foreach (var message in pending)
         {
+            if (!string.Equals(
+                    IntegrationMessageCodec.ComputeSha256(message.PayloadJson),
+                    message.ContentSha256,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"Outbox message '{message.MessageId}' failed its content hash check.");
+            }
+
             try
             {
                 await connector.SendAsync(message, cancellationToken).ConfigureAwait(false);
@@ -30,6 +47,19 @@ public sealed class IntegrationOutboxDispatcher(
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
+            }
+            catch (IntegrationConnectorMessageConflictException exception)
+            {
+                await store.RecordFailureAsync(
+                        message.MessageId,
+                        message.AttemptCount,
+                        CanonicalFailure(exception.Message),
+                        nowUtc,
+                        nowUtc,
+                        deadLetter: true,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+                break;
             }
             catch (Exception exception) when (exception is not OutOfMemoryException)
             {
@@ -42,6 +72,7 @@ public sealed class IntegrationOutboxDispatcher(
                         message.MessageId,
                         message.AttemptCount,
                         CanonicalFailure(exception.Message),
+                        nowUtc,
                         nextAttemptAtUtc,
                         deadLetter,
                         CancellationToken.None)
@@ -57,9 +88,11 @@ public sealed class IntegrationOutboxDispatcher(
     {
         var exponent = Math.Min(attemptCount - 1, 20);
         var multiplier = 1L << exponent;
-        var ticks = Math.Min(
-            checked(_options.InitialRetryDelay.Ticks * multiplier),
-            _options.MaximumRetryDelay.Ticks);
+        var initialTicks = _options.InitialRetryDelay.Ticks;
+        var maximumTicks = _options.MaximumRetryDelay.Ticks;
+        var ticks = multiplier > maximumTicks / initialTicks
+            ? maximumTicks
+            : Math.Min(initialTicks * multiplier, maximumTicks);
         return TimeSpan.FromTicks(ticks);
     }
 

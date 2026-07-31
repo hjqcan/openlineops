@@ -58,6 +58,12 @@ public static class RuntimeModuleServiceCollectionExtensions
         services.AddSingleton(transportOptions);
         services.AddSingleton(stationExecutionOptions);
         services.AddSingleton(agentPresenceOptions);
+        var stationControllerHandshakeOptions =
+            LoadStationControllerHandshakeOptions(configuration);
+        services.AddSingleton(stationControllerHandshakeOptions);
+        var stationAgentControlLeaseOptions =
+            LoadStationAgentControlLeaseOptions(configuration);
+        services.AddSingleton(stationAgentControlLeaseOptions);
         var pythonScriptRuntimeOptions = LoadPythonScriptRuntimeOptions(configuration);
         services.AddSingleton(pythonScriptRuntimeOptions);
 
@@ -74,6 +80,21 @@ public static class RuntimeModuleServiceCollectionExtensions
                     new SqliteStationLifecycleRepository(sqliteConnectionString));
                 services.AddSingleton<IStationLifecycleRepository>(serviceProvider =>
                     serviceProvider.GetRequiredService<SqliteStationLifecycleRepository>());
+                services.AddSingleton<IStationLifecycleFactReader>(serviceProvider =>
+                    serviceProvider.GetRequiredService<SqliteStationLifecycleRepository>());
+                services.AddSingleton(_ =>
+                    new SqliteStationControllerHandshakeRepository(
+                        sqliteConnectionString));
+                services.AddSingleton<IStationControllerHandshakeRepository>(
+                    serviceProvider => serviceProvider.GetRequiredService<
+                        SqliteStationControllerHandshakeRepository>());
+                services.AddSingleton(serviceProvider =>
+                    new SqliteStationAgentControlLeaseRepository(
+                        sqliteConnectionString,
+                        serviceProvider.GetRequiredService<IClock>()));
+                services.AddSingleton<IStationAgentControlLeaseRepository>(
+                    serviceProvider => serviceProvider.GetRequiredService<
+                        SqliteStationAgentControlLeaseRepository>());
                 services.AddSingleton(new SqliteRuntimeStoreExclusiveLease(sqliteConnectionString));
                 services.AddHostedService<SqliteRuntimeStoreLeaseHostedService>();
                 break;
@@ -86,6 +107,16 @@ public static class RuntimeModuleServiceCollectionExtensions
                 services.AddSingleton<InMemoryStationLifecycleRepository>();
                 services.AddSingleton<IStationLifecycleRepository>(serviceProvider =>
                     serviceProvider.GetRequiredService<InMemoryStationLifecycleRepository>());
+                services.AddSingleton<IStationLifecycleFactReader>(serviceProvider =>
+                    serviceProvider.GetRequiredService<InMemoryStationLifecycleRepository>());
+                services.AddSingleton<InMemoryStationControllerHandshakeRepository>();
+                services.AddSingleton<IStationControllerHandshakeRepository>(
+                    serviceProvider => serviceProvider.GetRequiredService<
+                        InMemoryStationControllerHandshakeRepository>());
+                services.AddSingleton<InMemoryStationAgentControlLeaseRepository>();
+                services.AddSingleton<IStationAgentControlLeaseRepository>(
+                    serviceProvider => serviceProvider.GetRequiredService<
+                        InMemoryStationAgentControlLeaseRepository>());
                 break;
         }
 
@@ -189,6 +220,13 @@ public static class RuntimeModuleServiceCollectionExtensions
 
         services.AddScoped<ProductionMaterialService>();
         services.AddScoped<StationLifecycleService>();
+        services.TryAddScoped<IStationRecipeStartAuthority,
+            RejectingStationRecipeStartAuthority>();
+        services.AddScoped<StationControllerHandshakeService>();
+        services.AddScoped<StationAgentControlLeaseService>();
+        services.AddScoped<IStationAgentControlLeaseValidator>(serviceProvider =>
+            serviceProvider.GetRequiredService<StationAgentControlLeaseService>());
+        services.AddHostedService<StationControllerCommandWatchdog>();
         services.TryAddScoped<IProductionMaterialArrivalAuthorizer,
             RejectingProductionMaterialArrivalAuthorizer>();
         services.AddScoped<ProductionMaterialArrivalIngress>();
@@ -400,6 +438,70 @@ public static class RuntimeModuleServiceCollectionExtensions
         return options;
     }
 
+    private static StationControllerHandshakeOptions
+        LoadStationControllerHandshakeOptions(IConfiguration? configuration)
+    {
+        var section = configuration?.GetSection(
+            StationControllerHandshakeOptions.SectionName);
+        var supportedSettings = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "TimeToLive",
+            "MaximumSourceClockSkew",
+            "CommandTimeout"
+        };
+        var unknownSetting = section?.GetChildren().FirstOrDefault(
+            child => !supportedSettings.Contains(child.Key));
+        if (unknownSetting is not null)
+        {
+            throw new InvalidOperationException(
+                $"Unsupported Station controller handshake setting "
+                + $"'{unknownSetting.Path}'.");
+        }
+
+        var options = new StationControllerHandshakeOptions
+        {
+            TimeToLive = ReadOptionalDuration(
+                section?["TimeToLive"],
+                TimeSpan.FromSeconds(5),
+                $"{StationControllerHandshakeOptions.SectionName}:TimeToLive"),
+            MaximumSourceClockSkew = ReadOptionalDuration(
+                section?["MaximumSourceClockSkew"],
+                TimeSpan.FromSeconds(30),
+                $"{StationControllerHandshakeOptions.SectionName}:MaximumSourceClockSkew"),
+            CommandTimeout = ReadOptionalDuration(
+                section?["CommandTimeout"],
+                TimeSpan.FromSeconds(30),
+                $"{StationControllerHandshakeOptions.SectionName}:CommandTimeout")
+        };
+        options.Validate();
+        return options;
+    }
+
+    private static StationAgentControlLeaseOptions
+        LoadStationAgentControlLeaseOptions(IConfiguration? configuration)
+    {
+        var section = configuration?.GetSection(
+            StationAgentControlLeaseOptions.SectionName);
+        var unknownSetting = section?.GetChildren().FirstOrDefault(child =>
+            !string.Equals(child.Key, "TimeToLive", StringComparison.Ordinal));
+        if (unknownSetting is not null)
+        {
+            throw new InvalidOperationException(
+                $"Unsupported Station Agent control lease setting "
+                + $"'{unknownSetting.Path}'.");
+        }
+
+        var options = new StationAgentControlLeaseOptions
+        {
+            TimeToLive = ReadOptionalDuration(
+                section?["TimeToLive"],
+                TimeSpan.FromSeconds(15),
+                $"{StationAgentControlLeaseOptions.SectionName}:TimeToLive")
+        };
+        options.Validate();
+        return options;
+    }
+
     private static PythonScriptRuntimeOptions LoadPythonScriptRuntimeOptions(IConfiguration? configuration)
     {
         var section = configuration?.GetSection(PythonScriptRuntimeOptions.SectionName);
@@ -492,6 +594,26 @@ public static class RuntimeModuleServiceCollectionExtensions
             _ => throw new InvalidOperationException(
                 $"Configuration '{configurationPath}' must be exactly 'true' or 'false'.")
         };
+    }
+
+    private static TimeSpan ReadOptionalDuration(
+        string? value,
+        TimeSpan defaultValue,
+        string configurationPath)
+    {
+        if (value is null)
+        {
+            return defaultValue;
+        }
+
+        return TimeSpan.TryParseExact(
+            value,
+            "c",
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var parsed)
+            ? parsed
+            : throw new InvalidOperationException(
+                $"Configuration '{configurationPath}' must use constant duration format.");
     }
 
     private static int ReadOptionalInt(string? value, int defaultValue, string configurationPath)

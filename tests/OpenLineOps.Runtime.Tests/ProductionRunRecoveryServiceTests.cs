@@ -6,6 +6,7 @@ using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Recovery;
 using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Application.Stations;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.ProductionUnits;
@@ -254,20 +255,162 @@ public sealed class ProductionRunRecoveryServiceTests
     }
 
     [Fact]
+    public async Task PublicationRechecksManagedStationGateAndBindsFrozenRecipeEvidence()
+    {
+        var fixture = await ParallelRecoveryFixture.CreateAsync();
+        var request = await CreateDispatchRequestAsync(
+            fixture,
+            "operation.left@0001");
+        var gate = new MutableStationProductionExecutionGate();
+        var authorizer = new StationDispatchPublicationAuthorizer(
+            fixture.Repository,
+            fixture.Leases,
+            new FixedDeploymentResolver(request),
+            gate,
+            fixture.Clock);
+
+        var initiallyAuthorized = await authorizer.AuthorizeAsync(request);
+
+        Assert.True(initiallyAuthorized.Allowed);
+        Assert.NotNull(initiallyAuthorized.AuthorizedRequest);
+        Assert.Equal(gate.Evidence, initiallyAuthorized.StationGateEvidence);
+        Assert.Equal(gate.Revision, initiallyAuthorized.StationGateRevision);
+        Assert.Equal(
+            initiallyAuthorized.StationGateEvidenceSha256,
+            initiallyAuthorized.AuthorizedRequest.StationExecutionGateEvidenceSha256);
+        Assert.Equal(
+            initiallyAuthorized.StationGateEvidence,
+            initiallyAuthorized.AuthorizedRequest.StationExecutionGateEvidence);
+        Assert.Equal(
+            gate.AgentControlLease.OwnerInstanceId,
+            initiallyAuthorized.AuthorizedRequest
+                .StationAgentControlLeaseOwnerInstanceId);
+        Assert.Equal(
+            gate.AgentControlLease.FencingToken,
+            initiallyAuthorized.AuthorizedRequest
+                .StationAgentControlLeaseFencingToken);
+        StationMessageContract.ValidateForAgentDispatch(
+            initiallyAuthorized.AuthorizedRequest);
+        Assert.Equal("recipe-definition.operation.left", gate.LastExpectedRecipe?.RecipeId);
+        Assert.Equal("recipe.operation.left", gate.LastExpectedRecipe?.RecipeVersion);
+        var store = new InMemoryStationJobCoordinationStore();
+        var leaseChange = StationDispatchMessageIdentity.CreateLeaseGranted(
+            request,
+            Assert.Single(request.ResourceFences));
+        Assert.True(await store.TryEnqueueAsync(request, [leaseChange]));
+        await store.BindStationExecutionGateEvidenceAsync(
+            initiallyAuthorized.AuthorizedRequest);
+        var durableRequest = await store.GetDispatchRequestAsync(request.JobId);
+        Assert.NotNull(durableRequest);
+        Assert.Equal(
+            initiallyAuthorized.StationGateEvidenceSha256,
+            durableRequest.StationExecutionGateEvidenceSha256);
+
+        var retryAuthorization = await authorizer.AuthorizeAsync(durableRequest);
+        Assert.True(retryAuthorization.Allowed);
+        Assert.Equal(
+            durableRequest.StationExecutionGateEvidenceSha256,
+            retryAuthorization.StationGateEvidenceSha256);
+        Assert.Equal(
+            durableRequest.StationExecutionGateAuthorizedAtUtc,
+            retryAuthorization.AuthorizedRequest?.StationExecutionGateAuthorizedAtUtc);
+
+        var boundRevision = gate.Revision;
+        gate.ReplaceRevision("station-gate-revision:v1:station.left:13:5");
+        var afterOperationalChange = await authorizer.AuthorizeAsync(durableRequest);
+        Assert.False(afterOperationalChange.Allowed);
+        Assert.Contains(
+            "stable revision changed",
+            afterOperationalChange.RejectionReason,
+            StringComparison.Ordinal);
+        gate.ReplaceRevision(boundRevision);
+
+        gate.ReplaceControlLease(new StationAgentControlLeaseDispatchAuthority(
+            "agent.left",
+            "22222222-2222-4222-8222-222222222222",
+            FencingToken: 22,
+            Now.AddMinutes(3)));
+        var afterAgentTakeover = await authorizer.AuthorizeAsync(durableRequest);
+        Assert.False(afterAgentTakeover.Allowed);
+        Assert.Contains(
+            "Durable Station execution gate evidence",
+            afterAgentTakeover.RejectionReason,
+            StringComparison.Ordinal);
+
+        gate.Block("Station safety permit changed before publication.");
+        var afterStationChange = await authorizer.AuthorizeAsync(request);
+
+        Assert.False(afterStationChange.Allowed);
+        Assert.Contains("safety permit changed", afterStationChange.RejectionReason,
+            StringComparison.Ordinal);
+        Assert.Null(afterStationChange.AuthorizedRequest);
+
+        var unmanaged = await new StationDispatchPublicationAuthorizer(
+                fixture.Repository,
+                fixture.Leases,
+                new FixedDeploymentResolver(request),
+                LegacyCompatibilityStationProductionExecutionGate.Instance,
+                fixture.Clock)
+            .AuthorizeAsync(request);
+        Assert.False(unmanaged.Allowed);
+        Assert.Contains("not enrolled", unmanaged.RejectionReason, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ColdRecoveryQuarantinesNeverPublishedDispatchAndGatewayTerminates()
     {
         var fixture = await ParallelRecoveryFixture.CreateAsync();
+        var request = await CreateDispatchRequestAsync(
+            fixture,
+            "operation.left@0001");
+        var dispatchStore = new InMemoryStationJobCoordinationStore();
+        var leaseChange = StationDispatchMessageIdentity.CreateLeaseGranted(
+            request,
+            Assert.Single(request.ResourceFences));
+        Assert.True(await dispatchStore.TryEnqueueAsync(request, [leaseChange]));
+
+        _ = await fixture.CreateRecoveryService().RecoverAsync();
+        var authorization = await new StationDispatchPublicationAuthorizer(
+                fixture.Repository,
+                fixture.Leases,
+                new FixedDeploymentResolver(request),
+                LegacyCompatibilityStationProductionExecutionGate.Instance,
+                fixture.Clock)
+            .AuthorizeAsync(request);
+        Assert.False(authorization.Allowed);
+        await dispatchStore.QuarantineJobAsync(
+            request.JobId,
+            authorization.RejectionReason!,
+            fixture.Clock.UtcNow);
+
+        var exception = await Assert.ThrowsAsync<StationJobDispatchQuarantinedException>(async () =>
+            await new DurableStationJobGateway(dispatchStore)
+                .DispatchAsync(request)
+                .AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(1)));
+        Assert.True(exception.NeverPublished);
+        Assert.Equal(2, exception.Evidence.Count);
+        Assert.Empty(await dispatchStore.ListPendingAsync(10));
+    }
+
+    private static string LeaseIdentity(ResourceLease lease) =>
+        $"{lease.Resource.Kind}/{lease.Resource.ResourceId}/{lease.OperationRunId}";
+
+    private static async Task<StationJobRequested> CreateDispatchRequestAsync(
+        ParallelRecoveryFixture fixture,
+        string operationRunId)
+    {
         var snapshot = fixture.Run.ToSnapshot();
         var operation = snapshot.Operations.Single(item => string.Equals(
             item.OperationRunId,
-            "operation.left@0001",
+            operationRunId,
             StringComparison.Ordinal));
         var lease = (await fixture.Leases.ListAsync()).Single(item => string.Equals(
             item.OperationRunId,
             operation.OperationRunId,
             StringComparison.Ordinal));
         var idempotencyKey = $"job/{snapshot.RunId.Value:D}/{operation.OperationRunId}";
-        var request = new StationJobRequested(
+        return new StationJobRequested(
             Guid.NewGuid(),
             StationJobIdentity.CreateJobId(idempotencyKey),
             idempotencyKey,
@@ -303,36 +446,7 @@ public sealed class ProductionRunRecoveryServiceTests
                 lease.ExpiresAtUtc)],
             System.Text.Json.JsonSerializer.SerializeToElement(new { }),
             Now.AddSeconds(3));
-        var dispatchStore = new InMemoryStationJobCoordinationStore();
-        var leaseChange = StationDispatchMessageIdentity.CreateLeaseGranted(
-            request,
-            Assert.Single(request.ResourceFences));
-        Assert.True(await dispatchStore.TryEnqueueAsync(request, [leaseChange]));
-
-        _ = await fixture.CreateRecoveryService().RecoverAsync();
-        var authorization = await new StationDispatchPublicationAuthorizer(
-                fixture.Repository,
-                fixture.Leases,
-                new FixedDeploymentResolver(request))
-            .AuthorizeAsync(request);
-        Assert.False(authorization.Allowed);
-        await dispatchStore.QuarantineJobAsync(
-            request.JobId,
-            authorization.RejectionReason!,
-            fixture.Clock.UtcNow);
-
-        var exception = await Assert.ThrowsAsync<StationJobDispatchQuarantinedException>(async () =>
-            await new DurableStationJobGateway(dispatchStore)
-                .DispatchAsync(request)
-                .AsTask()
-                .WaitAsync(TimeSpan.FromSeconds(1)));
-        Assert.True(exception.NeverPublished);
-        Assert.Equal(2, exception.Evidence.Count);
-        Assert.Empty(await dispatchStore.ListPendingAsync(10));
     }
-
-    private static string LeaseIdentity(ResourceLease lease) =>
-        $"{lease.Resource.Kind}/{lease.Resource.ResourceId}/{lease.OperationRunId}";
 
     private static ProductionRunLeaseHold LeaseHold(OperationRun operation) =>
         new(
@@ -366,7 +480,9 @@ public sealed class ProductionRunRecoveryServiceTests
             new InMemoryProductionRunSafetyTransitionStore(
                 fixture.Repository,
                 fixture.Leases),
-            new ProductionOperationReadinessEvaluator(fixture.Materials),
+            new ProductionOperationReadinessEvaluator(
+                fixture.Materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             fixture.Publisher,
             new GuidRuntimeIdProvider(),
@@ -412,7 +528,8 @@ public sealed class ProductionRunRecoveryServiceTests
             new ProcessDefinitionId($"process.{operationId}"),
             new ProcessVersionId($"process-version.{operationId}"),
             []),
-        []);
+        [],
+        recipeId: $"recipe-definition.{operationId}");
 
     private sealed class ParallelRecoveryFixture(
         InMemoryProductionMaterialRepository materials,
@@ -772,6 +889,58 @@ public sealed class ProductionRunRecoveryServiceTests
                 request.StationId,
                 request.PackageContentSha256,
                 request.ProductionLineDefinitionId));
+        }
+    }
+
+    private sealed class MutableStationProductionExecutionGate
+        : IStationProductionExecutionGate
+    {
+        private bool _allowed = true;
+        private string _reason = "Station lifecycle permits production dispatch.";
+
+        public string Evidence { get; } =
+            "station-lifecycle:station.left:12:Automatic:Execute|controller-handshake:37";
+
+        public string Revision { get; private set; } =
+            "station-gate-revision:v1:station.left:12:4";
+
+        public StationAgentControlLeaseDispatchAuthority AgentControlLease { get; private set; } =
+            new(
+                "agent.left",
+                "11111111-1111-4111-8111-111111111111",
+                FencingToken: 21,
+                Now.AddMinutes(3));
+
+        public void ReplaceControlLease(
+            StationAgentControlLeaseDispatchAuthority authority) =>
+            AgentControlLease = authority;
+
+        public void ReplaceRevision(string revision) => Revision = revision;
+
+        public StationExecutionRecipeExpectation? LastExpectedRecipe { get; private set; }
+
+        public void Block(string reason)
+        {
+            _allowed = false;
+            _reason = reason;
+        }
+
+        public ValueTask<StationProductionExecutionGateResult> EvaluateAsync(
+            string stationSystemId,
+            StationExecutionRecipeExpectation? expectedRecipe = null,
+            CancellationToken cancellationToken = default)
+        {
+            Assert.Equal("station.left", stationSystemId);
+            cancellationToken.ThrowIfCancellationRequested();
+            LastExpectedRecipe = expectedRecipe;
+            return ValueTask.FromResult(new StationProductionExecutionGateResult(
+                Managed: true,
+                Allowed: _allowed,
+                _reason,
+                Evidence,
+                Now.AddMinutes(2),
+                AgentControlLease,
+                Revision));
         }
     }
 }

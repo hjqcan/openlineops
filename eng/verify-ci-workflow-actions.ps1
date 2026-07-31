@@ -266,6 +266,10 @@ Test-ContentContains `
     -Message "Workflow must require formal Agent and Runner release artifacts."
 Test-ContentContains `
     -Content $workflowContent `
+    -Pattern "--require-kind sample-plugin --require-kind device-sessions-plugin" `
+    -Message "Workflow must require both the compatible sample plugin and the formal device-sessions plugin release artifacts."
+Test-ContentContains `
+    -Content $workflowContent `
     -Pattern '(?ms)^\s{2}verify:\s*.*?runs-on:\s*windows-2025\s*$' `
     -Message "The Windows release and production closure job must use the explicit Windows 2025 image."
 Test-ContentContains `

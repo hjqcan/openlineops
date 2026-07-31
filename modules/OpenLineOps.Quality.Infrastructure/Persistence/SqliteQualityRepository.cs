@@ -304,7 +304,8 @@ public sealed partial class SqliteQualityRepository : IQualityRepository, IDispo
 
         var normalized = connectionString.Trim();
         var builder = new SqliteConnectionStringBuilder(normalized);
-        if (string.IsNullOrWhiteSpace(builder.DataSource)
+        if (builder.Mode == SqliteOpenMode.Memory
+            || string.IsNullOrWhiteSpace(builder.DataSource)
             || string.Equals(builder.DataSource, ":memory:", StringComparison.OrdinalIgnoreCase)
             || builder.DataSource.Contains(":memory:", StringComparison.OrdinalIgnoreCase)
             || (builder.DataSource.StartsWith("file:", StringComparison.OrdinalIgnoreCase)

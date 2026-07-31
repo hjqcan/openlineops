@@ -209,7 +209,9 @@ function Test-ReleaseArtifacts {
         "--require-kind",
         "script-worker",
         "--require-kind",
-        "sample-plugin"
+        "sample-plugin",
+        "--require-kind",
+        "device-sessions-plugin"
     )
 
     & dotnet @arguments

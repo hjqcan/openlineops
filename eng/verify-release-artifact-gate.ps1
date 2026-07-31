@@ -12,7 +12,16 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$RequiredKinds = @("source", "api", "agent", "runner", "desktop", "plugin-host", "script-worker", "sample-plugin")
+$RequiredKinds = @(
+    "source",
+    "api",
+    "agent",
+    "runner",
+    "desktop",
+    "plugin-host",
+    "script-worker",
+    "sample-plugin",
+    "device-sessions-plugin")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -97,6 +106,20 @@ foreach ($artifact in $SourceArtifacts) {
     New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
     Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $destinationDirectory (Split-Path $sourcePath -Leaf)) -Force
 }
+
+$deviceSessionsManifestPath = Resolve-RepoPath "plugins/builtin/OpenLineOps.BuiltinPlugins.DeviceSessions/manifest.json"
+$deviceSessionsAssemblyPath = Resolve-RepoPath "plugins/builtin/OpenLineOps.BuiltinPlugins.DeviceSessions/bin/$Configuration/net10.0/OpenLineOps.BuiltinPlugins.DeviceSessions.dll"
+foreach ($deviceSessionsPath in @($deviceSessionsManifestPath, $deviceSessionsAssemblyPath)) {
+    if (-not (Test-Path -LiteralPath $deviceSessionsPath -PathType Leaf)) {
+        throw "Missing built device-sessions-plugin package content: $deviceSessionsPath"
+    }
+}
+$deviceSessionsArtifactDirectory = Join-Path $ResolvedArtifactsRoot "device-sessions-plugin"
+New-Item -ItemType Directory -Path $deviceSessionsArtifactDirectory -Force | Out-Null
+Compress-Archive `
+    -LiteralPath @($deviceSessionsManifestPath, $deviceSessionsAssemblyPath) `
+    -DestinationPath (Join-Path $deviceSessionsArtifactDirectory "device-sessions-plugin-openlineops-$Version.zip") `
+    -CompressionLevel Optimal
 
 $manifestPath = Join-Path $ResolvedArtifactsRoot "release-manifest.json"
 $checksumsPath = Join-Path $ResolvedArtifactsRoot "checksums.sha256"

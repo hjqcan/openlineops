@@ -18,6 +18,15 @@ public sealed record IntegrationReplayAudit(
     DateTimeOffset ReplayedAtUtc,
     int PreviousAttemptCount);
 
+public sealed record IntegrationOutboxFailureAudit(
+    long Sequence,
+    string MessageId,
+    int AttemptCount,
+    string Failure,
+    DateTimeOffset FailedAtUtc,
+    DateTimeOffset NextAttemptAtUtc,
+    bool DeadLettered);
+
 public interface IIntegrationOutboxStore
 {
     ValueTask<IReadOnlyList<IntegrationOutboundMessage>> ListReadyAsync(
@@ -34,6 +43,7 @@ public interface IIntegrationOutboxStore
         string messageId,
         int expectedAttemptCount,
         string failure,
+        DateTimeOffset failedAtUtc,
         DateTimeOffset nextAttemptAtUtc,
         bool deadLetter,
         CancellationToken cancellationToken = default);
@@ -48,14 +58,39 @@ public interface IIntegrationOutboxStore
     ValueTask<IReadOnlyList<IntegrationReplayAudit>> ListReplayAuditAsync(
         string messageId,
         CancellationToken cancellationToken = default);
+
+    ValueTask<IReadOnlyList<IntegrationOutboxFailureAudit>> ListFailureAuditAsync(
+        string messageId,
+        CancellationToken cancellationToken = default);
 }
 
 public interface IIntegrationConnector
 {
+    /// <summary>
+    /// Sends one durable message with at-least-once transport semantics.
+    /// Implementations must use <see cref="IntegrationOutboundMessage.MessageId"/>
+    /// as the remote idempotency key, treat an exact duplicate as success, and
+    /// reject reuse of that identity with different content by throwing
+    /// <see cref="IntegrationConnectorMessageConflictException"/>.
+    /// </summary>
     ValueTask SendAsync(
         IntegrationOutboundMessage message,
         CancellationToken cancellationToken = default);
 }
+
+public interface IIntegrationConnectorReadiness
+{
+    /// <summary>
+    /// Gets whether a send can currently be attempted. A false value pauses
+    /// dispatch without consuming retry attempts or changing durable messages.
+    /// </summary>
+    bool IsReady { get; }
+
+    string? UnavailabilityReason { get; }
+}
+
+public sealed class IntegrationConnectorMessageConflictException(string message) :
+    InvalidOperationException(message);
 
 public sealed record IntegrationOutboxDispatchOptions
 {

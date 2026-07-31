@@ -25,13 +25,17 @@ public sealed class ApiMetadataTests : IClassFixture<OpenLineOpsApiWebApplicatio
             .ToHashSet(StringComparer.Ordinal);
 
         Assert.Contains(OpenLineOpsApiGroups.Platform, groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.Commissioning, groupNames);
         Assert.Contains(OpenLineOpsApiGroups.Engineering, groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.Integration, groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.Operations, groupNames);
         Assert.Contains(OpenLineOpsApiGroups.Plugins, groupNames);
         Assert.Contains(OpenLineOpsApiGroups.Processes, groupNames);
         Assert.Contains(OpenLineOpsApiGroups.Production, groupNames);
         Assert.Contains(OpenLineOpsApiGroups.Runtime, groupNames);
         Assert.Contains(OpenLineOpsApiGroups.Traceability, groupNames);
-        Assert.Contains("quality", groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.Quality, groupNames);
+        Assert.Contains(OpenLineOpsApiGroups.Recipes, groupNames);
     }
 
     [Fact]

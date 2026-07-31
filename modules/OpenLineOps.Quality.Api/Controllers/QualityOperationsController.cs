@@ -12,7 +12,7 @@ using OpenLineOps.Quality.Domain.Nonconformances;
 namespace OpenLineOps.Quality.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = "quality")]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Quality)]
 [Route("api/quality")]
 [Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 public sealed class QualityOperationsController(IQualityService qualityService)

@@ -14,7 +14,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\shared\OpenLineOps.Application.Abstractions\OpenLineOps.Application.Abstractions.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Commissioning.Api\OpenLineOps.Commissioning.Api.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Commissioning.Application\OpenLineOps.Commissioning.Application.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Commissioning.Domain\OpenLineOps.Commissioning.Domain.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Commissioning.Infrastructure\OpenLineOps.Commissioning.Infrastructure.csproj" />

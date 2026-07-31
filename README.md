@@ -81,7 +81,8 @@ This project is in early platform development.
   [Windows Station Agent Deployment](docs/station-agent-deployment.md).
 - Open source packaging: source, API, self-contained `win-x64` Agent plus Station
   Runtime, self-contained headless Runner, desktop, plugin-host, script-worker,
-  and sample-plugin artifacts; complete inner and outer SHA-256 inventories;
+  sample-plugin, and industrial device-sessions-plugin artifacts; complete
+  inner and outer SHA-256 inventories;
   release provenance and dependency metadata; shared Windows signing and strict
   executable inspection; same-run, commit-bound PostgreSQL/RabbitMQ TRX
   publication evidence; and CI artifact upload.
@@ -245,7 +246,7 @@ npm run package:win:ci
 Set-Location ..\..
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-release-artifact-gate.ps1 -Configuration Debug -Version 0.0.0-local
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/stage-release-artifacts.ps1 -Configuration Release -Version 0.0.0-local -NoRestore -SkipDesktopBuild
-dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
+dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin --require-kind device-sessions-plugin
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/inspect-release-candidate.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-release-candidate-inspection.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/verify-windows-signing-readiness.ps1

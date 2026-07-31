@@ -17,6 +17,28 @@ public interface IStationLifecycleRepository
     ValueTask<StationLifecyclePersistenceEntry?> GetByIdAsync(
         StationId stationId,
         CancellationToken cancellationToken = default);
+
+    ValueTask<IReadOnlyList<StationLifecyclePersistenceEntry>> ListAsync(
+        CancellationToken cancellationToken = default);
+}
+
+public sealed record StationLifecycleFactMetadata(
+    StationId StationId,
+    long Sequence,
+    long LifecycleRevision,
+    string Kind,
+    DateTimeOffset OccurredAtUtc,
+    string PayloadSha256,
+    string PreviousFactSha256,
+    string FactSha256);
+
+public interface IStationLifecycleFactReader
+{
+    ValueTask<IReadOnlyList<StationLifecycleFactMetadata>> ListFactsAsync(
+        StationId stationId,
+        long afterSequence = 0,
+        int pageSize = 100,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed record StationLifecyclePersistenceEntry

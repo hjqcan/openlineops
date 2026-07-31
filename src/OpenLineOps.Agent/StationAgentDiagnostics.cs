@@ -66,6 +66,9 @@ internal static partial class StationAgentDiagnostics
         message = AuthorizationSchemeValue().Replace(
             message,
             "${scheme} " + RedactedValue);
+        message = AgentLeaseProofValue().Replace(
+            message,
+            "${prefix}" + RedactedValue);
         message = SensitiveKeyValue().Replace(
             message,
             "${prefix}" + RedactedValue);
@@ -198,6 +201,11 @@ internal static partial class StationAgentDiagnostics
         @"\b(?<scheme>Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex AuthorizationSchemeValue();
+
+    [GeneratedRegex(
+        @"\b(?<prefix>X-OpenLineOps-Agent-Lease\s*[:=]\s*)[A-Za-z0-9_-]+",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex AgentLeaseProofValue();
 
     [GeneratedRegex(
         @"\b(?<prefix>(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token)\s*[:=]\s*)(?:""[^""]*""|'[^']*'|[^\s,;]+)",

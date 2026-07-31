@@ -29,6 +29,10 @@ public sealed class OperationsDbContext(
 
     public DbSet<Alarm> Alarms => Set<Alarm>();
 
+    public DbSet<AlarmDefinition> AlarmDefinitions => Set<AlarmDefinition>();
+
+    public DbSet<AlarmLifecycleFact> AlarmLifecycleFacts => Set<AlarmLifecycleFact>();
+
     public void EnsureSchemaReady()
     {
         if (_schemaReady)

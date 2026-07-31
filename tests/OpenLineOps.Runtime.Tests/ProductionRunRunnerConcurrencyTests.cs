@@ -8,6 +8,7 @@ using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Application.Sessions;
+using OpenLineOps.Runtime.Application.Stations;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Materials;
@@ -53,7 +54,9 @@ public sealed class ProductionRunRunnerConcurrencyTests
             repository,
             leases,
             new InMemoryProductionRunSafetyTransitionStore(repository, leases),
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             new GuidRuntimeIdProvider(),
@@ -113,7 +116,9 @@ public sealed class ProductionRunRunnerConcurrencyTests
             repository,
             leases,
             new InMemoryProductionRunSafetyTransitionStore(repository, leases),
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             new GuidRuntimeIdProvider(),
@@ -192,7 +197,9 @@ public sealed class ProductionRunRunnerConcurrencyTests
             repository,
             leases,
             new InMemoryProductionRunSafetyTransitionStore(repository, leases),
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             new GuidRuntimeIdProvider(),
@@ -328,7 +335,9 @@ public sealed class ProductionRunRunnerConcurrencyTests
             repository,
             leases,
             innerLeases,
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             clock);
@@ -337,7 +346,9 @@ public sealed class ProductionRunRunnerConcurrencyTests
             repository,
             leases,
             innerLeases,
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             clock);

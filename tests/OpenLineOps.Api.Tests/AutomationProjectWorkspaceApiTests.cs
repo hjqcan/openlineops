@@ -1411,9 +1411,13 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                 "Decimal",
                 voltageParameter.GetProperty("type").GetString());
 
+            using var compatibilityPublish = await _client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/publish",
+                content: null);
             using var prematureRelease = await _client.PostAsync(
                 $"{engineeringBase}/recipes/{recipeId}/release",
                 content: null);
+            Assert.Equal(HttpStatusCode.Conflict, compatibilityPublish.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, prematureRelease.StatusCode);
 
             using var validate = await _client.PostAsync(
@@ -1664,8 +1668,14 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
                 displayName = "Release Recipe",
                 parameters = new[] { new { key = "scan.mode", value = "release" } }
             });
-        using var publishRecipeResponse = await _client.PostAsync(
-            $"{engineeringBase}/recipes/{recipeId}/publish",
+        using var validateRecipeResponse = await _client.PostAsync(
+            $"{engineeringBase}/recipes/{recipeId}/validate",
+            content: null);
+        using var approveRecipeResponse = await _client.PostAsync(
+            $"{engineeringBase}/recipes/{recipeId}/approve",
+            content: null);
+        using var releaseRecipeResponse = await _client.PostAsync(
+            $"{engineeringBase}/recipes/{recipeId}/release",
             content: null);
         using var createStationResponse = await _client.PostAsJsonAsync(
             $"{engineeringBase}/station-profiles",
@@ -1706,7 +1716,9 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
 
         Assert.Equal(HttpStatusCode.Created, createWorkspaceResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, createRecipeResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, publishRecipeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, validateRecipeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, approveRecipeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, releaseRecipeResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, createStationResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, createProjectResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, publishSnapshotResponse.StatusCode);

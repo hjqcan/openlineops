@@ -781,8 +781,14 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
                     new { key = "voltage.max", value = recipeParameterValue }
                 }
             });
-        using var publishRecipeResponse = await client.PostAsync(
-            $"{engineeringBase}/recipes/{recipeId}/publish",
+        using var validateRecipeResponse = await client.PostAsync(
+            $"{engineeringBase}/recipes/{recipeId}/validate",
+            content: null);
+        using var approveRecipeResponse = await client.PostAsync(
+            $"{engineeringBase}/recipes/{recipeId}/approve",
+            content: null);
+        using var releaseRecipeResponse = await client.PostAsync(
+            $"{engineeringBase}/recipes/{recipeId}/release",
             content: null);
         using var stationResponse = await client.PostAsJsonAsync(
             $"{engineeringBase}/station-profiles",
@@ -824,7 +830,9 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
 
         Assert.Equal(HttpStatusCode.Created, workspaceResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, recipeResponse.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, publishRecipeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, validateRecipeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, approveRecipeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, releaseRecipeResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, stationResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, projectResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, snapshotResponse.StatusCode);

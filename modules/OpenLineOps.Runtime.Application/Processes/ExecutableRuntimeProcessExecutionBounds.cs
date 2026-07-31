@@ -37,7 +37,8 @@ public static class ExecutableRuntimeProcessExecutionBounds
         {
             var ticks = process.Nodes.Aggregate(
                 0L,
-                static (total, node) => checked(total + node.Timeout.Ticks));
+                static (total, node) => checked(
+                    total + checked(node.Timeout.Ticks * (node.RetryLimit + 1L))));
             return new ExecutableRuntimeProcessBounds(
                 TimeSpan.FromTicks(ticks),
                 process.Nodes.Count);
@@ -256,7 +257,9 @@ public static class ExecutableRuntimeProcessExecutionBounds
                 }
 
                 var ownTicks = executableNodes.TryGetValue(nodeId, out var executableNode)
-                    ? executableNode.Timeout.Ticks
+                    ? checked(
+                        executableNode.Timeout.Ticks
+                        * (executableNode.RetryLimit + 1L))
                     : 0L;
                 result.Add(nodeId, new AcyclicSegmentBounds(
                     checked(ownTicks + childTicks),

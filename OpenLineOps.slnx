@@ -3,6 +3,10 @@
     <Project Path="modules/OpenLineOps.Agent.Application/OpenLineOps.Agent.Application.csproj" />
     <Project Path="modules/OpenLineOps.Agent.Domain/OpenLineOps.Agent.Domain.csproj" />
     <Project Path="modules/OpenLineOps.Agent.Infrastructure/OpenLineOps.Agent.Infrastructure.csproj" />
+    <Project Path="modules/OpenLineOps.Commissioning.Api/OpenLineOps.Commissioning.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Commissioning.Application/OpenLineOps.Commissioning.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Commissioning.Domain/OpenLineOps.Commissioning.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Commissioning.Infrastructure/OpenLineOps.Commissioning.Infrastructure.csproj" />
     <Project Path="modules/OpenLineOps.Devices.Api/OpenLineOps.Devices.Api.csproj" />
     <Project Path="modules/OpenLineOps.Devices.Application/OpenLineOps.Devices.Application.csproj" />
     <Project Path="modules/OpenLineOps.Devices.Domain/OpenLineOps.Devices.Domain.csproj" />
@@ -27,6 +31,14 @@
     <Project Path="modules/OpenLineOps.Processes.Application/OpenLineOps.Processes.Application.csproj" />
     <Project Path="modules/OpenLineOps.Processes.Domain/OpenLineOps.Processes.Domain.csproj" />
     <Project Path="modules/OpenLineOps.Processes.Infrastructure/OpenLineOps.Processes.Infrastructure.csproj" />
+    <Project Path="modules/OpenLineOps.Integration.Api/OpenLineOps.Integration.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Integration.Application/OpenLineOps.Integration.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Integration.Domain/OpenLineOps.Integration.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Integration.Infrastructure/OpenLineOps.Integration.Infrastructure.csproj" />
+    <Project Path="modules/OpenLineOps.Maintenance.Api/OpenLineOps.Maintenance.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Maintenance.Application/OpenLineOps.Maintenance.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Maintenance.Domain/OpenLineOps.Maintenance.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Maintenance.Infrastructure/OpenLineOps.Maintenance.Infrastructure.csproj" />
     <Project Path="modules/OpenLineOps.Operations.Api/OpenLineOps.Operations.Api.csproj" />
     <Project Path="modules/OpenLineOps.Operations.Application.Contract/OpenLineOps.Operations.Application.Contract.csproj" />
     <Project Path="modules/OpenLineOps.Operations.Application/OpenLineOps.Operations.Application.csproj" />
@@ -34,9 +46,17 @@
     <Project Path="modules/OpenLineOps.Operations.Domain/OpenLineOps.Operations.Domain.csproj" />
     <Project Path="modules/OpenLineOps.Operations.Infra.CrossCutting.IoC/OpenLineOps.Operations.Infra.CrossCutting.IoC.csproj" />
     <Project Path="modules/OpenLineOps.Operations.Infra.Data/OpenLineOps.Operations.Infra.Data.csproj" />
+    <Project Path="modules/OpenLineOps.Operations.Metrics.Api/OpenLineOps.Operations.Metrics.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Operations.Metrics.Application/OpenLineOps.Operations.Metrics.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Operations.Metrics.Domain/OpenLineOps.Operations.Metrics.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Operations.Metrics.Infrastructure/OpenLineOps.Operations.Metrics.Infrastructure.csproj" />
     <Project Path="modules/OpenLineOps.Plugins.Api/OpenLineOps.Plugins.Api.csproj" />
     <Project Path="modules/OpenLineOps.Plugins.Application/OpenLineOps.Plugins.Application.csproj" />
     <Project Path="modules/OpenLineOps.Plugins.Infrastructure/OpenLineOps.Plugins.Infrastructure.csproj" />
+    <Project Path="modules/OpenLineOps.Recipes.Api/OpenLineOps.Recipes.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Recipes.Application/OpenLineOps.Recipes.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Recipes.Domain/OpenLineOps.Recipes.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Recipes.Infrastructure/OpenLineOps.Recipes.Infrastructure.csproj" />
     <Project Path="modules/OpenLineOps.Runtime.Api/OpenLineOps.Runtime.Api.csproj" />
     <Project Path="modules/OpenLineOps.Runtime.Application/OpenLineOps.Runtime.Application.csproj" />
     <Project Path="modules/OpenLineOps.Runtime.Domain/OpenLineOps.Runtime.Domain.csproj" />
@@ -54,6 +74,10 @@
     <Project Path="lib/NetDevPack/src/NetDevPack/NetDevPack.csproj" />
     <Project Path="lib/pythonscript/PythonScript/PythonScript.csproj" />
   </Folder>
+  <Folder Name="/plugins/" />
+  <Folder Name="/plugins/builtin/">
+    <Project Path="plugins/builtin/OpenLineOps.BuiltinPlugins.DeviceSessions/OpenLineOps.BuiltinPlugins.DeviceSessions.csproj" />
+  </Folder>
   <Folder Name="/samples/" />
   <Folder Name="/samples/bounded-contexts/">
     <Project Path="samples/bounded-contexts/OpenLineOps.SampleInspection.Application/OpenLineOps.SampleInspection.Application.csproj" />
@@ -61,6 +85,7 @@
     <Project Path="samples/bounded-contexts/OpenLineOps.SampleInspection.Infrastructure/OpenLineOps.SampleInspection.Infrastructure.csproj" />
   </Folder>
   <Folder Name="/samples/plugins/">
+    <Project Path="samples/plugins/OpenLineOps.SamplePlugins.DeviceSimulator/OpenLineOps.SamplePlugins.DeviceSimulator.csproj" />
     <Project Path="samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj" />
     <Project Path="samples/plugins/OpenLineOps.SamplePlugins.QualityGate/OpenLineOps.SamplePlugins.QualityGate.csproj" />
   </Folder>
@@ -94,12 +119,18 @@
     <Project Path="tests/OpenLineOps.Api.TestHelper/OpenLineOps.Api.TestHelper.csproj" />
     <Project Path="tests/OpenLineOps.Api.Tests/OpenLineOps.Api.Tests.csproj" />
     <Project Path="tests/OpenLineOps.BoundedContext.Scaffolder.Tests/OpenLineOps.BoundedContext.Scaffolder.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.BuiltinPlugins.DeviceSessions.Tests/OpenLineOps.BuiltinPlugins.DeviceSessions.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Commissioning.Tests/OpenLineOps.Commissioning.Tests.csproj" />
     <Project Path="tests/OpenLineOps.ContentProtection.Tests/OpenLineOps.ContentProtection.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Devices.Tests/OpenLineOps.Devices.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Domain.Abstractions.Tests/OpenLineOps.Domain.Abstractions.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Engineering.Tests/OpenLineOps.Engineering.Tests.csproj" />
     <Project Path="tests/OpenLineOps.EventBus.Tests/OpenLineOps.EventBus.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Infrastructure.Data.Core.Tests/OpenLineOps.Infrastructure.Data.Core.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Integration.Api.Tests/OpenLineOps.Integration.Api.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Integration.Tests/OpenLineOps.Integration.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Maintenance.Tests/OpenLineOps.Maintenance.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Operations.Metrics.Tests/OpenLineOps.Operations.Metrics.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Operations.Tests/OpenLineOps.Operations.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Plugins.Tests/OpenLineOps.Plugins.Tests.csproj" />
     <Project Path="tests/OpenLineOps.PostgresIntegration.Tests/OpenLineOps.PostgresIntegration.Tests.csproj" />
@@ -109,6 +140,7 @@
     <Project Path="tests/OpenLineOps.Production.Tests/OpenLineOps.Production.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Projects.Tests/OpenLineOps.Projects.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Quality.Tests/OpenLineOps.Quality.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Recipes.Tests/OpenLineOps.Recipes.Tests.csproj" />
     <Project Path="tests/OpenLineOps.ReleaseManifest.Tests/OpenLineOps.ReleaseManifest.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Runner.Tests/OpenLineOps.Runner.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Runtime.Tests/OpenLineOps.Runtime.Tests.csproj" />

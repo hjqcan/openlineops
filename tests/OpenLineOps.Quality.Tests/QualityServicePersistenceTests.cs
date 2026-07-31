@@ -225,6 +225,9 @@ public sealed class QualityServicePersistenceTests : IDisposable
         var memoryResult = validator.Validate(
             name: null,
             new QualityPersistenceOptions { ConnectionString = "Data Source=:memory:" });
+        var memoryModeResult = validator.Validate(
+            name: null,
+            new QualityPersistenceOptions { ConnectionString = "Data Source=quality;Mode=Memory" });
         var paddedPathResult = validator.Validate(
             name: null,
             new QualityPersistenceOptions { DatabasePath = " data/quality.sqlite" });
@@ -232,6 +235,7 @@ public sealed class QualityServicePersistenceTests : IDisposable
         Assert.True(defaultResult.Succeeded);
         Assert.True(providerResult.Failed);
         Assert.True(memoryResult.Failed);
+        Assert.True(memoryModeResult.Failed);
         Assert.True(paddedPathResult.Failed);
     }
 

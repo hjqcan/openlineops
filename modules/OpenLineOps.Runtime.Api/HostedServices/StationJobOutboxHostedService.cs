@@ -33,6 +33,11 @@ public sealed class StationJobOutboxHostedService(
             LogLevel.Critical,
             new EventId(2, "StationDispatchQuarantined"),
             "Station dispatch outbox message {MessageId} was quarantined: {Reason}");
+    private static readonly Action<ILogger, Guid, string, Exception?> LogAuthorized =
+        LoggerMessage.Define<Guid, string>(
+            LogLevel.Information,
+            new EventId(3, "StationDispatchPublicationAuthorized"),
+            "Station dispatch outbox message {MessageId} publication was authorized by Station gate evidence {StationGateEvidenceSha256}.");
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -43,11 +48,6 @@ public sealed class StationJobOutboxHostedService(
             {
                 try
                 {
-                    if (!await AuthorizeOrQuarantineAsync(item, stoppingToken).ConfigureAwait(false))
-                    {
-                        continue;
-                    }
-
                     switch (item.Kind)
                     {
                         case nameof(ResourceLeaseChanged):
@@ -62,12 +62,39 @@ public sealed class StationJobOutboxHostedService(
                                     "Resource lease outbox Job identity is inconsistent.");
                             }
 
-                            if (!await AuthorizeOrQuarantineAsync(item, stoppingToken)
-                                    .ConfigureAwait(false))
+                            var leaseAuthorization = await AuthorizeOrQuarantineAsync(
+                                    item,
+                                    stoppingToken)
+                                .ConfigureAwait(false);
+                            if (leaseAuthorization is null)
                             {
                                 continue;
                             }
 
+                            _ = await store
+                                .BindStationExecutionGateEvidenceAsync(
+                                    leaseAuthorization.AuthorizedRequest!,
+                                    stoppingToken)
+                                .ConfigureAwait(false);
+                            var finalLeaseAuthorization = await AuthorizeOrQuarantineAsync(
+                                    item,
+                                    stoppingToken)
+                                .ConfigureAwait(false);
+                            if (finalLeaseAuthorization is null)
+                            {
+                                continue;
+                            }
+
+                            var leaseAuthorizedRequest =
+                                finalLeaseAuthorization.AuthorizedRequest!;
+                            RequireCurrentAuthorization(
+                                leaseAuthorizedRequest,
+                                clock.UtcNow);
+                            LogAuthorized(
+                                logger,
+                                item.MessageId,
+                                leaseAuthorizedRequest.StationExecutionGateEvidenceSha256!,
+                                null);
                             await publisher.PublishAsync(change, stoppingToken).ConfigureAwait(false);
                             break;
                         case nameof(StationJobRequested):
@@ -82,13 +109,43 @@ public sealed class StationJobOutboxHostedService(
                                     "Station job outbox Job identity is inconsistent.");
                             }
 
-                            if (!await AuthorizeOrQuarantineAsync(item, stoppingToken)
-                                    .ConfigureAwait(false))
+                            var jobAuthorization = await AuthorizeOrQuarantineAsync(
+                                    item,
+                                    stoppingToken)
+                                .ConfigureAwait(false);
+                            if (jobAuthorization is null)
                             {
                                 continue;
                             }
 
-                            await publisher.PublishAsync(request, stoppingToken).ConfigureAwait(false);
+                            _ = await store
+                                .BindStationExecutionGateEvidenceAsync(
+                                    jobAuthorization.AuthorizedRequest!,
+                                    stoppingToken)
+                                .ConfigureAwait(false);
+                            var finalJobAuthorization = await AuthorizeOrQuarantineAsync(
+                                    item,
+                                    stoppingToken)
+                                .ConfigureAwait(false);
+                            if (finalJobAuthorization is null)
+                            {
+                                continue;
+                            }
+
+                            var jobAuthorizedRequest =
+                                finalJobAuthorization.AuthorizedRequest!;
+                            RequireCurrentAuthorization(
+                                jobAuthorizedRequest,
+                                clock.UtcNow);
+                            LogAuthorized(
+                                logger,
+                                item.MessageId,
+                                jobAuthorizedRequest.StationExecutionGateEvidenceSha256!,
+                                null);
+                            await publisher.PublishAsync(
+                                    jobAuthorizedRequest,
+                                    stoppingToken)
+                                .ConfigureAwait(false);
                             break;
                         default:
                             throw new InvalidDataException(
@@ -129,7 +186,7 @@ public sealed class StationJobOutboxHostedService(
         }
     }
 
-    private async ValueTask<bool> AuthorizeOrQuarantineAsync(
+    private async ValueTask<StationDispatchPublicationDecision?> AuthorizeOrQuarantineAsync(
         StationJobOutboxItem item,
         CancellationToken cancellationToken)
     {
@@ -144,7 +201,7 @@ public sealed class StationJobOutboxHostedService(
             .ConfigureAwait(false);
         if (decision.Allowed)
         {
-            return true;
+            return decision;
         }
 
         var reason = decision.RejectionReason
@@ -156,6 +213,20 @@ public sealed class StationJobOutboxHostedService(
                 CancellationToken.None)
             .ConfigureAwait(false);
         LogQuarantined(logger, item.MessageId, reason, null);
-        return false;
+        return null;
+    }
+
+    private static void RequireCurrentAuthorization(
+        StationJobRequested request,
+        DateTimeOffset nowUtc)
+    {
+        StationMessageContract.ValidateForAgentDispatch(request);
+        if (request.StationExecutionGateAuthorizedAtUtc > nowUtc
+            || request.StationExecutionGateExpiresAtUtc <= nowUtc
+            || request.StationAgentControlLeaseExpiresAtUtc <= nowUtc)
+        {
+            throw new InvalidDataException(
+                "Durably bound Station execution authority expired before publication.");
+        }
     }
 }

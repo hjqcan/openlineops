@@ -24,7 +24,16 @@ public sealed class StationLifecycleDependencyInjectionTests
         Assert.Same(
             provider.GetRequiredService<IStationLifecycleRepository>(),
             provider.GetRequiredService<InMemoryStationLifecycleRepository>());
+        Assert.IsType<InMemoryStationControllerHandshakeRepository>(
+            provider.GetRequiredService<IStationControllerHandshakeRepository>());
+        Assert.Same(
+            provider.GetRequiredService<IStationControllerHandshakeRepository>(),
+            provider.GetRequiredService<
+                InMemoryStationControllerHandshakeRepository>());
         Assert.NotNull(scope.ServiceProvider.GetRequiredService<StationLifecycleService>());
+        Assert.NotNull(
+            scope.ServiceProvider.GetRequiredService<
+                StationControllerHandshakeService>());
     }
 
     [Fact]
@@ -46,7 +55,16 @@ public sealed class StationLifecycleDependencyInjectionTests
         Assert.Same(
             provider.GetRequiredService<IStationLifecycleRepository>(),
             provider.GetRequiredService<SqliteStationLifecycleRepository>());
+        Assert.IsType<SqliteStationControllerHandshakeRepository>(
+            provider.GetRequiredService<IStationControllerHandshakeRepository>());
+        Assert.Same(
+            provider.GetRequiredService<IStationControllerHandshakeRepository>(),
+            provider.GetRequiredService<
+                SqliteStationControllerHandshakeRepository>());
         Assert.NotNull(scope.ServiceProvider.GetRequiredService<StationLifecycleService>());
+        Assert.NotNull(
+            scope.ServiceProvider.GetRequiredService<
+                StationControllerHandshakeService>());
     }
 
     private static IConfiguration Configuration(string provider, string? databasePath = null)

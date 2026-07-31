@@ -7,6 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="coverlet.collector" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
@@ -20,8 +24,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="../../shared/OpenLineOps.Api.Abstractions/OpenLineOps.Api.Abstractions.csproj" />
     <ProjectReference Include="../../modules/OpenLineOps.Operations.Application.Contract/OpenLineOps.Operations.Application.Contract.csproj" />
     <ProjectReference Include="../../modules/OpenLineOps.Operations.Application/OpenLineOps.Operations.Application.csproj" />
+    <ProjectReference Include="../../modules/OpenLineOps.Operations.Api/OpenLineOps.Operations.Api.csproj" />
     <ProjectReference Include="../../modules/OpenLineOps.Operations.Domain/OpenLineOps.Operations.Domain.csproj" />
     <ProjectReference Include="../../modules/OpenLineOps.Operations.Infra.Data/OpenLineOps.Operations.Infra.Data.csproj" />
     <ProjectReference Include="../../shared/OpenLineOps.Infrastructure.Data.Core/OpenLineOps.Infrastructure.Data.Core.csproj" />

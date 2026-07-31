@@ -27,8 +27,150 @@ internal static class PostgreSqlOperationsSchema
             "ResolvedBy" character varying(160) NULL,
             "ResolvedAtUtc" bigint NULL,
             "ResolutionNote" character varying(1000) NULL,
+            "DefinitionId" character varying(160) NULL,
+            "LastChangedAtUtc" bigint NOT NULL,
+            "Version" bigint NOT NULL,
+            "SourceActive" boolean NOT NULL,
+            "SourceClearedBy" character varying(160) NULL,
+            "SourceClearedAtUtc" bigint NULL,
+            "SourceClearanceNote" character varying(1000) NULL,
+            "IsLatching" boolean NOT NULL,
+            "RequiresBuzzer" boolean NOT NULL,
+            "MaximumShelfSeconds" integer NOT NULL,
+            "EscalationDelaySeconds" integer NULL,
+            "EscalationAction" character varying(32) NOT NULL,
+            "AcknowledgementComment" character varying(1000) NULL,
+            "ShelvedBy" character varying(160) NULL,
+            "ShelfComment" character varying(1000) NULL,
+            "ShelvedAtUtc" bigint NULL,
+            "ShelvedUntilUtc" bigint NULL,
+            "SuppressionSource" character varying(160) NULL,
+            "SuppressionReason" character varying(1000) NULL,
+            "SuppressedBy" character varying(160) NULL,
+            "SuppressedAtUtc" bigint NULL,
+            "SuppressedUntilUtc" bigint NULL,
             CONSTRAINT "PK_operations_alarms" PRIMARY KEY ("Id")
         );
+
+        ALTER TABLE operations_alarms
+            ADD COLUMN IF NOT EXISTS "DefinitionId" character varying(160) NULL,
+            ADD COLUMN IF NOT EXISTS "LastChangedAtUtc" bigint NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS "Version" bigint NOT NULL DEFAULT 1,
+            ADD COLUMN IF NOT EXISTS "SourceActive" boolean NOT NULL DEFAULT true,
+            ADD COLUMN IF NOT EXISTS "SourceClearedBy" character varying(160) NULL,
+            ADD COLUMN IF NOT EXISTS "SourceClearedAtUtc" bigint NULL,
+            ADD COLUMN IF NOT EXISTS "SourceClearanceNote" character varying(1000) NULL,
+            ADD COLUMN IF NOT EXISTS "IsLatching" boolean NOT NULL DEFAULT false,
+            ADD COLUMN IF NOT EXISTS "RequiresBuzzer" boolean NOT NULL DEFAULT false,
+            ADD COLUMN IF NOT EXISTS "MaximumShelfSeconds" integer NOT NULL DEFAULT 900,
+            ADD COLUMN IF NOT EXISTS "EscalationDelaySeconds" integer NULL,
+            ADD COLUMN IF NOT EXISTS "EscalationAction" character varying(32) NOT NULL DEFAULT 'None',
+            ADD COLUMN IF NOT EXISTS "AcknowledgementComment" character varying(1000) NULL,
+            ADD COLUMN IF NOT EXISTS "ShelvedBy" character varying(160) NULL,
+            ADD COLUMN IF NOT EXISTS "ShelfComment" character varying(1000) NULL,
+            ADD COLUMN IF NOT EXISTS "ShelvedAtUtc" bigint NULL,
+            ADD COLUMN IF NOT EXISTS "ShelvedUntilUtc" bigint NULL,
+            ADD COLUMN IF NOT EXISTS "SuppressionSource" character varying(160) NULL,
+            ADD COLUMN IF NOT EXISTS "SuppressionReason" character varying(1000) NULL,
+            ADD COLUMN IF NOT EXISTS "SuppressedBy" character varying(160) NULL,
+            ADD COLUMN IF NOT EXISTS "SuppressedAtUtc" bigint NULL,
+            ADD COLUMN IF NOT EXISTS "SuppressedUntilUtc" bigint NULL;
+
+        UPDATE operations_alarms
+        SET "LastChangedAtUtc" = "RaisedAtUtc"
+        WHERE "LastChangedAtUtc" = 0;
+
+        UPDATE operations_alarms
+        SET "SourceActive" = false,
+            "SourceClearedBy" = COALESCE("SourceClearedBy", "ResolvedBy"),
+            "SourceClearedAtUtc" = COALESCE("SourceClearedAtUtc", "ResolvedAtUtc"),
+            "SourceClearanceNote" = COALESCE("SourceClearanceNote", "ResolutionNote")
+        WHERE "Status" = 'Resolved';
+
+        UPDATE operations_alarms
+        SET "RequiresBuzzer" = true
+        WHERE "Severity" IN ('Major', 'Critical')
+          AND "DefinitionId" IS NULL;
+
+        CREATE TABLE IF NOT EXISTS operations_alarm_definitions (
+            "Id" character varying(160) NOT NULL,
+            "StationId" character varying(160) NOT NULL,
+            "Source" character varying(160) NOT NULL,
+            "Severity" character varying(32) NOT NULL,
+            "Title" character varying(200) NOT NULL,
+            "Description" character varying(1000) NOT NULL,
+            "IsLatching" boolean NOT NULL,
+            "RequiresBuzzer" boolean NOT NULL,
+            "MaximumShelfSeconds" integer NOT NULL,
+            "EscalationDelaySeconds" integer NULL,
+            "EscalationAction" character varying(32) NOT NULL,
+            "CreatedBy" character varying(160) NOT NULL,
+            "CreatedAtUtc" bigint NOT NULL,
+            "RegistrationCommandId" character varying(200) NOT NULL,
+            "CommandFingerprint" character varying(64) NOT NULL,
+            "ContentSha256" character varying(64) NOT NULL,
+            CONSTRAINT "PK_operations_alarm_definitions" PRIMARY KEY ("Id")
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS "IX_operations_alarm_definitions_RegistrationCommandId"
+            ON operations_alarm_definitions ("RegistrationCommandId");
+        CREATE INDEX IF NOT EXISTS "IX_operations_alarm_definitions_StationId_Source"
+            ON operations_alarm_definitions ("StationId", "Source");
+
+        CREATE TABLE IF NOT EXISTS operations_alarm_lifecycle_facts (
+            "Sequence" bigint GENERATED BY DEFAULT AS IDENTITY NOT NULL,
+            "FactId" character varying(160) NOT NULL,
+            "AlarmId" character varying(160) NOT NULL,
+            "AlarmVersion" bigint NOT NULL,
+            "CommandId" character varying(200) NOT NULL,
+            "CommandFingerprint" character varying(64) NOT NULL,
+            "Action" character varying(32) NOT NULL,
+            "ActorId" character varying(160) NOT NULL,
+            "OccurredAtUtc" bigint NOT NULL,
+            "PayloadJson" character varying(8000) NOT NULL,
+            "PreviousSha256" character varying(64) NOT NULL,
+            "ContentSha256" character varying(64) NOT NULL,
+            CONSTRAINT "PK_operations_alarm_lifecycle_facts" PRIMARY KEY ("Sequence")
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS "IX_operations_alarm_lifecycle_facts_FactId"
+            ON operations_alarm_lifecycle_facts ("FactId");
+        CREATE UNIQUE INDEX IF NOT EXISTS "IX_operations_alarm_lifecycle_facts_CommandId"
+            ON operations_alarm_lifecycle_facts ("CommandId");
+        CREATE UNIQUE INDEX IF NOT EXISTS "IX_operations_alarm_lifecycle_facts_AlarmId_AlarmVersion"
+            ON operations_alarm_lifecycle_facts ("AlarmId", "AlarmVersion");
+        CREATE INDEX IF NOT EXISTS "IX_operations_alarm_lifecycle_facts_AlarmId_Sequence"
+            ON operations_alarm_lifecycle_facts ("AlarmId", "Sequence");
+
+        CREATE OR REPLACE FUNCTION openlineops_operations_reject_immutable_change()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'operations alarm audit records are append-only';
+        END;
+        $$;
+
+        DROP TRIGGER IF EXISTS operations_alarm_definitions_no_update
+            ON operations_alarm_definitions;
+        CREATE TRIGGER operations_alarm_definitions_no_update
+            BEFORE UPDATE ON operations_alarm_definitions
+            FOR EACH ROW EXECUTE FUNCTION openlineops_operations_reject_immutable_change();
+        DROP TRIGGER IF EXISTS operations_alarm_definitions_no_delete
+            ON operations_alarm_definitions;
+        CREATE TRIGGER operations_alarm_definitions_no_delete
+            BEFORE DELETE ON operations_alarm_definitions
+            FOR EACH ROW EXECUTE FUNCTION openlineops_operations_reject_immutable_change();
+        DROP TRIGGER IF EXISTS operations_alarm_lifecycle_facts_no_update
+            ON operations_alarm_lifecycle_facts;
+        CREATE TRIGGER operations_alarm_lifecycle_facts_no_update
+            BEFORE UPDATE ON operations_alarm_lifecycle_facts
+            FOR EACH ROW EXECUTE FUNCTION openlineops_operations_reject_immutable_change();
+        DROP TRIGGER IF EXISTS operations_alarm_lifecycle_facts_no_delete
+            ON operations_alarm_lifecycle_facts;
+        CREATE TRIGGER operations_alarm_lifecycle_facts_no_delete
+            BEFORE DELETE ON operations_alarm_lifecycle_facts
+            FOR EACH ROW EXECUTE FUNCTION openlineops_operations_reject_immutable_change();
 
         CREATE INDEX IF NOT EXISTS "IX_operations_alarms_RaisedAtUtc"
             ON operations_alarms ("RaisedAtUtc");
@@ -51,7 +193,29 @@ internal static class PostgreSqlOperationsSchema
         new("AcknowledgedAtUtc", "int8", true, null),
         new("ResolvedBy", "varchar", true, 160),
         new("ResolvedAtUtc", "int8", true, null),
-        new("ResolutionNote", "varchar", true, 1000)
+        new("ResolutionNote", "varchar", true, 1000),
+        new("DefinitionId", "varchar", true, 160),
+        new("LastChangedAtUtc", "int8", false, null),
+        new("Version", "int8", false, null),
+        new("SourceActive", "bool", false, null),
+        new("SourceClearedBy", "varchar", true, 160),
+        new("SourceClearedAtUtc", "int8", true, null),
+        new("SourceClearanceNote", "varchar", true, 1000),
+        new("IsLatching", "bool", false, null),
+        new("RequiresBuzzer", "bool", false, null),
+        new("MaximumShelfSeconds", "int4", false, null),
+        new("EscalationDelaySeconds", "int4", true, null),
+        new("EscalationAction", "varchar", false, 32),
+        new("AcknowledgementComment", "varchar", true, 1000),
+        new("ShelvedBy", "varchar", true, 160),
+        new("ShelfComment", "varchar", true, 1000),
+        new("ShelvedAtUtc", "int8", true, null),
+        new("ShelvedUntilUtc", "int8", true, null),
+        new("SuppressionSource", "varchar", true, 160),
+        new("SuppressionReason", "varchar", true, 1000),
+        new("SuppressedBy", "varchar", true, 160),
+        new("SuppressedAtUtc", "int8", true, null),
+        new("SuppressedUntilUtc", "int8", true, null)
     ];
 
     private static readonly ExpectedPrimaryKeyColumn[] ExpectedPrimaryKeyColumns =

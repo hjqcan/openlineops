@@ -1,5 +1,6 @@
 using OpenLineOps.Integration.Application.Inbox;
 using OpenLineOps.Integration.Application.Outbox;
+using OpenLineOps.Integration.Application.Serialization;
 using OpenLineOps.Integration.Domain.Identifiers;
 using OpenLineOps.Integration.Domain.WorkOrders;
 using OpenLineOps.Integration.Infrastructure.Persistence;
@@ -8,6 +9,196 @@ namespace OpenLineOps.Integration.Tests;
 
 public sealed class SqliteIntegrationStoreTests
 {
+    [Fact]
+    public async Task ConnectorContentConflictIsDeadLetteredWithoutPointlessRetries()
+    {
+        using var database = new TemporaryIntegrationDatabase();
+        using var store = new SqliteIntegrationStore(database.ConnectionString);
+        var request = IntegrationTestData.Request("request-connector-conflict");
+        await new IdempotentWorkRequestService(
+                store,
+                new CountingWorkRequestHandler())
+            .ProcessAsync(request, IntegrationTestData.Epoch.AddSeconds(2));
+        var dispatchAt = IntegrationTestData.Epoch.AddMinutes(5);
+        var dispatcher = new IntegrationOutboxDispatcher(
+            store,
+            new ContentConflictConnector(),
+            new IntegrationOutboxDispatchOptions(maximumAttempts: 5));
+
+        Assert.Equal(0, await dispatcher.DispatchAsync(1, dispatchAt));
+
+        var snapshot = Assert.IsType<IntegrationOutboxSnapshot>(
+            await store.GetOutboxAsync($"response-{request.Id.Value}"));
+        Assert.Equal(1, snapshot.AttemptCount);
+        Assert.Equal(dispatchAt, snapshot.DeadLetteredAtUtc);
+        Assert.Contains(
+            "different content",
+            Assert.IsType<string>(snapshot.LastError));
+        var failure = Assert.Single(
+            await store.ListFailureAuditAsync($"response-{request.Id.Value}"));
+        Assert.Equal(1, failure.AttemptCount);
+        Assert.Equal(dispatchAt, failure.FailedAtUtc);
+        Assert.True(failure.DeadLettered);
+    }
+
+    [Fact]
+    public async Task LegacyPendingInboxSchemaIsUpgradedAndSafelyReclaimed()
+    {
+        using var database = new TemporaryIntegrationDatabase();
+        var request = IntegrationTestData.Request("request-schema-upgrade");
+        var requestJson = IntegrationMessageCodec.Encode(request);
+        await using (var connection =
+                     new Microsoft.Data.Sqlite.SqliteConnection(database.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE integration_inbox (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT NOT NULL UNIQUE,
+                    content_sha256 TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    received_at_utc TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    response_message_id TEXT NULL,
+                    response_json TEXT NULL,
+                    completed_at_utc TEXT NULL
+                );
+
+                INSERT INTO integration_inbox (
+                    message_id, content_sha256, request_json, received_at_utc, status,
+                    response_message_id, response_json, completed_at_utc)
+                VALUES (
+                    $message_id, $content_sha256, $request_json, $received_at_utc, 'Pending',
+                    NULL, NULL, NULL);
+                """;
+            command.Parameters.AddWithValue("$message_id", request.Id.Value);
+            command.Parameters.AddWithValue(
+                "$content_sha256",
+                IntegrationMessageCodec.ComputeSha256(requestJson));
+            command.Parameters.AddWithValue("$request_json", requestJson);
+            command.Parameters.AddWithValue(
+                "$received_at_utc",
+                IntegrationTestData.Epoch.ToString("O"));
+            await command.ExecuteNonQueryAsync();
+        }
+
+        using var upgradedStore =
+            new SqliteIntegrationStore(database.ConnectionString);
+        var handler = new CountingWorkRequestHandler();
+        var result = await new IdempotentWorkRequestService(
+                upgradedStore,
+                handler,
+                new IntegrationInboxProcessingOptions(TimeSpan.FromMinutes(1)))
+            .ProcessAsync(
+                request,
+                IntegrationTestData.Epoch.AddMinutes(2));
+
+        Assert.Equal(WorkRequestProcessingOutcome.Processed, result.Outcome);
+        Assert.Equal(1, handler.InvocationCount);
+        var claim = Assert.Single(
+            await upgradedStore.ListClaimAuditAsync(request.Id.Value));
+        Assert.True(claim.Reclaimed);
+        Assert.Equal(request.SourceSystem, claim.ActorId);
+    }
+
+    [Fact]
+    public async Task LegacyCompletedInboxResponseHashIsBackfilledOnlyFromConsistentOutboxEvidence()
+    {
+        using var database = new TemporaryIntegrationDatabase();
+        var request = IntegrationTestData.Request("request-completed-schema-upgrade");
+        var responseJson = await CreateLegacyCompletedInboxAsync(
+            database.ConnectionString,
+            request,
+            outboxCorrelationMatches: true);
+
+        var handler = new CountingWorkRequestHandler();
+        using var upgradedStore = new SqliteIntegrationStore(database.ConnectionString);
+        var replay = await new IdempotentWorkRequestService(upgradedStore, handler)
+            .ProcessAsync(request, IntegrationTestData.Epoch.AddMinutes(2));
+
+        Assert.Equal(WorkRequestProcessingOutcome.Replayed, replay.Outcome);
+        Assert.Equal(0, handler.InvocationCount);
+        await using var connection =
+            new Microsoft.Data.Sqlite.SqliteConnection(database.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT response_sha256
+            FROM integration_inbox
+            WHERE message_id = $message_id;
+            """;
+        command.Parameters.AddWithValue("$message_id", request.Id.Value);
+        Assert.Equal(
+            IntegrationMessageCodec.ComputeSha256(responseJson),
+            Assert.IsType<string>(await command.ExecuteScalarAsync()));
+    }
+
+    [Fact]
+    public async Task LegacyCompletedInboxWithUntrustedOutboxEvidenceIsNotBackfilledOrReplayed()
+    {
+        using var database = new TemporaryIntegrationDatabase();
+        var request = IntegrationTestData.Request("request-unsafe-schema-upgrade");
+        await CreateLegacyCompletedInboxAsync(
+            database.ConnectionString,
+            request,
+            outboxCorrelationMatches: false);
+
+        var handler = new CountingWorkRequestHandler();
+        using var upgradedStore = new SqliteIntegrationStore(database.ConnectionString);
+        await Assert.ThrowsAsync<InvalidDataException>(
+            async () => await new IdempotentWorkRequestService(upgradedStore, handler)
+                .ProcessAsync(request, IntegrationTestData.Epoch.AddMinutes(2)));
+        Assert.Equal(0, handler.InvocationCount);
+
+        await using var connection =
+            new Microsoft.Data.Sqlite.SqliteConnection(database.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT response_sha256
+            FROM integration_inbox
+            WHERE message_id = $message_id;
+            """;
+        command.Parameters.AddWithValue("$message_id", request.Id.Value);
+        Assert.Equal(DBNull.Value, await command.ExecuteScalarAsync());
+    }
+
+    [Fact]
+    public async Task DisposeClearsTheOwnedSqliteConnectionPool()
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "openlineops-integration-pool-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var databasePath = Path.Combine(directory, "integration.sqlite");
+        var connectionString = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Pooling = true
+        }.ToString();
+
+        try
+        {
+            using (var store = new SqliteIntegrationStore(connectionString))
+            {
+                Assert.Empty(await store.ListAsync(new WorkOrderId("order-empty")));
+            }
+
+            Directory.Delete(directory, recursive: true);
+            Assert.False(Directory.Exists(directory));
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     [Fact]
     public async Task WorkOrderFactsAreAppendOnlyExactlyReplayableAndPersisted()
     {
@@ -202,6 +393,98 @@ public sealed class SqliteIntegrationStoreTests
             Assert.Equal("Enterprise endpoint has recovered.", audit.Reason);
             Assert.Equal(replayAt, audit.ReplayedAtUtc);
             Assert.Equal(3, audit.PreviousAttemptCount);
+        }
+    }
+
+    private static async Task<string> CreateLegacyCompletedInboxAsync(
+        string connectionString,
+        OpenLineOps.Integration.Domain.Messages.WorkRequest request,
+        bool outboxCorrelationMatches)
+    {
+        var requestJson = IntegrationMessageCodec.Encode(request);
+        var response = IntegrationTestData.ResponseFor(request);
+        var responseJson = IntegrationMessageCodec.Encode(response);
+        await using var connection =
+            new Microsoft.Data.Sqlite.SqliteConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE integration_inbox (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT NOT NULL UNIQUE,
+                content_sha256 TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                received_at_utc TEXT NOT NULL,
+                status TEXT NOT NULL,
+                response_message_id TEXT NULL,
+                response_json TEXT NULL,
+                completed_at_utc TEXT NULL
+            );
+
+            CREATE TABLE integration_outbox (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT NOT NULL UNIQUE,
+                correlation_id TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL,
+                next_attempt_at_utc TEXT NOT NULL,
+                last_error TEXT NULL,
+                delivered_at_utc TEXT NULL,
+                dead_lettered_at_utc TEXT NULL
+            );
+
+            INSERT INTO integration_inbox (
+                message_id, content_sha256, request_json, received_at_utc, status,
+                response_message_id, response_json, completed_at_utc)
+            VALUES (
+                $request_id, $request_sha256, $request_json, $received_at_utc, 'Completed',
+                $response_id, $response_json, $completed_at_utc);
+
+            INSERT INTO integration_outbox (
+                message_id, correlation_id, content_sha256, payload_json,
+                created_at_utc, attempt_count, next_attempt_at_utc,
+                last_error, delivered_at_utc, dead_lettered_at_utc)
+            VALUES (
+                $response_id, $correlation_id, $response_sha256, $response_json,
+                $completed_at_utc, 0, $completed_at_utc,
+                NULL, NULL, NULL);
+            """;
+        command.Parameters.AddWithValue("$request_id", request.Id.Value);
+        command.Parameters.AddWithValue(
+            "$request_sha256",
+            IntegrationMessageCodec.ComputeSha256(requestJson));
+        command.Parameters.AddWithValue("$request_json", requestJson);
+        command.Parameters.AddWithValue(
+            "$received_at_utc",
+            IntegrationTestData.Epoch.ToString("O"));
+        command.Parameters.AddWithValue("$response_id", response.Id.Value);
+        command.Parameters.AddWithValue("$response_json", responseJson);
+        command.Parameters.AddWithValue(
+            "$response_sha256",
+            IntegrationMessageCodec.ComputeSha256(responseJson));
+        command.Parameters.AddWithValue(
+            "$correlation_id",
+            outboxCorrelationMatches ? request.Id.Value : "different-request");
+        command.Parameters.AddWithValue(
+            "$completed_at_utc",
+            response.OccurredAtUtc.ToString("O"));
+        await command.ExecuteNonQueryAsync();
+        return responseJson;
+    }
+
+    private sealed class ContentConflictConnector : IIntegrationConnector
+    {
+        public ValueTask SendAsync(
+            IntegrationOutboundMessage message,
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(message);
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromException(
+                new IntegrationConnectorMessageConflictException(
+                    "Remote idempotency key already contains different content."));
         }
     }
 }

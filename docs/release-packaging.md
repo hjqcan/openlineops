@@ -36,6 +36,7 @@ Initial release artifacts should include:
 - Plugin host build output.
 - Script worker build output.
 - Sample plugin package.
+- Built-in industrial device sessions plugin package.
 - Checksums for all binary artifacts.
 - `THIRD-PARTY-NOTICES.md` in the source archive.
 - Release notes with migration notes.
@@ -48,7 +49,7 @@ Initial release artifacts should include:
 OpenLineOps includes a .NET 10 release metadata tool:
 
 ```powershell
-dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --version 0.1.0 --artifacts artifacts/release --output artifacts/release-manifest.json --checksums artifacts/checksums.sha256 --notes artifacts/release-notes.md --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
+dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --version 0.1.0 --artifacts artifacts/release --output artifacts/release-manifest.json --checksums artifacts/checksums.sha256 --notes artifacts/release-notes.md --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin --require-kind device-sessions-plugin
 ```
 
 The tool scans the artifact directory recursively, sorts artifact paths deterministically,
@@ -67,7 +68,7 @@ directory, the tool excludes those output files from the artifact list.
 To verify an existing staged release without regenerating metadata, run:
 
 ```powershell
-dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
+dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin --require-kind device-sessions-plugin
 ```
 
 Verify mode accepts one manifest representation only: `schemaVersion` is `1`,
@@ -119,6 +120,7 @@ artifact-kind directory. The only accepted directory and manifest kind tokens ar
 - `plugin-host/`
 - `script-worker/`
 - `sample-plugin/`
+- `device-sessions-plugin/`
 - `desktop/`
 
 Tokens are case-sensitive. Aliases and root-file name prefixes are rejected. For
@@ -345,8 +347,9 @@ Use the release staging script when preparing a local release candidate:
 powershell -NoProfile -ExecutionPolicy Bypass -File eng/stage-release-artifacts.ps1 -Configuration Release -Version 0.1.0 -NoRestore
 ```
 
-The script runs `dotnet publish` for the API, plugin host, script worker, and
-sample plugin artifact; runs the desktop production build unless `-SkipDesktopBuild` is
+The script runs `dotnet publish` for the API, plugin host, script worker, sample
+plugin, and built-in device sessions plugin artifacts; runs the desktop
+production build unless `-SkipDesktopBuild` is
 provided; creates a Windows unpacked Electron package under
 `apps/desktop/release/desktop/win-unpacked` containing the IDE, a self-contained
 Windows API runtime, and the Plugin Host; optionally signs that
@@ -380,16 +383,28 @@ diagnostics. `OpenLineOps.exe` starts its bundled API automatically, stores
 mutable databases under the current user profile, and requires neither a source
 checkout nor a separately installed .NET runtime.
 
-The sample-plugin release artifact is an importable example, not a globally
-installed or automatically discovered package. Studio installs a selected ZIP
-only into `applications/<application>/plugins/<portable-id>/` and commits its
-strict `.oloapp` reference. Release and publication gates resolve only those
-Application-owned references and revalidate every file hash. Headless API
-deployment must include `OpenLineOps.PluginHost` and configure
+The sample-plugin release artifact remains an importable example. The separate
+`device-sessions-plugin` artifact is the supported built-in industrial
+connector package. Its archive is deliberately limited to the exact
+`manifest.json` and managed IL-only
+`OpenLineOps.BuiltinPlugins.DeviceSessions.dll`; the release tool rejects
+missing files, identity drift, command-inventory drift, native or mixed-mode
+payloads, and every additional executable or data file.
+
+Neither plugin is globally installed or automatically discovered. Studio
+installs a selected ZIP only into
+`applications/<application>/plugins/<portable-id>/` and commits its strict
+`.oloapp` reference. Project release freezes the complete selected package file
+inventory and hashes. Station publication then includes those frozen bytes in
+the RSA-PSS-signed `.olopkg`; the Agent verifies the signature, package identity,
+size, and every file hash before activation. Because deployment catalogs are
+snapshot-addressed, an older signed package remains independently readable for
+an authorized rollback instead of being overwritten by a newer release.
+Headless API deployment must include `OpenLineOps.PluginHost` and configure
 `OpenLineOps:Plugins:ExternalHost:ExecutablePath`; provider trial fails closed
 when that executable is absent.
 Passing `-SignWindowsPackages` signs the unpacked desktop, Agent, and Runner
-package contents before archive
+package contents plus the built-in device-sessions plugin DLL before archive
 and manifest generation when a real code-signing certificate is available. A
 signed installer or portable Electron package still remains required before a
 public production desktop release.

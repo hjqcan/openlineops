@@ -99,6 +99,31 @@ vendor program: the Agent must finish into its durable SQLite outbox, deliver
 the result once after RabbitMQ returns, and reject redelivery after restart.
 This gate is mandatory; a continuously available broker test is insufficient.
 
+## Station controller heartbeat and start permit
+
+Configure the maximum age of a Station controller report and the permitted
+controller-to-Coordinator source clock difference:
+
+```powershell
+$env:OpenLineOps__Runtime__StationControllerHandshake__TimeToLive = '00:00:05'
+$env:OpenLineOps__Runtime__StationControllerHandshake__MaximumSourceClockSkew = '00:00:30'
+$env:OpenLineOps__Runtime__StationControllerHandshake__CommandTimeout = '00:00:30'
+```
+
+Choose the heartbeat period so multiple heartbeats fit inside `TimeToLive`; do
+not lengthen the TTL to conceal unstable links. Time synchronization alarms
+must be operationally visible. Start and production dispatch independently
+reject a missing or stale heartbeat, controller error/busy state, unacknowledged
+command sequence, unconfirmed recipe, denied safety permit, excessive source
+clock skew, or unacknowledged controller-session change.
+
+The Station Agent reports the controller session ID, monotonically increasing
+heartbeat sequence, command/acknowledgement sequences, busy/completed/error
+state, exact confirmed recipe identity/version, source timestamp, and mirrored
+safety permit. The Coordinator owns receive time, identity, session recovery,
+and append-only audit facts. These checks prevent new work; they do not replace
+hardwired or certified safety functions.
+
 ## Station deployment catalog and signed packages
 
 Set the package and routing roots to shared, protected locations visible to all
@@ -238,6 +263,12 @@ list, malformed or duplicate hashes, unsupported roles, and actor spoofing in
 request bodies. Rotate credentials by provisioning a new unique entry, updating
 the caller, verifying it, then removing the old entry and restarting every
 Coordinator instance.
+
+For production human access, configure the hybrid OIDC mode documented in
+`coordinator-api-security.md`. OIDC validates an HTTPS authority, issuer,
+audience, signature, expiry, actor claim, and an explicit external-role mapping.
+It cannot grant the StationAgent role. Keep Station Agent and local safety
+credentials separate from the human identity provider.
 
 Remote cleartext HTTP is rejected. Terminate TLS in the API process or at a
 trusted reverse proxy that preserves the real remote address and forwards only

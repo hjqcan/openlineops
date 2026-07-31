@@ -6,6 +6,10 @@ public static class OpenLineOpsApiSecurity
 {
     public const string AuthenticationScheme = "OpenLineOpsBearer";
 
+    public const string StaticAuthenticationScheme = "OpenLineOpsStaticBearer";
+
+    public const string OidcAuthenticationScheme = "OpenLineOpsOidcBearer";
+
     public const string EngineeringRole = "Engineering";
 
     public const string OperatorRole = "Operator";

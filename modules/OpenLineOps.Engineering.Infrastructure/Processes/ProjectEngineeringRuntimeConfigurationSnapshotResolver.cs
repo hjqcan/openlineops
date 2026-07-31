@@ -79,6 +79,9 @@ public sealed class ProjectEngineeringRuntimeConfigurationSnapshotResolver :
             snapshot.ProcessDefinitionId.Value,
             snapshot.ProcessVersionId.Value,
             snapshot.RecipeVersionId.Value,
-            stationProfile.StationSystemId));
+            stationProfile.StationSystemId)
+        {
+            RecipeId = snapshot.RecipeId.Value
+        });
     }
 }

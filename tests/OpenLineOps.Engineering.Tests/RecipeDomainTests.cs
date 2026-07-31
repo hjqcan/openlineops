@@ -83,24 +83,28 @@ public sealed class RecipeDomainTests
     }
 
     [Fact]
-    public void CompatibilityPublishProducesCompleteLifecycleEvidence()
+    public void CompatibilityPublishCannotBypassValidationAndApproval()
     {
         var recipe = CreateRecipe();
         var publishedAtUtc = CreatedAtUtc.AddMinutes(1);
 
-        Assert.True(recipe.Publish(publishedAtUtc).Succeeded);
+        var result = recipe.Publish(publishedAtUtc);
 
-        Assert.Equal(RecipeStatus.Released, recipe.Status);
-        Assert.Equal(publishedAtUtc, recipe.ValidatedAtUtc);
-        Assert.Equal(publishedAtUtc, recipe.ApprovedAtUtc);
-        Assert.Equal(publishedAtUtc, recipe.ReleasedAtUtc);
-        Assert.False(string.IsNullOrWhiteSpace(recipe.ApprovedBy));
+        Assert.False(result.Succeeded);
+        Assert.Equal(RecipeStatus.Draft, recipe.Status);
+        Assert.Null(recipe.ValidatedAtUtc);
+        Assert.Null(recipe.ApprovedAtUtc);
+        Assert.Null(recipe.ReleasedAtUtc);
     }
 
     [Fact]
     public void ReleasedRecipeIsImmutableAndCanBeRetired()
     {
         var recipe = CreateRecipe();
+        Assert.True(recipe.Validate(CreatedAtUtc.AddSeconds(20)).Succeeded);
+        Assert.True(recipe.Approve(
+            "engineer.alice",
+            CreatedAtUtc.AddSeconds(40)).Succeeded);
         Assert.True(recipe.Publish(CreatedAtUtc.AddMinutes(1)).Succeeded);
 
         var mutation = recipe.AddOrUpdateParameter("voltage.target", "12");

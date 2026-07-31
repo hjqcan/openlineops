@@ -5,7 +5,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$sourceRoots = @("modules", "shared", "src", "tests", "tools", "samples")
+$sourceRoots = @("modules", "plugins", "shared", "src", "tests", "tools", "samples")
 $pathComparison = if ([System.IO.Path]::DirectorySeparatorChar -eq '\') {
     [System.StringComparison]::OrdinalIgnoreCase
 }

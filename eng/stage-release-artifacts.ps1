@@ -32,7 +32,16 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$RequiredKinds = @("source", "api", "agent", "runner", "desktop", "plugin-host", "script-worker", "sample-plugin")
+$RequiredKinds = @(
+    "source",
+    "api",
+    "agent",
+    "runner",
+    "desktop",
+    "plugin-host",
+    "script-worker",
+    "sample-plugin",
+    "device-sessions-plugin")
 
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string] $Path)
@@ -1124,6 +1133,8 @@ $runnerPublish = Join-Path $resolvedWorkRoot "runner"
 $pluginHostPublish = Join-Path $resolvedWorkRoot "plugin-host"
 $scriptWorkerPublish = Join-Path $resolvedWorkRoot "script-worker"
 $samplePluginPublish = Join-Path $resolvedWorkRoot "sample-plugin"
+$deviceSessionsPluginBuild = Join-Path $resolvedWorkRoot "device-sessions-plugin-build"
+$deviceSessionsPluginPublish = Join-Path $resolvedWorkRoot "device-sessions-plugin"
 $desktopStage = Join-Path $resolvedWorkRoot "desktop"
 $sourceStage = Join-Path $resolvedWorkRoot "source"
 
@@ -1173,10 +1184,22 @@ Publish-DotNetProject `
 Publish-DotNetProject `
     -ProjectPath "samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/OpenLineOps.SamplePlugins.LoopbackDevice.csproj" `
     -OutputDirectory $samplePluginPublish
+Publish-DotNetProject `
+    -ProjectPath "plugins/builtin/OpenLineOps.BuiltinPlugins.DeviceSessions/OpenLineOps.BuiltinPlugins.DeviceSessions.csproj" `
+    -OutputDirectory $deviceSessionsPluginBuild
 
 Copy-Item `
     -LiteralPath (Resolve-RepoPath "samples/plugins/OpenLineOps.SamplePlugins.LoopbackDevice/manifest.json") `
     -Destination (Join-Path $samplePluginPublish "manifest.json") `
+    -Force
+New-Item -ItemType Directory -Path $deviceSessionsPluginPublish -Force | Out-Null
+Copy-Item `
+    -LiteralPath (Resolve-RepoPath "plugins/builtin/OpenLineOps.BuiltinPlugins.DeviceSessions/manifest.json") `
+    -Destination (Join-Path $deviceSessionsPluginPublish "manifest.json") `
+    -Force
+Copy-Item `
+    -LiteralPath (Join-Path $deviceSessionsPluginBuild "OpenLineOps.BuiltinPlugins.DeviceSessions.dll") `
+    -Destination (Join-Path $deviceSessionsPluginPublish "OpenLineOps.BuiltinPlugins.DeviceSessions.dll") `
     -Force
 
 foreach ($bundle in @($agentPublish, $runnerPublish)) {
@@ -1219,7 +1242,8 @@ if ($SignWindowsPackages) {
     $signingRoots = @(
         (Join-Path $desktopPackageOutput "win-unpacked"),
         $agentPublish,
-        $runnerPublish
+        $runnerPublish,
+        $deviceSessionsPluginPublish
     )
     foreach ($signingRoot in $signingRoots) {
         $signArguments = @(
@@ -1337,6 +1361,11 @@ $archives = @(
         Kind = "sample-plugin"
         Source = $samplePluginPublish
         Archive = "sample-plugin-loopback-device-$safeVersion.zip"
+    },
+    @{
+        Kind = "device-sessions-plugin"
+        Source = $deviceSessionsPluginPublish
+        Archive = "device-sessions-plugin-openlineops-$safeVersion.zip"
     }
 )
 

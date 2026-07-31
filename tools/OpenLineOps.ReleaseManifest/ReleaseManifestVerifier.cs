@@ -167,6 +167,14 @@ public static class ReleaseManifestVerifier
                     $"Release artifact '{artifact.RelativePath}' kind mismatch. "
                     + $"Expected '{pathKind}', found '{artifact.Kind}'.");
             }
+
+            if (string.Equals(
+                    artifact.Kind,
+                    ReleaseArtifactKinds.DeviceSessionsPlugin,
+                    StringComparison.Ordinal))
+            {
+                DeviceSessionsPluginArtifactVerifier.Verify(artifactPath);
+            }
         }
     }
 

@@ -152,7 +152,8 @@ public sealed class FlowIrExecutableRuntimeProcessMapper : IFlowIrExecutableRunt
                 action.Target.Kind.ToString(),
                 action.Target.Reference))
         {
-            OperationalPolicy = ToRuntimeOperationalPolicy(action.OperationalPolicy)
+            OperationalPolicy = ToRuntimeOperationalPolicy(action.OperationalPolicy),
+            RetryLimit = action.Execution.RetryLimit
         };
     }
 

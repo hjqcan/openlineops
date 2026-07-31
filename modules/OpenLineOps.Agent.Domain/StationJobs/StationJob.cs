@@ -49,6 +49,75 @@ public sealed class StationJob : AggregateRoot<StationJobId>
             snapshot.ConfigurationSnapshotId,
             nameof(snapshot.ConfigurationSnapshotId));
         RecipeSnapshotId = Required(snapshot.RecipeSnapshotId, nameof(snapshot.RecipeSnapshotId));
+        StationExecutionGateRevision = Optional(
+            snapshot.StationExecutionGateRevision,
+            nameof(snapshot.StationExecutionGateRevision));
+        StationExecutionGateEvidence = Optional(
+            snapshot.StationExecutionGateEvidence,
+            nameof(snapshot.StationExecutionGateEvidence));
+        StationExecutionGateEvidenceSha256 = OptionalSha256(
+            snapshot.StationExecutionGateEvidenceSha256,
+            nameof(snapshot.StationExecutionGateEvidenceSha256));
+        StationExecutionGateEvidenceVersion = snapshot.StationExecutionGateEvidenceVersion;
+        StationExecutionGateAuthorizedAtUtc = OptionalUtc(
+            snapshot.StationExecutionGateAuthorizedAtUtc,
+            nameof(snapshot.StationExecutionGateAuthorizedAtUtc));
+        StationExecutionGateExpiresAtUtc = OptionalUtc(
+            snapshot.StationExecutionGateExpiresAtUtc,
+            nameof(snapshot.StationExecutionGateExpiresAtUtc));
+        StationAgentControlLeaseOwnerAgentId = Optional(
+            snapshot.StationAgentControlLeaseOwnerAgentId,
+            nameof(snapshot.StationAgentControlLeaseOwnerAgentId));
+        StationAgentControlLeaseOwnerInstanceId = Optional(
+            snapshot.StationAgentControlLeaseOwnerInstanceId,
+            nameof(snapshot.StationAgentControlLeaseOwnerInstanceId));
+        StationAgentControlLeaseFencingToken =
+            snapshot.StationAgentControlLeaseFencingToken;
+        StationAgentControlLeaseExpiresAtUtc = OptionalUtc(
+            snapshot.StationAgentControlLeaseExpiresAtUtc,
+            nameof(snapshot.StationAgentControlLeaseExpiresAtUtc));
+        var hasStationGateEvidence = StationExecutionGateEvidence is not null;
+        var hasAgentControlLease = StationAgentControlLeaseOwnerAgentId is not null;
+        var isCurrentStationGateEvidence = hasStationGateEvidence
+            && StationExecutionGateEvidenceVersion
+                == StationExecutionGateClaimCanonicalizer.CurrentVersion
+            && StationExecutionGateRevision is not null
+            && hasAgentControlLease
+            && StationAgentControlLeaseOwnerInstanceId is not null
+            && IsCanonicalOwnerInstanceId(StationAgentControlLeaseOwnerInstanceId)
+            && StationAgentControlLeaseFencingToken > 0
+            && StationAgentControlLeaseExpiresAtUtc is not null
+            && string.Equals(
+                StationAgentControlLeaseOwnerAgentId,
+                AgentId,
+                StringComparison.Ordinal)
+            && StationAgentControlLeaseExpiresAtUtc >= StationExecutionGateExpiresAtUtc;
+        var isLegacyStationGateEvidence = hasStationGateEvidence
+            && StationExecutionGateEvidenceVersion
+                == StationExecutionGateClaimCanonicalizer
+                    .LegacyVersionWithoutAgentControlLease
+            && StationExecutionGateRevision is null
+            && !hasAgentControlLease
+            && StationAgentControlLeaseOwnerInstanceId is null
+            && StationAgentControlLeaseFencingToken == 0
+            && StationAgentControlLeaseExpiresAtUtc is null;
+        if (hasStationGateEvidence != (StationExecutionGateEvidenceSha256 is not null)
+            || hasStationGateEvidence != (StationExecutionGateAuthorizedAtUtc is not null)
+            || hasStationGateEvidence != (StationExecutionGateExpiresAtUtc is not null)
+            || hasAgentControlLease != (StationAgentControlLeaseOwnerInstanceId is not null)
+            || hasAgentControlLease != (StationAgentControlLeaseExpiresAtUtc is not null)
+            || hasStationGateEvidence
+                && !isCurrentStationGateEvidence
+                && !isLegacyStationGateEvidence
+            || !hasStationGateEvidence && StationExecutionGateEvidenceVersion != 0
+            || !hasStationGateEvidence && StationExecutionGateRevision is not null
+            || !hasStationGateEvidence && hasAgentControlLease
+            || !hasStationGateEvidence && StationAgentControlLeaseFencingToken != 0
+            || StationExecutionGateExpiresAtUtc <= StationExecutionGateAuthorizedAtUtc)
+        {
+            throw new InvalidDataException(
+                "Station execution gate evidence and fingerprint are inconsistent.");
+        }
         ResourceFences = ValidateFences(
             snapshot.ResourceFences,
             StationId,
@@ -71,6 +140,15 @@ public sealed class StationJob : AggregateRoot<StationJobId>
         FailureCode = Optional(snapshot.FailureCode, nameof(snapshot.FailureCode));
         FailureReason = Optional(snapshot.FailureReason, nameof(snapshot.FailureReason));
         RequestedAtUtc = Utc(snapshot.RequestedAtUtc, nameof(snapshot.RequestedAtUtc));
+        if (hasStationGateEvidence
+            && !StationExecutionGateClaimCanonicalizer.HasValidSha256(
+                CreateStationExecutionGateClaim(),
+                StationExecutionGateEvidenceSha256!))
+        {
+            throw new InvalidDataException(
+                "Station execution gate fingerprint does not match persisted execution evidence.");
+        }
+
         AcceptedAtUtc = OptionalUtc(snapshot.AcceptedAtUtc, nameof(snapshot.AcceptedAtUtc));
         StartedAtUtc = OptionalUtc(snapshot.StartedAtUtc, nameof(snapshot.StartedAtUtc));
         LastProgressAtUtc = OptionalUtc(snapshot.LastProgressAtUtc, nameof(snapshot.LastProgressAtUtc));
@@ -104,6 +182,16 @@ public sealed class StationJob : AggregateRoot<StationJobId>
     public string FlowVersionId { get; }
     public string ConfigurationSnapshotId { get; }
     public string RecipeSnapshotId { get; }
+    public string? StationExecutionGateRevision { get; }
+    public string? StationExecutionGateEvidence { get; }
+    public string? StationExecutionGateEvidenceSha256 { get; }
+    public int StationExecutionGateEvidenceVersion { get; }
+    public DateTimeOffset? StationExecutionGateAuthorizedAtUtc { get; }
+    public DateTimeOffset? StationExecutionGateExpiresAtUtc { get; }
+    public string? StationAgentControlLeaseOwnerAgentId { get; }
+    public string? StationAgentControlLeaseOwnerInstanceId { get; }
+    public long StationAgentControlLeaseFencingToken { get; }
+    public DateTimeOffset? StationAgentControlLeaseExpiresAtUtc { get; }
     public IReadOnlyList<StationResourceFenceEvidence> ResourceFences { get; }
     public string InputsJson { get; }
     public StationJobStatus Status { get; private set; }
@@ -176,7 +264,17 @@ public sealed class StationJob : AggregateRoot<StationJobId>
             null,
             null,
             null,
-            null));
+            null,
+            request.StationExecutionGateRevision,
+            request.StationExecutionGateEvidence,
+            request.StationExecutionGateEvidenceSha256,
+            request.StationExecutionGateEvidenceVersion,
+            request.StationExecutionGateAuthorizedAtUtc,
+            request.StationExecutionGateExpiresAtUtc,
+            request.StationAgentControlLeaseOwnerAgentId,
+            request.StationAgentControlLeaseOwnerInstanceId,
+            request.StationAgentControlLeaseFencingToken,
+            request.StationAgentControlLeaseExpiresAtUtc));
     }
 
     public static StationJob Restore(StationJobSnapshot snapshot)
@@ -357,7 +455,17 @@ public sealed class StationJob : AggregateRoot<StationJobId>
         AcceptedAtUtc,
         StartedAtUtc,
         LastProgressAtUtc,
-        CompletedAtUtc);
+        CompletedAtUtc,
+        StationExecutionGateRevision,
+        StationExecutionGateEvidence,
+        StationExecutionGateEvidenceSha256,
+        StationExecutionGateEvidenceVersion,
+        StationExecutionGateAuthorizedAtUtc,
+        StationExecutionGateExpiresAtUtc,
+        StationAgentControlLeaseOwnerAgentId,
+        StationAgentControlLeaseOwnerInstanceId,
+        StationAgentControlLeaseFencingToken,
+        StationAgentControlLeaseExpiresAtUtc);
 
     private void ValidateState()
     {
@@ -443,12 +551,70 @@ public sealed class StationJob : AggregateRoot<StationJobId>
             ? value
             : throw new ArgumentException($"{parameterName} must be a lowercase SHA-256.", parameterName);
 
+    private static string? OptionalSha256(string? value, string parameterName) =>
+        value is null ? null : Sha256(value, parameterName);
+
     private static string CanonicalJson(string value, string parameterName)
     {
         Required(value, parameterName);
         using var document = JsonDocument.Parse(value);
         return JsonSerializer.Serialize(document.RootElement);
     }
+
+    private StationExecutionGateClaim CreateStationExecutionGateClaim() => new(
+        Id.Value,
+        IdempotencyKey,
+        AgentId,
+        StationId,
+        StationSystemId,
+        ProductionRunId,
+        ProductionUnitId,
+        RuntimeSessionId,
+        OperationRunId.Value,
+        OperationAttempt,
+        ProductModelId,
+        ProductionUnitIdentityInputKey,
+        ProductionUnitIdentityValue,
+        LotId,
+        CarrierId,
+        ProjectId,
+        ApplicationId,
+        ProjectSnapshotId,
+        ProductionLineDefinitionId,
+        TopologyId,
+        ActorId,
+        PackageContentSha256,
+        OperationId,
+        FlowDefinitionId,
+        FlowVersionId,
+        ConfigurationSnapshotId,
+        RecipeSnapshotId,
+        ResourceFences.Select(static fence => new StationExecutionGateResourceFenceClaim(
+            fence.ResourceKind,
+            fence.ResourceId,
+            fence.FencingToken,
+            fence.ExpiresAtUtc)).ToArray(),
+        InputsJson,
+        RequestedAtUtc,
+        StationExecutionGateRevision,
+        StationAgentControlLeaseOwnerAgentId is null
+            ? null
+            : new StationAgentControlLeaseDispatchAuthority(
+                StationAgentControlLeaseOwnerAgentId,
+                StationAgentControlLeaseOwnerInstanceId!,
+                StationAgentControlLeaseFencingToken,
+                StationAgentControlLeaseExpiresAtUtc!.Value),
+        StationExecutionGateEvidenceVersion,
+        StationExecutionGateAuthorizedAtUtc!.Value,
+        StationExecutionGateExpiresAtUtc!.Value,
+        StationExecutionGateEvidence!);
+
+    private static bool IsCanonicalOwnerInstanceId(string value) =>
+        Guid.TryParseExact(value, "D", out var parsed)
+        && parsed != Guid.Empty
+        && string.Equals(parsed.ToString("D"), value, StringComparison.Ordinal)
+        && value[14] == '4'
+        && value[19] is '8' or '9' or 'a' or 'b';
 
     private static DateTimeOffset Utc(DateTimeOffset value, string parameterName) =>
         value.Offset == TimeSpan.Zero
@@ -541,7 +707,17 @@ public sealed record StationJobRequest(
     string RecipeSnapshotId,
     IReadOnlyList<StationResourceFenceEvidence> ResourceFences,
     string InputsJson,
-    DateTimeOffset RequestedAtUtc);
+    DateTimeOffset RequestedAtUtc,
+    string? StationExecutionGateRevision = null,
+    string? StationExecutionGateEvidence = null,
+    string? StationExecutionGateEvidenceSha256 = null,
+    int StationExecutionGateEvidenceVersion = 0,
+    DateTimeOffset? StationExecutionGateAuthorizedAtUtc = null,
+    DateTimeOffset? StationExecutionGateExpiresAtUtc = null,
+    string? StationAgentControlLeaseOwnerAgentId = null,
+    string? StationAgentControlLeaseOwnerInstanceId = null,
+    long StationAgentControlLeaseFencingToken = 0,
+    DateTimeOffset? StationAgentControlLeaseExpiresAtUtc = null);
 
 public sealed record StationJobCompletion(
     ExecutionStatus ExecutionStatus,
@@ -605,4 +781,14 @@ public sealed record StationJobSnapshot(
     DateTimeOffset? AcceptedAtUtc,
     DateTimeOffset? StartedAtUtc,
     DateTimeOffset? LastProgressAtUtc,
-    DateTimeOffset? CompletedAtUtc);
+    DateTimeOffset? CompletedAtUtc,
+    string? StationExecutionGateRevision = null,
+    string? StationExecutionGateEvidence = null,
+    string? StationExecutionGateEvidenceSha256 = null,
+    int StationExecutionGateEvidenceVersion = 0,
+    DateTimeOffset? StationExecutionGateAuthorizedAtUtc = null,
+    DateTimeOffset? StationExecutionGateExpiresAtUtc = null,
+    string? StationAgentControlLeaseOwnerAgentId = null,
+    string? StationAgentControlLeaseOwnerInstanceId = null,
+    long StationAgentControlLeaseFencingToken = 0,
+    DateTimeOffset? StationAgentControlLeaseExpiresAtUtc = null);

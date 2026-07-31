@@ -16,6 +16,26 @@ public sealed class OpenLineOpsSecurityOptions
     public const string SectionName = "OpenLineOps:Security";
 
     public List<OpenLineOpsCallerCredentialOptions> Callers { get; init; } = [];
+
+    public OpenLineOpsOidcOptions Oidc { get; init; } = new();
+}
+
+public sealed class OpenLineOpsOidcOptions
+{
+    public bool Enabled { get; init; }
+
+    public string Authority { get; init; } = string.Empty;
+
+    public string Audience { get; init; } = string.Empty;
+
+    public string ActorIdClaimType { get; init; } = "sub";
+
+    public string RoleClaimType { get; init; } = "roles";
+
+    public string? StationIdClaimType { get; init; }
+
+    public Dictionary<string, string> RoleMappings { get; init; } =
+        new(StringComparer.Ordinal);
 }
 
 public sealed class OpenLineOpsCallerCredentialOptions
@@ -166,6 +186,8 @@ public sealed class OpenLineOpsSecurityOptionsValidator(IConfiguration? configur
                 $"{OpenLineOpsSecurityOptions.SectionName}:Callers must contain at least one dedicated Safety-only credential.");
         }
 
+        ValidateOidc(options.Oidc, failures);
+
         var stationExecutionProvider = configuration?[
             "OpenLineOps:Runtime:StationExecution:Provider"] ?? "Agent";
         var agentTransportProvider = configuration?[
@@ -196,6 +218,87 @@ public sealed class OpenLineOpsSecurityOptionsValidator(IConfiguration? configur
         value is { Length: 64 }
         && value.All(static character =>
             character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static void ValidateOidc(
+        OpenLineOpsOidcOptions? options,
+        List<string> failures)
+    {
+        const string prefix = $"{OpenLineOpsSecurityOptions.SectionName}:Oidc";
+        if (options is null)
+        {
+            failures.Add($"{prefix} cannot be null.");
+            return;
+        }
+
+        if (!options.Enabled)
+        {
+            return;
+        }
+
+        if (!Uri.TryCreate(options.Authority, UriKind.Absolute, out var authority)
+            || !string.Equals(
+                authority.Scheme,
+                Uri.UriSchemeHttps,
+                StringComparison.OrdinalIgnoreCase)
+            || !string.IsNullOrEmpty(authority.UserInfo)
+            || !string.IsNullOrEmpty(authority.Query)
+            || !string.IsNullOrEmpty(authority.Fragment))
+        {
+            failures.Add(
+                $"{prefix}:Authority must be an absolute HTTPS URI without credentials, query, or fragment.");
+        }
+
+        if (!IsCanonicalClaimValue(options.Audience, 256))
+        {
+            failures.Add($"{prefix}:Audience is required and must be canonical.");
+        }
+
+        if (!IsCanonicalClaimValue(options.ActorIdClaimType, 256))
+        {
+            failures.Add($"{prefix}:ActorIdClaimType is required and must be canonical.");
+        }
+
+        if (!IsCanonicalClaimValue(options.RoleClaimType, 256))
+        {
+            failures.Add($"{prefix}:RoleClaimType is required and must be canonical.");
+        }
+
+        if (options.StationIdClaimType is not null
+            && !IsCanonicalClaimValue(options.StationIdClaimType, 256))
+        {
+            failures.Add($"{prefix}:StationIdClaimType must be canonical when configured.");
+        }
+
+        if (options.RoleMappings is null)
+        {
+            failures.Add($"{prefix}:RoleMappings cannot be null.");
+            return;
+        }
+
+        foreach (var mapping in options.RoleMappings)
+        {
+            if (!IsCanonicalClaimValue(mapping.Key, 512))
+            {
+                failures.Add($"{prefix}:RoleMappings contains an invalid external role value.");
+            }
+
+            if (!AllowedRoles.Contains(mapping.Value)
+                || string.Equals(
+                    mapping.Value,
+                    OpenLineOpsApiSecurity.StationAgentRole,
+                    StringComparison.Ordinal))
+            {
+                failures.Add(
+                    $"{prefix}:RoleMappings maps '{mapping.Key}' to unsupported human role '{mapping.Value}'.");
+            }
+        }
+    }
+
+    private static bool IsCanonicalClaimValue(string? value, int maximumLength) =>
+        !string.IsNullOrWhiteSpace(value)
+        && value.Length <= maximumLength
+        && string.Equals(value, value.Trim(), StringComparison.Ordinal)
+        && !value.Any(char.IsControl);
 }
 
 public sealed class OpenLineOpsBearerAuthenticationHandler(
@@ -263,12 +366,12 @@ public sealed class OpenLineOpsBearerAuthenticationHandler(
         }
         var principal = new ClaimsPrincipal(new ClaimsIdentity(
             claims,
-            OpenLineOpsApiSecurity.AuthenticationScheme,
+            Scheme.Name,
             ClaimTypes.Name,
             ClaimTypes.Role));
         var ticket = new AuthenticationTicket(
             principal,
-            OpenLineOpsApiSecurity.AuthenticationScheme);
+            Scheme.Name);
         return Task.FromResult(AuthenticateResult.Success(ticket));
     }
 

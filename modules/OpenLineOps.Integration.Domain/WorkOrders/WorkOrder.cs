@@ -261,6 +261,12 @@ public sealed class WorkOrder
     private void Apply(WorkOrderFact fact)
     {
         ArgumentNullException.ThrowIfNull(fact);
+        if (_facts.Any(existing => existing.Id == fact.Id))
+        {
+            throw new InvalidOperationException(
+                $"Work order fact id '{fact.Id.Value}' cannot be appended more than once.");
+        }
+
         if (_facts.Count == 0)
         {
             if (fact.Kind != WorkOrderFactKind.Created)

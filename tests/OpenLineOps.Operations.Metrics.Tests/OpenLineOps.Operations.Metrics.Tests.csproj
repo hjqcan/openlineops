@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../modules/OpenLineOps.Operations.Metrics.Api/OpenLineOps.Operations.Metrics.Api.csproj" />
+    <ProjectReference Include="../../modules/OpenLineOps.Operations.Metrics.Application/OpenLineOps.Operations.Metrics.Application.csproj" />
+    <ProjectReference Include="../../modules/OpenLineOps.Operations.Metrics.Domain/OpenLineOps.Operations.Metrics.Domain.csproj" />
+    <ProjectReference Include="../../modules/OpenLineOps.Operations.Metrics.Infrastructure/OpenLineOps.Operations.Metrics.Infrastructure.csproj" />
+    <ProjectReference Include="../../shared/OpenLineOps.Api.Abstractions/OpenLineOps.Api.Abstractions.csproj" />
+  </ItemGroup>
+
+</Project>

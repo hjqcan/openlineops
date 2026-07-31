@@ -1,18 +1,25 @@
 using OpenLineOps.Api;
 using OpenLineOps.Api.Abstractions;
 using OpenLineOps.Api.Health;
+using OpenLineOps.Api.Integrations;
 using OpenLineOps.Api.Security;
+using OpenLineOps.Commissioning.Api.DependencyInjection;
 using OpenLineOps.Devices.Api.DependencyInjection;
 using OpenLineOps.Engineering.Api.DependencyInjection;
 using OpenLineOps.EventBus.DependencyInjection;
+using OpenLineOps.Integration.Api.DependencyInjection;
+using OpenLineOps.Maintenance.Api.DependencyInjection;
+using OpenLineOps.Maintenance.Api.RuntimeIntegration;
 using OpenLineOps.Operations.Api.DependencyInjection;
 using OpenLineOps.Operations.Infra.CrossCutting.IoC.DependencyInjection;
+using OpenLineOps.Operations.Metrics.Api.DependencyInjection;
 using OpenLineOps.Plugins.Api.DependencyInjection;
 using OpenLineOps.Processes.Api.DependencyInjection;
 using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Production.Api.DependencyInjection;
 using OpenLineOps.Projects.Api.DependencyInjection;
 using OpenLineOps.Quality.Api.DependencyInjection;
+using OpenLineOps.Recipes.Api.DependencyInjection;
 using OpenLineOps.Runtime.Api.DependencyInjection;
 using OpenLineOps.Topology.Api.DependencyInjection;
 using OpenLineOps.Traceability.Api.DependencyInjection;
@@ -27,19 +34,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 HttpsOrLoopbackMiddleware.ValidateConfiguredUrls(builder.Configuration);
 
-builder.Services.AddSingleton<
-    Microsoft.Extensions.Options.IValidateOptions<OpenLineOpsSecurityOptions>,
-    OpenLineOpsSecurityOptionsValidator>();
-builder.Services
-    .AddOptions<OpenLineOpsSecurityOptions>()
-    .Bind(builder.Configuration.GetSection(OpenLineOpsSecurityOptions.SectionName))
-    .ValidateOnStart();
-builder.Services
-    .AddAuthentication(OpenLineOpsApiSecurity.AuthenticationScheme)
-    .AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions,
-        OpenLineOpsBearerAuthenticationHandler>(
-        OpenLineOpsApiSecurity.AuthenticationScheme,
-        static _ => { });
+builder.Services.AddOpenLineOpsAuthentication(builder.Configuration);
 builder.Services
     .AddAuthorizationBuilder()
     .AddPolicy(
@@ -74,27 +69,39 @@ builder.Services
 
 builder.Services
     .AddControllers()
+    .AddOpenLineOpsCommissioningApi()
     .AddOpenLineOpsRuntimeApi()
     .AddOpenLineOpsProcessesApi()
     .AddOpenLineOpsProductionApi()
     .AddOpenLineOpsDevicesApi()
     .AddOpenLineOpsEngineeringApi()
+    .AddOpenLineOpsIntegrationApi()
+    .AddOpenLineOpsMaintenanceApi()
     .AddOpenLineOpsOperationsApi()
+    .AddOpenLineOpsOperationsMetricsApi()
     .AddOpenLineOpsPluginsApi()
     .AddOpenLineOpsProjectsApi()
     .AddOpenLineOpsQualityApi()
+    .AddOpenLineOpsRecipesApi()
     .AddOpenLineOpsTopologyApi()
     .AddOpenLineOpsTraceabilityApi();
 builder.Services.AddOpenLineOpsProjectsModule();
 builder.Services.AddOpenLineOpsTopologyModule();
+builder.Services.AddOpenLineOpsCommissioningModule(builder.Configuration);
 builder.Services.AddOpenLineOpsRuntimeModule(builder.Configuration);
 builder.Services.AddOpenLineOpsProcessesModule();
 builder.Services.AddOpenLineOpsProductionModule();
 builder.Services.AddOpenLineOpsEngineeringModule();
+builder.Services.AddOpenLineOpsIntegrationModule(builder.Configuration);
+builder.Services.AddOpenLineOpsMaintenanceModule(builder.Configuration);
+builder.Services.AddOpenLineOpsMaintenanceRuntimeGate();
 builder.Services.AddOpenLineOpsDevicesModule(builder.Configuration);
 builder.Services.AddOpenLineOpsOperationsModule(builder.Configuration);
+builder.Services.AddOpenLineOpsOperationsMetricsModule(builder.Configuration);
 builder.Services.AddOpenLineOpsPluginsModule(builder.Configuration);
 builder.Services.AddOpenLineOpsQualityModule(builder.Configuration);
+builder.Services.AddOpenLineOpsRecipesModule(builder.Configuration);
+builder.Services.AddOpenLineOpsRecipeRuntimeIntegration();
 builder.Services.AddOpenLineOpsTraceabilityModule(builder.Configuration);
 builder.Services.AddOpenLineOpsEventBus(builder.Configuration);
 builder.Services.AddProblemDetails();

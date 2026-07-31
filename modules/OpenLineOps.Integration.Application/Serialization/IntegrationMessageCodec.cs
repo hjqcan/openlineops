@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using OpenLineOps.Integration.Domain.Identifiers;
 using OpenLineOps.Integration.Domain.Messages;
 using OpenLineOps.Integration.Domain.Serialization;
@@ -10,7 +11,13 @@ namespace OpenLineOps.Integration.Application.Serialization;
 
 public static class IntegrationMessageCodec
 {
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions JsonOptions =
+        new(JsonSerializerDefaults.Web)
+        {
+            PropertyNameCaseInsensitive = false,
+            RespectNullableAnnotations = true,
+            UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+        };
 
     public static string Encode(WorkRequest request)
     {
@@ -53,6 +60,21 @@ public static class IntegrationMessageCodec
             new WorkOrderId(document.WorkOrderId),
             ParseEnum<WorkResponseStatus>(document.Status),
             document.TargetSystem,
+            ParseUtc(document.OccurredAtUtc),
+            document.PayloadJson);
+    }
+
+    public static WorkRequest DecodeRequest(string json)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(json);
+        var document = JsonSerializer.Deserialize<WorkRequestDocument>(json, JsonOptions)
+            ?? throw new InvalidDataException("Persisted work request is empty.");
+        return new WorkRequest(
+            new WorkRequestId(document.Id),
+            new WorkOrderId(document.WorkOrderId),
+            ParseEnum<WorkRequestKind>(document.Kind),
+            ParseEnum<WorkRequestStatus>(document.Status),
+            document.SourceSystem,
             ParseUtc(document.OccurredAtUtc),
             document.PayloadJson);
     }

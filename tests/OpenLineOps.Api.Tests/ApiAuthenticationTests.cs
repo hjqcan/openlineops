@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using OpenLineOps.Api.Abstractions;
@@ -347,13 +349,93 @@ public sealed class ApiAuthenticationTests : IClassFixture<OpenLineOpsApiWebAppl
         Assert.True(result.Succeeded, result.FailureMessage);
     }
 
+    [Fact]
+    public void OidcConfigurationRequiresHttpsAuthorityAndKnownRoleMappings()
+    {
+        var result = new OpenLineOpsSecurityOptionsValidator().Validate(
+            null,
+            new OpenLineOpsSecurityOptions
+            {
+                Callers =
+                [
+                    Caller("safety", OpenLineOpsApiSecurity.SafetyRole),
+                    Caller("agent", OpenLineOpsApiSecurity.StationAgentRole)
+                ],
+                Oidc = new OpenLineOpsOidcOptions
+                {
+                    Enabled = true,
+                    Authority = "http://identity.example/tenant?secret=value",
+                    Audience = "api://openlineops",
+                    RoleMappings =
+                    {
+                        ["external-admin"] = "Administrator"
+                    }
+                }
+            });
+
+        Assert.True(result.Failed);
+        Assert.Contains(
+            result.Failures,
+            failure => failure.Contains(
+                "absolute HTTPS URI",
+                StringComparison.Ordinal));
+        Assert.Contains(
+            result.Failures,
+            failure => failure.Contains(
+                "unsupported human role",
+                StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void HybridOidcAndDedicatedMachineCredentialsValidate()
+    {
+        var result = new OpenLineOpsSecurityOptionsValidator().Validate(
+            null,
+            new OpenLineOpsSecurityOptions
+            {
+                Callers =
+                [
+                    Caller("safety", OpenLineOpsApiSecurity.SafetyRole),
+                    Caller("agent", OpenLineOpsApiSecurity.StationAgentRole)
+                ],
+                Oidc = new OpenLineOpsOidcOptions
+                {
+                    Enabled = true,
+                    Authority = "https://identity.example/tenant",
+                    Audience = "api://openlineops",
+                    ActorIdClaimType = "sub",
+                    RoleClaimType = "roles",
+                    RoleMappings =
+                    {
+                        ["line-engineers"] =
+                            OpenLineOpsApiSecurity.EngineeringRole,
+                        ["line-operators"] =
+                            OpenLineOpsApiSecurity.OperatorRole
+                    }
+                }
+            });
+
+        Assert.True(result.Succeeded, result.FailureMessage);
+    }
+
     private static OpenLineOpsCallerCredentialOptions Caller(
         string credentialId,
         params string[] roles) => new()
         {
             CredentialId = credentialId,
-            ActorId = $"actor.{credentialId}",
-            TokenSha256 = new string(credentialId.StartsWith("unsafe", StringComparison.Ordinal) ? 'b' : 'a', 64),
-            Roles = [.. roles]
+            ActorId = roles.Contains(
+                OpenLineOpsApiSecurity.StationAgentRole,
+                StringComparer.Ordinal)
+                ? $"agent.{credentialId}"
+                : $"actor.{credentialId}",
+            TokenSha256 = Convert.ToHexString(
+                    SHA256.HashData(Encoding.UTF8.GetBytes(credentialId)))
+                .ToLowerInvariant(),
+            Roles = [.. roles],
+            StationId = roles.Contains(
+                OpenLineOpsApiSecurity.StationAgentRole,
+                StringComparer.Ordinal)
+                ? "station.security-test"
+                : null
         };
 }

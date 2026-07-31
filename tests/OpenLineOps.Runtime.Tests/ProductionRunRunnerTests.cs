@@ -8,6 +8,7 @@ using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Processes;
 using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Application.Stations;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Identifiers;
 using OpenLineOps.Runtime.Domain.Materials;
@@ -384,7 +385,9 @@ public sealed class ProductionRunRunnerTests
             repository,
             leases,
             new InMemoryProductionRunSafetyTransitionStore(repository, leases),
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             new GuidRuntimeIdProvider(),
@@ -439,7 +442,9 @@ public sealed class ProductionRunRunnerTests
             repository,
             leases,
             new InMemoryProductionRunSafetyTransitionStore(repository, leases),
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             new GuidRuntimeIdProvider(),
@@ -501,7 +506,9 @@ public sealed class ProductionRunRunnerTests
             repository,
             leases,
             safetyTransitions,
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             new GuidRuntimeIdProvider(),
@@ -562,7 +569,9 @@ public sealed class ProductionRunRunnerTests
             repository,
             leases,
             new InMemoryProductionRunSafetyTransitionStore(repository, leases),
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             new GuidRuntimeIdProvider(),
@@ -653,7 +662,9 @@ public sealed class ProductionRunRunnerTests
             repository,
             leases,
             new InMemoryProductionRunSafetyTransitionStore(repository, leases),
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             new GuidRuntimeIdProvider(),
@@ -726,7 +737,9 @@ public sealed class ProductionRunRunnerTests
             repository,
             leases,
             new InMemoryProductionRunSafetyTransitionStore(repository, leases),
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             new GuidRuntimeIdProvider(),
@@ -859,7 +872,9 @@ public sealed class ProductionRunRunnerTests
             repository,
             leases,
             new InMemoryProductionRunSafetyTransitionStore(repository, leases),
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             new GuidRuntimeIdProvider(),
@@ -914,7 +929,9 @@ public sealed class ProductionRunRunnerTests
             repository,
             leases,
             new InMemoryProductionRunSafetyTransitionStore(repository, leases),
-            new ProductionOperationReadinessEvaluator(materials),
+            new ProductionOperationReadinessEvaluator(
+                materials,
+                LegacyCompatibilityStationProductionExecutionGate.Instance),
             dispatcher,
             publisher,
             new GuidRuntimeIdProvider(),
@@ -1595,7 +1612,9 @@ public sealed class ProductionRunRunnerTests
                 _repository,
                 _leases,
                 new InMemoryProductionRunSafetyTransitionStore(_repository, _leases),
-                new ProductionOperationReadinessEvaluator(_materials),
+                new ProductionOperationReadinessEvaluator(
+                    _materials,
+                    LegacyCompatibilityStationProductionExecutionGate.Instance),
                 dispatcher,
                 _publisher,
                 new GuidRuntimeIdProvider(),

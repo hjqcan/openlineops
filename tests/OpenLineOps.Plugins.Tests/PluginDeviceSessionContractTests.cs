@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.Json;
 using OpenLineOps.Plugin.Abstractions;
 
 namespace OpenLineOps.Plugins.Tests;
@@ -306,6 +307,35 @@ public sealed class PluginDeviceSessionContractTests
             Timestamp,
             null,
             null));
+    }
+
+    [Fact]
+    public void UnknownCompletionIsAnAdditiveRecoveryRequiredContractState()
+    {
+        var result = PluginDeviceOperationResult.UnknownCompletion(
+            Timestamp,
+            "Physical command acknowledgement was not received.");
+        var json = JsonSerializer.Serialize(result);
+        var roundTrip = JsonSerializer.Deserialize<PluginDeviceOperationResult>(json);
+        var legacyResult = JsonSerializer.Deserialize<PluginDeviceOperationResult>(
+            $$"""
+            {
+              "Outcome": 2,
+              "CompletedAtUtc": "{{Timestamp:O}}",
+              "OutputPayload": null,
+              "FailureReason": "Legacy failure."
+            }
+            """);
+
+        Assert.Equal(PluginDeviceOperationOutcome.Failed, result.Outcome);
+        Assert.Equal(PluginDeviceOperationCompletionState.Unknown, result.CompletionState);
+        Assert.True(result.RecoveryRequired);
+        Assert.Equal(result, roundTrip);
+        Assert.NotNull(legacyResult);
+        Assert.Equal(
+            PluginDeviceOperationCompletionState.Known,
+            legacyResult.CompletionState);
+        Assert.False(legacyResult.RecoveryRequired);
     }
 
     [Fact]

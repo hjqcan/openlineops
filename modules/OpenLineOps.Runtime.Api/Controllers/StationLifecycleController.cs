@@ -13,7 +13,9 @@ namespace OpenLineOps.Runtime.Api.Controllers;
 [ApiController]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Runtime)]
 [Route("api/stations/{stationId}/lifecycle")]
-public sealed class StationLifecycleController(StationLifecycleService service) : ControllerBase
+public sealed class StationLifecycleController(
+    StationLifecycleService service,
+    IStationLifecycleFactReader factReader) : ControllerBase
 {
     [HttpGet]
     [Microsoft.AspNetCore.Authorization.Authorize(
@@ -30,6 +32,93 @@ public sealed class StationLifecycleController(StationLifecycleService service) 
                 await service.GetAsync(new StationId(stationId), cancellationToken)
                     .ConfigureAwait(false),
                 created: false);
+        }
+        catch (ArgumentException exception)
+        {
+            return Validation(exception);
+        }
+    }
+
+    [HttpGet("facts")]
+    [Microsoft.AspNetCore.Authorization.Authorize(
+        Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
+    [ProducesResponseType<IReadOnlyList<StationLifecycleFactApiResponse>>(
+        StatusCodes.Status200OK)]
+    public async Task<ActionResult<IReadOnlyList<StationLifecycleFactApiResponse>>>
+        ListFactsAsync(
+            string stationId,
+            [FromQuery] long afterSequence = 0,
+            [FromQuery] int pageSize = 100,
+            CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var facts = await factReader.ListFactsAsync(
+                    new StationId(stationId),
+                    afterSequence,
+                    pageSize,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return Ok(facts.Select(static fact =>
+                    new StationLifecycleFactApiResponse(
+                        fact.StationId.Value,
+                        fact.Sequence,
+                        fact.LifecycleRevision,
+                        fact.Kind,
+                        fact.OccurredAtUtc,
+                        fact.PayloadSha256,
+                        fact.PreviousFactSha256,
+                        fact.FactSha256))
+                .ToArray());
+        }
+        catch (ArgumentException exception)
+        {
+            return Validation(exception);
+        }
+    }
+
+    [HttpGet("controller-command")]
+    [Microsoft.AspNetCore.Authorization.Authorize(
+        Policy = OpenLineOpsApiSecurity.StationAgentPolicy)]
+    [ProducesResponseType<PendingStationControllerCommandApiResponse>(
+        StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<PendingStationControllerCommandApiResponse>>
+        GetPendingControllerCommandAsync(
+            string stationId,
+            [FromQuery] string ownerInstanceId,
+            [FromQuery] long fencingToken,
+            CancellationToken cancellationToken)
+    {
+        if (!IsCallingStation(stationId))
+        {
+            return Forbid();
+        }
+
+        try
+        {
+            var result = await service.GetControllerCommandForAgentAsync(
+                    new StationId(stationId),
+                    User.GetRequiredActorId(),
+                    ownerInstanceId,
+                    fencingToken,
+                    GetRequiredLeaseHandle(),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (result.IsFailure)
+            {
+                return ToControllerCommandError(result.Error);
+            }
+
+            var pending = result.Value.Station.PendingControllerCommand;
+            return pending is null
+                ? NoContent()
+                : Ok(new PendingStationControllerCommandApiResponse(
+                    stationId,
+                    result.Value.Revision,
+                    ToResponse(pending)));
         }
         catch (ArgumentException exception)
         {
@@ -143,7 +232,7 @@ public sealed class StationLifecycleController(StationLifecycleService service) 
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<StationLifecycleApiResponse>> AcknowledgeAsync(
         string stationId,
-        StationLifecycleCommandApiRequest request,
+        AcknowledgeStationLifecycleCommandApiRequest request,
         CancellationToken cancellationToken)
     {
         if (!IsCallingStation(stationId))
@@ -151,12 +240,34 @@ public sealed class StationLifecycleController(StationLifecycleService service) 
             return Forbid();
         }
 
-        return await CommandCoreAsync(
-                stationId,
-                StationLifecycleCommand.Acknowledge,
-                request,
-                cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            return ToActionResult(
+                await service.AcknowledgeAsync(
+                        new StationId(stationId),
+                        request.OwnerInstanceId,
+                        request.FencingToken,
+                        GetRequiredLeaseHandle(),
+                        request.CommandId,
+                        request.ControllerSessionId,
+                        request.CommandSequence,
+                        ParseOptionalEnum<StationMode>(
+                            request.ObservedMode,
+                            nameof(request.ObservedMode)),
+                        ParseOptionalEnum<StationState>(
+                            request.ObservedState,
+                            nameof(request.ObservedState)),
+                        request.StateSequence,
+                        User.GetRequiredActorId(),
+                        request.Reason,
+                        cancellationToken)
+                    .ConfigureAwait(false),
+                created: false);
+        }
+        catch (ArgumentException exception)
+        {
+            return Validation(exception);
+        }
     }
 
     [HttpPost("commands/{command}")]
@@ -251,10 +362,35 @@ public sealed class StationLifecycleController(StationLifecycleService service) 
             error.Message));
     }
 
-    private ActionResult<StationLifecycleApiResponse> Validation(Exception exception)
+    private ActionResult Validation(Exception exception)
     {
         ModelState.AddModelError(string.Empty, exception.Message);
         return ValidationProblem(ModelState);
+    }
+
+    private ActionResult<PendingStationControllerCommandApiResponse>
+        ToControllerCommandError(ApplicationError error)
+    {
+        return error.Code.StartsWith("NotFound.", StringComparison.Ordinal)
+            ? NotFound(Problem(
+                StatusCodes.Status404NotFound,
+                error.Code,
+                error.Message))
+            : Conflict(Problem(
+                StatusCodes.Status409Conflict,
+                error.Code,
+                error.Message));
+    }
+
+    private string GetRequiredLeaseHandle()
+    {
+        var values = Request.Headers[
+            StationAgentControlLeaseController.LeaseHandleHeader];
+        return values.Count == 1
+            ? values[0]!
+            : throw new ArgumentException(
+                $"{StationAgentControlLeaseController.LeaseHandleHeader} "
+                + "must be supplied exactly once.");
     }
 
     private static StationLifecycleApiResponse ToResponse(
@@ -269,6 +405,15 @@ public sealed class StationLifecycleController(StationLifecycleService service) 
             ToResponse(station.Readiness),
             station.CreatedAtUtc,
             station.LastChangedAtUtc,
+            station.PendingControllerCommand is null
+                ? null
+                : ToResponse(station.PendingControllerCommand),
+            station.PendingControllerCommandDelivery is null
+                ? null
+                : ToResponse(station.PendingControllerCommandDelivery),
+            station.PendingControllerRecovery is null
+                ? null
+                : ToResponse(station.PendingControllerRecovery),
             station.TransitionAudit.Select(transition =>
                 new StationTransitionAuditApiResponse(
                     transition.Sequence,
@@ -279,9 +424,55 @@ public sealed class StationLifecycleController(StationLifecycleService service) 
                     transition.ActorId,
                     transition.Reason,
                     ToResponse(transition.Readiness),
-                    transition.OccurredAtUtc))
+                    transition.OccurredAtUtc,
+                    transition.ControllerCommand is null
+                        ? null
+                        : ToResponse(transition.ControllerCommand)))
                 .ToArray());
     }
+
+    private static StationControllerCommandApiResponse ToResponse(
+        StationControllerCommandExpectation command) =>
+        new(
+            command.CommandId,
+            command.ControllerSessionId,
+            command.ExpectedCommandSequence,
+            command.OwnerAgentId,
+            command.OwnerAgentInstanceId,
+            command.FencingToken,
+            command.Trigger.ToString(),
+            command.ExpectedMode.ToString(),
+            command.ExpectedCompletionState.ToString(),
+            command.Idempotency.ToString(),
+            command.SafetyClass.ToString(),
+            command.ConfirmedRecipeId,
+            command.ConfirmedRecipeVersion,
+            command.IssuedAtUtc,
+            command.DeadlineUtc,
+            command.IssuedOperationalEpoch,
+            command.RecipeAssignmentId,
+            command.RecipeDeploymentId,
+            command.RecipeConfigurationSha256);
+
+    private static StationControllerCommandDeliveryClaimApiResponse ToResponse(
+        StationControllerCommandDeliveryClaim claim) =>
+        new(
+            claim.CommandId,
+            claim.OwnerAgentId,
+            claim.OwnerAgentInstanceId,
+            claim.FencingToken,
+            claim.FirstClaimedAtUtc,
+            claim.LastClaimedAtUtc,
+            claim.DeliveryCount);
+
+    private static StationControllerRecoveryApiResponse ToResponse(
+        StationControllerRecoveryIntent recovery) =>
+        new(
+            recovery.IntentId,
+            recovery.CommandId,
+            recovery.Idempotency.ToString(),
+            recovery.Reason,
+            recovery.RequiredAtUtc);
 
     private static StationReadinessApiModel ToResponse(StationReadiness readiness)
     {
@@ -315,6 +506,25 @@ public sealed class StationLifecycleController(StationLifecycleService service) 
                 : throw new ArgumentException(
                     $"Station mode '{value}' is invalid.",
                     nameof(value));
+    }
+
+    private static TEnum? ParseOptionalEnum<TEnum>(
+        string? value,
+        string parameterName)
+        where TEnum : struct, Enum
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        return Enum.TryParse<TEnum>(value, ignoreCase: false, out var parsed)
+            && Enum.IsDefined(parsed)
+            && string.Equals(parsed.ToString(), value, StringComparison.Ordinal)
+                ? parsed
+                : throw new ArgumentException(
+                    $"{typeof(TEnum).Name} '{value}' is invalid.",
+                    parameterName);
     }
 
     private static bool TryParseOperatorCommand(

@@ -222,24 +222,6 @@ public sealed class Recipe : AggregateRoot<RecipeId>
             return EngineeringOperationResult.Accepted("Recipe is already published.");
         }
 
-        if (Status == RecipeStatus.Draft)
-        {
-            var validation = Validate(publishedAtUtc);
-            if (!validation.Succeeded)
-            {
-                return validation;
-            }
-        }
-
-        if (Status == RecipeStatus.Validated)
-        {
-            var approval = Approve("openlineops.compatibility", publishedAtUtc);
-            if (!approval.Succeeded)
-            {
-                return approval;
-            }
-        }
-
         var release = Release(publishedAtUtc);
         if (!release.Succeeded)
         {

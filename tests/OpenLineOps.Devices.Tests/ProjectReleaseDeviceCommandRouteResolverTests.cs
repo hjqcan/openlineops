@@ -989,6 +989,10 @@ public sealed class ProjectReleaseDeviceCommandRouteResolverTests : IDisposable
             CreatedAtUtc);
         var station = CreateStationProfile(capabilityId);
 
+        Assert.True(recipe.Validate(CreatedAtUtc.AddMilliseconds(250)).Succeeded);
+        Assert.True(recipe.Approve(
+            "engineer.release",
+            CreatedAtUtc.AddMilliseconds(500)).Succeeded);
         Assert.True(recipe.Publish(CreatedAtUtc.AddSeconds(1)).Succeeded);
         Assert.True(project.PublishSnapshot(
             new EngineeringConfigurationSnapshotId(snapshotId),

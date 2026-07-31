@@ -102,6 +102,31 @@ public sealed class ExecutableRuntimeProcessExecutionBoundsTests
         Assert.Contains("traversal capacity", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void BoundedRetryAttemptsAreIncludedInMaximumExecutionTime()
+    {
+        var node = Node("node.retry-bounds", TimeSpan.FromSeconds(10)) with
+        {
+            RetryLimit = 2,
+            OperationalPolicy = new ExecutableRuntimeActionPolicy(
+                RuntimeActionIdempotencyClass.Idempotent,
+                RuntimeActionRecoveryPolicy.AutomaticReplay,
+                RuntimeActionFailurePolicy.Retry,
+                [],
+                [],
+                Enum.GetValues<RuntimeActionStationMode>())
+        };
+        var process = new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process.retry-bounds"),
+            new ProcessVersionId("process.retry-bounds@1"),
+            [node]);
+
+        var bounds = ExecutableRuntimeProcessExecutionBounds.Calculate(process);
+
+        Assert.Equal(TimeSpan.FromSeconds(30), bounds.MaximumNodeExecutionTime);
+        Assert.Equal(1, bounds.MaximumNodeVisits);
+    }
+
     private static ExecutableRuntimeProcess CountedLoopProcess(int maxTraversals)
     {
         var work = Node("node.loop-work", TimeSpan.FromMinutes(10));

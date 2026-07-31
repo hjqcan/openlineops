@@ -10,7 +10,7 @@ using OpenLineOps.Quality.Application.Services;
 namespace OpenLineOps.Quality.Api.Controllers;
 
 [ApiController]
-[ApiExplorerSettings(GroupName = "quality")]
+[ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Quality)]
 [Route("api/quality")]
 [Authorize(Policy = OpenLineOpsApiSecurity.EngineeringPolicy)]
 public sealed class QualityEngineeringController(IQualityService qualityService)

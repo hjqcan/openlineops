@@ -26,6 +26,7 @@
     <ProjectReference Include="..\..\modules\OpenLineOps.Agent.Infrastructure\OpenLineOps.Agent.Infrastructure.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Agent.Application\OpenLineOps.Agent.Application.csproj" />
     <ProjectReference Include="..\..\modules\OpenLineOps.Agent.Domain\OpenLineOps.Agent.Domain.csproj" />
+    <ProjectReference Include="..\..\modules\OpenLineOps.Recipes.Application\OpenLineOps.Recipes.Application.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.Api\OpenLineOps.Api.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.ScriptWorker\OpenLineOps.ScriptWorker.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\OpenLineOps.Api.TestHelper\OpenLineOps.Api.TestHelper.csproj"

@@ -67,6 +67,10 @@ jobs:
         shell: powershell
         run: ./eng/verify-product-identity-boundary.tests.ps1
 
+      - name: Test industrial qualification evidence verifier
+        shell: powershell
+        run: ./eng/verify-industrial-qualification-evidence.tests.ps1
+
       - name: Verify Coordinator executable trial security
         shell: powershell
         run: ./eng/verify-coordinator-external-program-trial-security.ps1
@@ -290,7 +294,7 @@ jobs:
         run: npm run smoke:e2e:packaged-existing
 
       - name: Verify staged release manifest
-        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --configuration Release --no-build -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin
+        run: dotnet run --project tools/OpenLineOps.ReleaseManifest/OpenLineOps.ReleaseManifest.csproj --configuration Release --no-build -- --verify --artifacts artifacts/release --manifest artifacts/release/release-manifest.json --checksums artifacts/release/checksums.sha256 --require-kind source --require-kind api --require-kind agent --require-kind runner --require-kind desktop --require-kind plugin-host --require-kind script-worker --require-kind sample-plugin --require-kind device-sessions-plugin
 
       - name: Inspect release candidate
         shell: powershell

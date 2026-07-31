@@ -11,7 +11,16 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$RequiredKinds = @("source", "api", "agent", "runner", "desktop", "plugin-host", "script-worker", "sample-plugin")
+$RequiredKinds = @(
+    "source",
+    "api",
+    "agent",
+    "runner",
+    "desktop",
+    "plugin-host",
+    "script-worker",
+    "sample-plugin",
+    "device-sessions-plugin")
 $Failures = New-Object System.Collections.Generic.List[string]
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -1509,6 +1518,10 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
             "manifest.json",
             "OpenLineOps.SamplePlugins.LoopbackDevice.dll"
         )
+        "device-sessions-plugin" = @(
+            "manifest.json",
+            "OpenLineOps.BuiltinPlugins.DeviceSessions.dll"
+        )
         "source" = @(
             "README.md",
             "THIRD-PARTY-NOTICES.md",
@@ -1628,6 +1641,7 @@ if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
                     }
                     "agent" { @("OpenLineOps.Agent.exe", "OpenLineOps.StationRuntime.exe", "OpenLineOps.PluginHost.exe", "OpenLineOps.ScriptWorker.exe", "OpenLineOps.LeastPrivilegeLauncher.exe") }
                     "runner" { @("OpenLineOps.Runner.exe") }
+                    "device-sessions-plugin" { @("OpenLineOps.BuiltinPlugins.DeviceSessions.dll") }
                     default { @() }
                 }
                 foreach ($signedEntry in $signedEntries) {

@@ -13,7 +13,49 @@ terminal Production Run evidence. Unknown
 `ActorId`, `AcknowledgedBy`, `ResolvedBy`, or equivalent JSON members are rejected
 by the strict request contracts.
 
-## Provision callers
+## Human identity with OIDC
+
+Production deployments can validate human access tokens from an OIDC authority
+while keeping dedicated opaque credentials for Station Agents and the local
+safety boundary. Enable `OpenLineOps:Security:Oidc` with an HTTPS authority and
+the API audience:
+
+```json
+{
+  "OpenLineOps": {
+    "Security": {
+      "Oidc": {
+        "Enabled": true,
+        "Authority": "https://identity.example/tenant/v2.0",
+        "Audience": "api://openlineops",
+        "ActorIdClaimType": "sub",
+        "RoleClaimType": "roles",
+        "RoleMappings": {
+          "line-engineers": "Engineering",
+          "line-operators": "Operator",
+          "safety-approvers": "Safety"
+        }
+      }
+    }
+  }
+}
+```
+
+The Coordinator validates issuer, audience, signature, expiration, and HTTPS
+metadata before mapping identity claims. A configured role map is an allowlist:
+unmapped values grant no OpenLineOps role. OIDC can grant only the human roles
+`Engineering`, `Operator`, and `Safety`; it cannot create a `StationAgent`
+identity. The actor claim is copied into the same immutable audit identity used
+by opaque credentials. No OIDC client secret belongs in the API configuration.
+
+OIDC is deliberately hybrid. `Callers` must still contain the dedicated
+Safety-only credential and, when Agent/RabbitMQ execution is enabled, a
+dedicated StationAgent credential with its exact Station ID. This preserves a
+machine identity path that cannot be acquired through a human identity
+provider. Compact JWT Bearer values are sent to OIDC validation; opaque
+base64url values are sent to the local credential validator.
+
+## Provision machine and local callers
 
 Create a separate cryptographically random token for each caller and safety
 boundary. A token must be canonical unpadded base64url encoding of 32 through 64
@@ -43,12 +85,13 @@ store. Configure only its lowercase SHA-256 digest on the Coordinator:
 }
 ```
 
-The only role tokens are `Engineering`, `Operator`, and `Safety`. Engineering
+The supported role tokens are `Engineering`, `Operator`, `Safety`, and the
+dedicated `StationAgent` machine role. Engineering
 changes project, topology, Flow, resource, and line definitions. Operator changes
 WIP, Slots, Production Runs, devices, and alarms. Trace records are query/export
 only and never accept caller-supplied evidence. Emergency Stop
 requires Safety; an Engineering/Operator credential receives `403 Forbidden`.
-Safety is always a dedicated credential: a caller containing Safety cannot also
+Safety is always a dedicated local credential: a caller containing Safety cannot also
 contain Engineering or Operator, and startup requires at least one Safety-only
 caller.
 
@@ -56,6 +99,30 @@ Empty caller configuration, malformed or duplicate credential identities, a
 duplicate token digest, an unknown role, and non-canonical values stop the host at
 startup. `src/OpenLineOps.Api/appsettings.json` intentionally contains an empty
 caller list and no deployable credential.
+
+## Station controller handshake boundary
+
+Each Station Agent reports its controller mirror only through
+`POST /api/stations/{stationId}/lifecycle/controller-handshake`. The
+`StationAgent` credential must contain the exact route Station ID; an Agent
+cannot report another Station. The Coordinator supplies the received time and
+Actor identity, so neither can be forged in JSON.
+
+Within one controller session, heartbeat, command, and acknowledgement
+sequences can only move forward. Reusing a heartbeat sequence is accepted only
+when every controller-supplied field is identical, and that replay does not
+extend heartbeat freshness. A changed payload at the same sequence, a
+regression, or a delayed report from a retired controller session is rejected.
+A new session is recorded but enters `RecoveryRequired`; a Safety or Operator
+credential must call the dedicated recovery acknowledgement after verifying the
+physical Station is idle, error-free, command-synchronized, recipe-confirmed,
+and safety-permitted. Every accepted report and recovery acknowledgement is
+written as a server-authored append-only fact.
+
+This API mirrors controller and safety state; it does not implement a safety
+function. Emergency stop, guard circuits, safe torque off, and hard-real-time
+motion remain in the safety PLC or certified controller and must operate while
+the Coordinator, Agent, network, and database are unavailable.
 
 Send the token only as `Authorization: Bearer <token>`. Never place the raw token
 in a URL, command line, committed appsettings file, or log. Remote Coordinator

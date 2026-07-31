@@ -204,6 +204,32 @@ public sealed class ProjectReleaseProductionRunLauncherTests
     }
 
     [Fact]
+    public async Task SubmitRejectsConfigurationWithoutFrozenRecipeIdentity()
+    {
+        var coordinator = new RecordingProductionRunCoordinator();
+        var launcher = CreateLauncher(
+            new RecordingScopeResolver(LiveScope()),
+            new RecordingReleaseStore(OpenedRelease()),
+            new RecordingConfigurationResolver(
+            [
+                RuntimeConfiguration("configuration.main", "station.main") with
+                {
+                    RecipeId = null
+                }
+            ]),
+            coordinator);
+
+        var result = await launcher.SubmitAsync(Snapshot(), SubmitRequest());
+
+        Assert.True(result.IsFailure);
+        Assert.Equal(
+            "Conflict.Projects.ProjectReleaseOperationConfigurationMismatch",
+            result.Error.Code);
+        Assert.Contains("recipe id", result.Error.Message, StringComparison.Ordinal);
+        Assert.Null(coordinator.LastRequest);
+    }
+
+    [Fact]
     public async Task SubmitCreatesOnlyFrozenFixedLeasesAndMaterialSlotPolicy()
     {
         var release = OpenedRelease();
@@ -365,6 +391,8 @@ public sealed class ProjectReleaseProductionRunLauncherTests
         Assert.Equal(stationSystemId, operation.Definition.StationSystemId);
         Assert.Equal(stationSystemId, operation.Definition.StationId.Value);
         Assert.Equal(configurationSnapshotId, operation.Definition.ConfigurationSnapshotId.Value);
+        Assert.Equal("recipe.main", operation.Definition.RecipeId);
+        Assert.Equal("recipe.main@1.0.0", operation.Definition.RecipeSnapshotId.Value);
         Assert.Equal("process.main@1.0.0", operation.FrozenExecutableProcess.ProcessVersionId.Value);
         Assert.Equal("MoveAbsolute", Assert.Single(operation.FrozenExecutableProcess.Nodes).CommandName);
         Assert.Equal(
@@ -569,7 +597,10 @@ public sealed class ProjectReleaseProductionRunLauncherTests
             "process.main",
             "process.main@1.0.0",
             "recipe.main@1.0.0",
-            stationSystemId);
+            stationSystemId)
+        {
+            RecipeId = "recipe.main"
+        };
     }
 
     private static ProjectApplicationWorkspaceScope LiveScope()

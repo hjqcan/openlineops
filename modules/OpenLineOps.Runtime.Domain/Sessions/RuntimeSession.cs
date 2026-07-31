@@ -299,6 +299,16 @@ public sealed class RuntimeSession : AggregateRoot<RuntimeSessionId>
         return ChangeStepStatus(stepId, step => step.Cancel(canceledAtUtc));
     }
 
+    public RuntimeOperationResult SkipStep(
+        RuntimeStepId stepId,
+        string reason,
+        DateTimeOffset skippedAtUtc)
+    {
+        return ChangeStepStatus(
+            stepId,
+            step => step.Skip(reason, skippedAtUtc));
+    }
+
     public RuntimeCommand CreateCommand(
         RuntimeCommandId commandId,
         RuntimeStepId stepId,

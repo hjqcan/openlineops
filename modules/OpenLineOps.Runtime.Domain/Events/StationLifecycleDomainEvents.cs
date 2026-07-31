@@ -32,3 +32,23 @@ public sealed record StationStateTransitionedDomainEvent(
     StationId StationId,
     StationTransitionAuditEntry Transition)
     : DomainEvent("StationLifecycle.StateTransitioned");
+
+public sealed record StationControllerCommandIssuedDomainEvent(
+    StationId StationId,
+    StationControllerCommandExpectation Command)
+    : DomainEvent("StationLifecycle.ControllerCommandIssued");
+
+public sealed record StationControllerCommandDeliveryClaimedDomainEvent(
+    StationId StationId,
+    StationControllerCommandDeliveryClaim Claim)
+    : DomainEvent("StationLifecycle.ControllerCommandDeliveryClaimed");
+
+public sealed record StationControllerRecoveryRequiredDomainEvent(
+    StationId StationId,
+    StationControllerRecoveryIntent Intent)
+    : DomainEvent("StationLifecycle.ControllerRecoveryRequired");
+
+public sealed record StationControllerRecoverySynchronizedDomainEvent(
+    StationId StationId,
+    string IntentId)
+    : DomainEvent("StationLifecycle.ControllerRecoverySynchronized");

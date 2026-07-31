@@ -89,5 +89,16 @@ public sealed class WorkOrderTests
             WorkOrderStatus.Completed,
             IntegrationTestData.Epoch.AddMinutes(1),
             "planner"));
+
+        var reusedFactId = new WorkOrderFact(
+            order.Facts[0].Id,
+            order.Id,
+            2,
+            WorkOrderFactKind.Released,
+            WorkOrderStatus.Released,
+            IntegrationTestData.Epoch.AddMinutes(1),
+            "planner");
+        Assert.Throws<InvalidOperationException>(
+            () => WorkOrder.Rehydrate([order.Facts[0], reusedFactId]));
     }
 }

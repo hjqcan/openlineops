@@ -11,7 +11,16 @@ $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 . (Join-Path $PSScriptRoot "publication-evidence-case-contract.ps1")
 $InspectorScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "inspect-ci-release-artifact.ps1"))
 $CandidateVerificationScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "verify-release-candidate-inspection.ps1"))
-$ExpectedArtifactKinds = @("agent", "api", "desktop", "plugin-host", "runner", "sample-plugin", "script-worker", "source")
+$ExpectedArtifactKinds = @(
+    "agent",
+    "api",
+    "desktop",
+    "device-sessions-plugin",
+    "plugin-host",
+    "runner",
+    "sample-plugin",
+    "script-worker",
+    "source")
 $ExpectedGateNames = @(
     "open-source metadata",
     "third-party license metadata",

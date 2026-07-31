@@ -16,7 +16,16 @@ Add-Type -AssemblyName System.Xml.Linq
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 . (Join-Path $PSScriptRoot "publication-evidence-case-contract.ps1")
 $Failures = New-Object System.Collections.Generic.List[string]
-$ExpectedArtifactKinds = @("agent", "api", "desktop", "plugin-host", "runner", "sample-plugin", "script-worker", "source")
+$ExpectedArtifactKinds = @(
+    "agent",
+    "api",
+    "desktop",
+    "device-sessions-plugin",
+    "plugin-host",
+    "runner",
+    "sample-plugin",
+    "script-worker",
+    "source")
 $RequiredProductionIntegrationTest = "OpenLineOps.PostgresIntegration.Tests.PostgresRabbitMqProductionCoordinationIntegrationTests.DurableOutboxAndResultInboxSurviveCoordinatorRestartAcrossRealBroker"
 $StagedWindowsAgentRecoveryBoundary = "Published Windows Agent process, signed vendor helper, broker outage, durable SQLite Inbox/Outbox, presence TTL, and transport result-inbox restart"
 $DurableCoordinatorRecoveryBoundary = "PostgreSQL coordination store and RabbitMQ transport survive Coordinator transport/store cold restart exactly once"

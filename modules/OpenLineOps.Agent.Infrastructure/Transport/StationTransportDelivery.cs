@@ -99,7 +99,7 @@ public sealed class StationJobDeliveryProcessor(
                             delivery.Body.Span,
                             JsonOptions)
                             ?? throw new InvalidDataException("Station job message is null.");
-                        StationMessageContract.Validate(request);
+                        StationMessageContract.ValidateForAgentDispatch(request);
                         ValidateRequestEnvelope(delivery, request);
                         await jobHandler(request, cancellationToken).ConfigureAwait(false);
                         break;

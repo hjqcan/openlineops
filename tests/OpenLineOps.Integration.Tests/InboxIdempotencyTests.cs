@@ -1,4 +1,5 @@
 using OpenLineOps.Integration.Application.Inbox;
+using OpenLineOps.Integration.Application.Serialization;
 using OpenLineOps.Integration.Domain.Messages;
 using OpenLineOps.Integration.Infrastructure.Persistence;
 
@@ -6,6 +7,62 @@ namespace OpenLineOps.Integration.Tests;
 
 public sealed class InboxIdempotencyTests
 {
+    [Fact]
+    public async Task ExpiredClaimCannotCompleteAfterANewerClaimReclaimsTheRequest()
+    {
+        using var database = new TemporaryIntegrationDatabase();
+        using var store = new SqliteIntegrationStore(database.ConnectionString);
+        var request = IntegrationTestData.Request("request-fenced-completion");
+        var requestJson = IntegrationMessageCodec.Encode(request);
+        var requestHash = IntegrationMessageCodec.ComputeSha256(requestJson);
+        var response = IntegrationTestData.ResponseFor(request);
+        var responseJson = IntegrationMessageCodec.Encode(response);
+        var firstClaim = new IntegrationInboundMessage(
+            request.Id.Value,
+            requestHash,
+            requestJson,
+            IntegrationTestData.Epoch,
+            request.SourceSystem,
+            "claim-old",
+            IntegrationTestData.Epoch.AddMinutes(1));
+        var newerClaim = new IntegrationInboundMessage(
+            request.Id.Value,
+            requestHash,
+            requestJson,
+            IntegrationTestData.Epoch.AddMinutes(1),
+            request.SourceSystem,
+            "claim-new",
+            IntegrationTestData.Epoch.AddMinutes(2));
+
+        Assert.Equal(
+            IntegrationInboxDisposition.Started,
+            (await store.TryBeginAsync(firstClaim)).Disposition);
+        Assert.Equal(
+            IntegrationInboxDisposition.Started,
+            (await store.TryBeginAsync(newerClaim)).Disposition);
+
+        await Assert.ThrowsAsync<IntegrationInboxLeaseLostException>(
+            async () => await store.CompleteAndEnqueueResponseAsync(
+                new IntegrationInboxCompletion(
+                    request.Id.Value,
+                    requestHash,
+                    response.Id.Value,
+                    responseJson,
+                    response.OccurredAtUtc,
+                    firstClaim.ProcessingToken)));
+        Assert.Null(await store.GetOutboxAsync(response.Id.Value));
+
+        await store.CompleteAndEnqueueResponseAsync(
+            new IntegrationInboxCompletion(
+                request.Id.Value,
+                requestHash,
+                response.Id.Value,
+                responseJson,
+                response.OccurredAtUtc,
+                newerClaim.ProcessingToken));
+        Assert.NotNull(await store.GetOutboxAsync(response.Id.Value));
+    }
+
     [Fact]
     public async Task ExactRequestIsReplayedAfterColdRestartWithoutRepeatingBusiness()
     {
@@ -26,6 +83,24 @@ public sealed class InboxIdempotencyTests
             Assert.Equal(WorkRequestProcessingOutcome.Processed, first.Outcome);
             expectedResponse = Assert.IsType<WorkResponse>(first.Response);
             Assert.Equal(1, firstHandler.InvocationCount);
+        }
+
+        await using (var connection =
+                     new Microsoft.Data.Sqlite.SqliteConnection(database.ConnectionString))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT response_json, response_sha256
+                FROM integration_inbox
+                WHERE message_id = $message_id;
+                """;
+            command.Parameters.AddWithValue("$message_id", firstRequest.Id.Value);
+            await using var reader = await command.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal(
+                IntegrationMessageCodec.ComputeSha256(reader.GetString(0)),
+                reader.GetString(1));
         }
 
         var replayHandler = new CountingWorkRequestHandler();
@@ -55,6 +130,38 @@ public sealed class InboxIdempotencyTests
             Assert.Equal(firstRequest.Id.Value, outbox.CorrelationId);
             Assert.Equal(0, outbox.AttemptCount);
         }
+    }
+
+    [Theory]
+    [InlineData("inbox-response-json")]
+    [InlineData("inbox-response-hash")]
+    [InlineData("outbox-correlation")]
+    [InlineData("outbox-payload")]
+    [InlineData("outbox-hash")]
+    [InlineData("outbox-missing")]
+    public async Task CompletedReplayFailsClosedWhenPersistedResponseEvidenceIsTampered(
+        string mutation)
+    {
+        using var database = new TemporaryIntegrationDatabase();
+        var request = IntegrationTestData.Request($"request-tamper-{mutation}");
+        using (var initialStore = new SqliteIntegrationStore(database.ConnectionString))
+        {
+            await new IdempotentWorkRequestService(
+                    initialStore,
+                    new CountingWorkRequestHandler())
+                .ProcessAsync(request, IntegrationTestData.Epoch.AddSeconds(2));
+        }
+
+        await TamperCompletedEvidenceAsync(database.ConnectionString, mutation);
+
+        var replayHandler = new CountingWorkRequestHandler();
+        using var restartedStore = new SqliteIntegrationStore(database.ConnectionString);
+        var service = new IdempotentWorkRequestService(restartedStore, replayHandler);
+        await Assert.ThrowsAsync<InvalidDataException>(
+            async () => await service.ProcessAsync(
+                request,
+                IntegrationTestData.Epoch.AddMinutes(1)));
+        Assert.Equal(0, replayHandler.InvocationCount);
     }
 
     [Fact]
@@ -112,5 +219,34 @@ public sealed class InboxIdempotencyTests
             IntegrationTestData.Epoch.AddSeconds(4));
         Assert.Equal(WorkRequestProcessingOutcome.Replayed, replay.Outcome);
         Assert.Equal(1, handler.InvocationCount);
+    }
+
+    private static async Task TamperCompletedEvidenceAsync(
+        string connectionString,
+        string mutation)
+    {
+        await using var connection =
+            new Microsoft.Data.Sqlite.SqliteConnection(connectionString);
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = mutation switch
+        {
+            "inbox-response-json" =>
+                "UPDATE integration_inbox SET response_json = response_json || ' ';",
+            "inbox-response-hash" =>
+                "UPDATE integration_inbox SET response_sha256 = lower(hex(zeroblob(32)));",
+            "outbox-correlation" =>
+                "UPDATE integration_outbox SET correlation_id = 'different-request';",
+            "outbox-payload" =>
+                "UPDATE integration_outbox SET payload_json = payload_json || ' ';",
+            "outbox-hash" =>
+                "UPDATE integration_outbox SET content_sha256 = lower(hex(zeroblob(32)));",
+            "outbox-missing" => "DELETE FROM integration_outbox;",
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(mutation),
+                mutation,
+                "Unsupported Inbox evidence mutation.")
+        };
+        Assert.Equal(1, await command.ExecuteNonQueryAsync());
     }
 }

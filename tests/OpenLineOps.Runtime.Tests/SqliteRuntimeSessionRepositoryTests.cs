@@ -97,6 +97,54 @@ public sealed class SqliteRuntimeSessionRepositoryTests
     }
 
     [Fact]
+    public async Task ColdReopenPreservesSkippedStepFailureEvidence()
+    {
+        using var database = TemporarySqliteDatabase.Create();
+        using var repository = new SqliteRuntimeSessionRepository(database.ConnectionString);
+        var session = CreateRunningSession("skipped-step", BaseTimeUtc);
+        var step = session.StartStep(
+            RuntimeStepId.New(),
+            new RuntimeNodeId("node-optional-inspection"),
+            "Optional inspection",
+            BaseTimeUtc.AddSeconds(2),
+            new RuntimeActionId("node-optional-inspection:action:1"),
+            new RuntimeTargetReference(RuntimeTargetKinds.System, "system.inspection"));
+        var command = session.CreateCommand(
+            RuntimeCommandId.New(),
+            step.Id,
+            new RuntimeCapabilityId("vision.optional"),
+            "Inspect",
+            BaseTimeUtc.AddSeconds(3),
+            TimeSpan.FromSeconds(5));
+        session.AcceptCommand(command.Id, BaseTimeUtc.AddSeconds(4));
+        session.StartCommand(command.Id, BaseTimeUtc.AddSeconds(5));
+        session.FailCommand(
+            command.Id,
+            "optional camera unavailable",
+            BaseTimeUtc.AddSeconds(6));
+        session.SkipStep(
+            step.Id,
+            "optional camera unavailable",
+            BaseTimeUtc.AddSeconds(7));
+        session.Complete(BaseTimeUtc.AddSeconds(8));
+
+        await repository.SaveAsync(session, session.DomainEvents.ToArray());
+
+        using var restartedRepository =
+            new SqliteRuntimeSessionRepository(database.ConnectionString);
+        var restored = Assert.IsType<RuntimeSession>(
+            await restartedRepository.GetByIdAsync(session.Id));
+
+        Assert.Equal(RuntimeSessionStatus.Completed, restored.Status);
+        var restoredStep = Assert.Single(restored.Steps);
+        Assert.Equal(RuntimeStepStatus.Skipped, restoredStep.Status);
+        Assert.Equal("optional camera unavailable", restoredStep.FailureReason);
+        Assert.Equal(BaseTimeUtc.AddSeconds(7), restoredStep.CompletedAtUtc);
+        Assert.Equal(ExecutionStatus.Failed, Assert.Single(restored.Commands).Status);
+        Assert.Empty(restored.DomainEvents);
+    }
+
+    [Fact]
     public async Task SaveAsyncPersistsRuntimeTraceMetadataForNewRepositoryInstance()
     {
         using var database = TemporarySqliteDatabase.Create();

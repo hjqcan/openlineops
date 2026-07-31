@@ -7,7 +7,16 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
-$RequiredKinds = @("source", "api", "agent", "runner", "desktop", "plugin-host", "script-worker", "sample-plugin")
+$RequiredKinds = @(
+    "source",
+    "api",
+    "agent",
+    "runner",
+    "desktop",
+    "plugin-host",
+    "script-worker",
+    "sample-plugin",
+    "device-sessions-plugin")
 $FixtureIndexEntries = [System.Collections.Generic.List[object]]::new()
 
 Add-Type -AssemblyName System.IO.Compression
@@ -130,7 +139,8 @@ function New-TestZip {
     param(
         [Parameter(Mandatory = $true)][string] $Root,
         [Parameter(Mandatory = $true)][string] $Name,
-        [Parameter(Mandatory = $true)][string[]] $Entries
+        [Parameter(Mandatory = $true)][string[]] $Entries,
+        [hashtable] $EntrySourceOverrides = @{}
     )
 
     $zipPath = Join-Path $Root $Name
@@ -144,7 +154,13 @@ function New-TestZip {
     try {
         foreach ($entryName in $Entries) {
             $entry = $archive.CreateEntry($entryName)
-            if ([System.IO.Path]::GetExtension($entryName) -ceq ".exe") {
+            if ($EntrySourceOverrides.ContainsKey($entryName)) {
+                $bytes = [System.IO.File]::ReadAllBytes($EntrySourceOverrides[$entryName])
+                $stream = $entry.Open()
+                try { $stream.Write($bytes, 0, $bytes.Length) }
+                finally { $stream.Dispose() }
+            }
+            elseif ([System.IO.Path]::GetExtension($entryName) -ceq ".exe") {
                 $fixtureExecutable = Join-Path $env:SystemRoot "System32/where.exe"
                 $bytes = [System.IO.File]::ReadAllBytes($fixtureExecutable)
                 $stream = $entry.Open()
@@ -537,6 +553,72 @@ function Set-TestMetadataChecksumMutation {
         [System.Text.UTF8Encoding]::new($false))
 }
 
+function Rebind-TestReleaseArtifact {
+    param(
+        [Parameter(Mandatory = $true)][string] $Root,
+        [Parameter(Mandatory = $true)][string] $RelativePath
+    )
+
+    $artifactPath = Join-Path $Root $RelativePath.Replace(
+        '/',
+        [System.IO.Path]::DirectorySeparatorChar)
+    $artifactFile = Get-Item -LiteralPath $artifactPath
+    $artifactSha256 = Get-FileSha256 $artifactPath
+    $manifestPath = Join-Path $Root "release-manifest.json"
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $manifestRecords = @($manifest.artifacts | Where-Object {
+            $_.relativePath -ceq $RelativePath
+        })
+    if ($manifestRecords.Count -ne 1) {
+        throw "Cannot rebind release artifact '$RelativePath' because its manifest record is not unique."
+    }
+    $manifestRecords[0].sizeBytes = $artifactFile.Length
+    $manifestRecords[0].sha256 = $artifactSha256
+    [System.IO.File]::WriteAllText(
+        $manifestPath,
+        (($manifest | ConvertTo-Json -Depth 12) + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+
+    $checksumsPath = Join-Path $Root "checksums.sha256"
+    $checksumLines = @(Get-Content -LiteralPath $checksumsPath)
+    $matchedChecksumLines = @($checksumLines | Where-Object {
+            $_.Length -gt 66 -and $_.Substring(66) -ceq $RelativePath
+        })
+    if ($matchedChecksumLines.Count -ne 1) {
+        throw "Cannot rebind release artifact '$RelativePath' because its checksum record is not unique."
+    }
+    $checksumLines = @($checksumLines | ForEach-Object {
+            if ($_.Length -gt 66 -and $_.Substring(66) -ceq $RelativePath) {
+                "$artifactSha256  $RelativePath"
+            }
+            else {
+                $_
+            }
+        })
+    [System.IO.File]::WriteAllText(
+        $checksumsPath,
+        (($checksumLines -join "`r`n") + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+
+    $provenancePath = Join-Path $Root "release-provenance.json"
+    $provenance = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json
+    $provenanceRecords = @($provenance.artifacts | Where-Object {
+            $_.relativePath -ceq $RelativePath
+        })
+    if ($provenanceRecords.Count -ne 1) {
+        throw "Cannot rebind release artifact '$RelativePath' because its provenance record is not unique."
+    }
+    $provenanceRecords[0].sizeBytes = $artifactFile.Length
+    $provenanceRecords[0].sha256 = $artifactSha256
+    $provenance.release.manifest.sha256 = Get-FileSha256 $manifestPath
+    $provenance.release.checksums.sha256 = Get-FileSha256 $checksumsPath
+    [System.IO.File]::WriteAllText(
+        $provenancePath,
+        (($provenance | ConvertTo-Json -Depth 12) + "`r`n"),
+        [System.Text.UTF8Encoding]::new($false))
+    Write-TestMetadataChecksums -Root $Root
+}
+
 function Add-DuplicateSchemaVersionProperty {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -824,6 +906,17 @@ function New-MinimalReleaseCandidate {
     New-TestZip -Root $root -Name "sample-plugin/sample-plugin-loopback-device-$version.zip" -Entries @(
         "manifest.json",
         "OpenLineOps.SamplePlugins.LoopbackDevice.dll")
+    New-TestZip `
+        -Root $root `
+        -Name "device-sessions-plugin/device-sessions-plugin-openlineops-$version.zip" `
+        -Entries @(
+            "manifest.json",
+            "OpenLineOps.BuiltinPlugins.DeviceSessions.dll") `
+        -EntrySourceOverrides @{
+            "manifest.json" = $script:DeviceSessionsPluginManifestPath
+            "OpenLineOps.BuiltinPlugins.DeviceSessions.dll" =
+                $script:DeviceSessionsPluginAssemblyPath
+        }
 
     Invoke-ReleaseManifestGeneration -Root $root -Version $version
     if (-not $SkipDependencyInventory) {
@@ -867,9 +960,21 @@ function Invoke-Inspection {
     param([Parameter(Mandatory = $true)][string] $Root)
 
     $inspectionScript = Resolve-RepoPath "eng/inspect-release-candidate.ps1"
-    $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $inspectionScript -ArtifactsRoot $Root 2>&1
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = & powershell `
+            -NoProfile `
+            -ExecutionPolicy Bypass `
+            -File $inspectionScript `
+            -ArtifactsRoot $Root 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     return [pscustomobject]@{
-        ExitCode = $LASTEXITCODE
+        ExitCode = $exitCode
         Text = ($output | Out-String)
     }
 }
@@ -1009,6 +1114,25 @@ function Assert-BundleEntryIsFullyManifestedAndHashed {
 $ResolvedWorkRoot = Resolve-RepoPath $WorkRoot
 Assert-UnderRepoRoot $ResolvedWorkRoot
 New-CleanDirectory $ResolvedWorkRoot
+$deviceSessionsPluginProject = Resolve-RepoPath `
+    "plugins/builtin/OpenLineOps.BuiltinPlugins.DeviceSessions/OpenLineOps.BuiltinPlugins.DeviceSessions.csproj"
+& dotnet build $deviceSessionsPluginProject `
+    --configuration Release `
+    -p:TreatWarningsAsErrors=true | Out-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not build the device-sessions-plugin fixture assembly."
+}
+$script:DeviceSessionsPluginManifestPath = Resolve-RepoPath `
+    "plugins/builtin/OpenLineOps.BuiltinPlugins.DeviceSessions/manifest.json"
+$script:DeviceSessionsPluginAssemblyPath = Resolve-RepoPath `
+    "plugins/builtin/OpenLineOps.BuiltinPlugins.DeviceSessions/bin/Release/net10.0/OpenLineOps.BuiltinPlugins.DeviceSessions.dll"
+foreach ($deviceSessionsPluginPath in @(
+        $script:DeviceSessionsPluginManifestPath,
+        $script:DeviceSessionsPluginAssemblyPath)) {
+    if (-not (Test-Path -LiteralPath $deviceSessionsPluginPath -PathType Leaf)) {
+        throw "Device-sessions-plugin fixture content is missing: $deviceSessionsPluginPath"
+    }
+}
 $script:TestPayloadFixtureExecutablePath = Join-Path `
     $ResolvedWorkRoot `
     "renamed-test-payload.bin"
@@ -1034,6 +1158,79 @@ $fixturePayload = [byte[]]::new($fixtureExecutable.Length + $fixtureMarker.Lengt
 
 $positiveRoot = New-MinimalReleaseCandidate -Name "positive"
 Assert-InspectionPasses -Root $positiveRoot -Name "positive"
+
+$deviceSessionsArtifactRelativePath = "device-sessions-plugin/device-sessions-plugin-openlineops-0.0.0-{0}.zip"
+
+$missingDeviceSessionsRoot = New-MinimalReleaseCandidate -Name "missing-device-sessions-plugin"
+$missingDeviceSessionsPhysicalId = Get-FixturePhysicalId "missing-device-sessions-plugin"
+$missingDeviceSessionsRelativePath = $deviceSessionsArtifactRelativePath -f $missingDeviceSessionsPhysicalId
+Remove-Item `
+    -LiteralPath (Join-Path $missingDeviceSessionsRoot $missingDeviceSessionsRelativePath.Replace(
+        '/',
+        [System.IO.Path]::DirectorySeparatorChar)) `
+    -Force
+Assert-InspectionFails `
+    -Root $missingDeviceSessionsRoot `
+    -Name "missing-device-sessions-plugin" `
+    -ExpectedPattern "does not exist|file is missing"
+
+$tamperedDeviceSessionsRoot = New-MinimalReleaseCandidate -Name "tampered-device-sessions-plugin"
+$tamperedDeviceSessionsPhysicalId = Get-FixturePhysicalId "tampered-device-sessions-plugin"
+$tamperedDeviceSessionsRelativePath = $deviceSessionsArtifactRelativePath -f $tamperedDeviceSessionsPhysicalId
+$tamperedDeviceSessionsArchive = [System.IO.Compression.ZipFile]::Open(
+    (Join-Path $tamperedDeviceSessionsRoot $tamperedDeviceSessionsRelativePath.Replace(
+        '/',
+        [System.IO.Path]::DirectorySeparatorChar)),
+    [System.IO.Compression.ZipArchiveMode]::Update)
+try {
+    $tamperedEntry = $tamperedDeviceSessionsArchive.GetEntry(
+        "OpenLineOps.BuiltinPlugins.DeviceSessions.dll")
+    if ($null -eq $tamperedEntry) {
+        throw "Device-sessions-plugin tamper fixture is missing its entry assembly."
+    }
+    $tamperedEntry.Delete()
+    $replacement = $tamperedDeviceSessionsArchive.CreateEntry(
+        "OpenLineOps.BuiltinPlugins.DeviceSessions.dll")
+    $writer = [System.IO.StreamWriter]::new($replacement.Open())
+    try { $writer.Write("tampered") }
+    finally { $writer.Dispose() }
+}
+finally {
+    $tamperedDeviceSessionsArchive.Dispose()
+}
+Assert-InspectionFails `
+    -Root $tamperedDeviceSessionsRoot `
+    -Name "tampered-device-sessions-plugin" `
+    -ExpectedPattern "SHA-256 mismatch|size mismatch"
+
+$unsupportedDeviceSessionsRoot = New-MinimalReleaseCandidate `
+    -Name "device-sessions-plugin-unsupported-executable"
+$unsupportedDeviceSessionsPhysicalId = Get-FixturePhysicalId `
+    "device-sessions-plugin-unsupported-executable"
+$unsupportedDeviceSessionsRelativePath = $deviceSessionsArtifactRelativePath -f `
+    $unsupportedDeviceSessionsPhysicalId
+$unsupportedDeviceSessionsArchive = [System.IO.Compression.ZipFile]::Open(
+    (Join-Path $unsupportedDeviceSessionsRoot $unsupportedDeviceSessionsRelativePath.Replace(
+        '/',
+        [System.IO.Path]::DirectorySeparatorChar)),
+    [System.IO.Compression.ZipArchiveMode]::Update)
+try {
+    $unsupportedEntry = $unsupportedDeviceSessionsArchive.CreateEntry("helper.exe")
+    $bytes = [System.IO.File]::ReadAllBytes((Join-Path $env:SystemRoot "System32/where.exe"))
+    $stream = $unsupportedEntry.Open()
+    try { $stream.Write($bytes, 0, $bytes.Length) }
+    finally { $stream.Dispose() }
+}
+finally {
+    $unsupportedDeviceSessionsArchive.Dispose()
+}
+Rebind-TestReleaseArtifact `
+    -Root $unsupportedDeviceSessionsRoot `
+    -RelativePath $unsupportedDeviceSessionsRelativePath
+Assert-InspectionFails `
+    -Root $unsupportedDeviceSessionsRoot `
+    -Name "device-sessions-plugin-unsupported-executable" `
+    -ExpectedPattern "additional executable or payload content is unsupported"
 
 $tamperedAgentBundleRoot = New-MinimalReleaseCandidate `
     -Name "tampered-agent-bundle" `

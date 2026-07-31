@@ -154,6 +154,7 @@ internal static class ProductionRunSnapshotMapper
         definition.ProcessVersionId.Value,
         definition.ConfigurationSnapshotId.Value,
         definition.RecipeSnapshotId.Value,
+        definition.RecipeId,
         definition.ResourceRequirements.Select(requirement =>
             new PersistedResourceRequirement(requirement.Kind.ToString(), requirement.ResourceId)).ToArray(),
         ToSnapshot(definition.MaterialSlotRequirement));
@@ -169,7 +170,8 @@ internal static class ProductionRunSnapshotMapper
             "configuration snapshot id")),
         new RecipeSnapshotId(Text(definition.RecipeSnapshotId, "recipe snapshot id")),
         Required(definition.Resources, "operation resources").Select(ToAggregate),
-        ToAggregate(definition.MaterialSlotRequirement));
+        ToAggregate(definition.MaterialSlotRequirement),
+        Optional(definition.RecipeId, "recipe id"));
 
     private static PersistedMaterialSlotRequirement? ToSnapshot(
         MaterialSlotRequirement? requirement) => requirement is null
@@ -505,6 +507,7 @@ internal sealed record PersistedOperationDefinition(
     string? ProcessVersionId,
     string? ConfigurationSnapshotId,
     string? RecipeSnapshotId,
+    string? RecipeId,
     PersistedResourceRequirement[]? Resources,
     PersistedMaterialSlotRequirement? MaterialSlotRequirement);
 

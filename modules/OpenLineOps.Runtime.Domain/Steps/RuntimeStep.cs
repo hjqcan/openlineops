@@ -125,6 +125,28 @@ public sealed class RuntimeStep : Entity<RuntimeStepId>
         return TransitionTo(RuntimeStepStatus.Canceled, canceledAtUtc);
     }
 
+    internal RuntimeOperationResult Skip(string reason, DateTimeOffset skippedAtUtc)
+    {
+        var canonicalReason = Required(reason, nameof(reason));
+        if (Status == RuntimeStepStatus.Skipped)
+        {
+            return CompletedAtUtc == skippedAtUtc
+                   && string.Equals(FailureReason, canonicalReason, StringComparison.Ordinal)
+                ? RuntimeOperationResult.Accepted()
+                : RuntimeOperationResult.Rejected(
+                    "Runtime.StepEvidenceConflict",
+                    $"Step {Id} was replayed with different skip evidence.");
+        }
+
+        var result = TransitionTo(RuntimeStepStatus.Skipped, skippedAtUtc);
+        if (result.Succeeded)
+        {
+            FailureReason = canonicalReason;
+        }
+
+        return result;
+    }
+
     private RuntimeOperationResult TransitionTo(RuntimeStepStatus target, DateTimeOffset utcNow)
     {
         if (Status == target)

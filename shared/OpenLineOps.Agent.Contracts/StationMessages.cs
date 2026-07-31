@@ -35,7 +35,17 @@ public sealed record StationJobRequested(
     string RecipeSnapshotId,
     IReadOnlyCollection<StationResourceFence> ResourceFences,
     JsonElement Inputs,
-    DateTimeOffset RequestedAtUtc);
+    DateTimeOffset RequestedAtUtc,
+    string? StationExecutionGateRevision = null,
+    string? StationExecutionGateEvidence = null,
+    string? StationExecutionGateEvidenceSha256 = null,
+    int StationExecutionGateEvidenceVersion = 0,
+    DateTimeOffset? StationExecutionGateAuthorizedAtUtc = null,
+    DateTimeOffset? StationExecutionGateExpiresAtUtc = null,
+    string? StationAgentControlLeaseOwnerAgentId = null,
+    string? StationAgentControlLeaseOwnerInstanceId = null,
+    long StationAgentControlLeaseFencingToken = 0,
+    DateTimeOffset? StationAgentControlLeaseExpiresAtUtc = null);
 
 public sealed record StationResourceFence(
     string ResourceKind,
@@ -232,6 +242,9 @@ public static class StationResourceLeaseStatuses
 
 public static class StationMessageContract
 {
+    public const int CurrentStationExecutionGateEvidenceVersion =
+        StationExecutionGateClaimCanonicalizer.CurrentVersion;
+
     private static readonly HashSet<string> ResourceKinds = new(StringComparer.Ordinal)
     {
         "Station",
@@ -318,6 +331,92 @@ public static class StationMessageContract
             throw new InvalidDataException(
                 "Station job request requires an exact Station fence for its Station System.");
         }
+
+        ValidateOptionalStationGateEvidence(message);
+    }
+
+    public static void ValidateForAgentDispatch(StationJobRequested message)
+    {
+        Validate(message);
+        if (message.StationExecutionGateEvidence is null
+            || message.StationExecutionGateRevision is null
+            || message.StationExecutionGateEvidenceSha256 is null
+            || message.StationExecutionGateEvidenceVersion
+                != CurrentStationExecutionGateEvidenceVersion
+            || message.StationExecutionGateAuthorizedAtUtc is null
+            || message.StationExecutionGateExpiresAtUtc is null
+            || message.StationAgentControlLeaseOwnerAgentId is null
+            || message.StationAgentControlLeaseOwnerInstanceId is null
+            || message.StationAgentControlLeaseFencingToken <= 0
+            || message.StationAgentControlLeaseExpiresAtUtc is null)
+        {
+            throw new InvalidDataException(
+                "Published Station job request requires managed Station execution gate evidence.");
+        }
+    }
+
+    public static StationJobRequested BindStationExecutionGateEvidence(
+        StationJobRequested message,
+        string revision,
+        string evidence,
+        DateTimeOffset authorizedAtUtc,
+        DateTimeOffset expiresAtUtc,
+        StationAgentControlLeaseDispatchAuthority agentControlLease)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ArgumentNullException.ThrowIfNull(agentControlLease);
+        Validate(message);
+        _ = Required(revision, nameof(revision));
+        _ = Required(evidence, nameof(evidence));
+        RequireUtc(authorizedAtUtc, "Station execution gate authorization");
+        RequireUtc(expiresAtUtc, "Station execution gate expiry");
+        _ = Required(
+            agentControlLease.OwnerAgentId,
+            nameof(agentControlLease.OwnerAgentId));
+        RequireCanonicalOwnerInstanceId(agentControlLease.OwnerInstanceId);
+        RequireUtc(
+            agentControlLease.ExpiresAtUtc,
+            "Station Agent control lease expiry");
+        if (expiresAtUtc <= authorizedAtUtc)
+        {
+            throw new ArgumentException(
+                "Station execution gate expiry must follow authorization time.",
+                nameof(expiresAtUtc));
+        }
+
+        if (!string.Equals(
+                agentControlLease.OwnerAgentId,
+                message.AgentId,
+                StringComparison.Ordinal)
+            || agentControlLease.FencingToken <= 0
+            || agentControlLease.ExpiresAtUtc <= authorizedAtUtc
+            || expiresAtUtc > agentControlLease.ExpiresAtUtc)
+        {
+            throw new ArgumentException(
+                "Station Agent control lease authority must target the dispatch Agent "
+                + "and cover the complete gate validity window.",
+                nameof(agentControlLease));
+        }
+
+        var candidate = message with
+        {
+            StationExecutionGateRevision = revision,
+            StationExecutionGateEvidence = evidence,
+            StationExecutionGateEvidenceSha256 = null,
+            StationExecutionGateEvidenceVersion = CurrentStationExecutionGateEvidenceVersion,
+            StationExecutionGateAuthorizedAtUtc = authorizedAtUtc,
+            StationExecutionGateExpiresAtUtc = expiresAtUtc,
+            StationAgentControlLeaseOwnerAgentId = agentControlLease.OwnerAgentId,
+            StationAgentControlLeaseOwnerInstanceId = agentControlLease.OwnerInstanceId,
+            StationAgentControlLeaseFencingToken = agentControlLease.FencingToken,
+            StationAgentControlLeaseExpiresAtUtc = agentControlLease.ExpiresAtUtc
+        };
+        return candidate with
+        {
+            StationExecutionGateEvidenceSha256 =
+                StationExecutionGateClaimCanonicalizer.ComputeSha256(
+                    CreateStationExecutionGateClaim(candidate))
+        };
     }
 
     public static void Validate(StationJobAccepted message)
@@ -679,6 +778,136 @@ public static class StationMessageContract
             ? throw new InvalidDataException(
                 $"{parameterName} must be canonical non-empty text.")
             : value;
+
+    private static void ValidateOptionalStationGateEvidence(StationJobRequested message)
+    {
+        var revision = message.StationExecutionGateRevision;
+        var evidence = message.StationExecutionGateEvidence;
+        var fingerprint = message.StationExecutionGateEvidenceSha256;
+        var version = message.StationExecutionGateEvidenceVersion;
+        var authorizedAtUtc = message.StationExecutionGateAuthorizedAtUtc;
+        var expiresAtUtc = message.StationExecutionGateExpiresAtUtc;
+        var ownerAgentId = message.StationAgentControlLeaseOwnerAgentId;
+        var ownerInstanceId = message.StationAgentControlLeaseOwnerInstanceId;
+        var agentFencingToken = message.StationAgentControlLeaseFencingToken;
+        var agentLeaseExpiresAtUtc = message.StationAgentControlLeaseExpiresAtUtc;
+        if (revision is null
+            && evidence is null
+            && fingerprint is null
+            && version == 0
+            && authorizedAtUtc is null
+            && expiresAtUtc is null
+            && ownerAgentId is null
+            && ownerInstanceId is null
+            && agentFencingToken == 0
+            && agentLeaseExpiresAtUtc is null)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(revision)
+            || string.IsNullOrWhiteSpace(evidence)
+            || fingerprint is null
+            || version != CurrentStationExecutionGateEvidenceVersion
+            || authorizedAtUtc is null
+            || expiresAtUtc is null
+            || string.IsNullOrWhiteSpace(ownerAgentId)
+            || ownerInstanceId is null
+            || !IsCanonicalOwnerInstanceId(ownerInstanceId)
+            || agentFencingToken <= 0
+            || agentLeaseExpiresAtUtc is null
+            || authorizedAtUtc.Value == default
+            || authorizedAtUtc.Value.Offset != TimeSpan.Zero
+            || expiresAtUtc.Value == default
+            || expiresAtUtc.Value.Offset != TimeSpan.Zero
+            || agentLeaseExpiresAtUtc.Value == default
+            || agentLeaseExpiresAtUtc.Value.Offset != TimeSpan.Zero
+            || expiresAtUtc.Value <= authorizedAtUtc.Value
+            || agentLeaseExpiresAtUtc.Value <= authorizedAtUtc.Value
+            || expiresAtUtc.Value > agentLeaseExpiresAtUtc.Value
+            || !string.Equals(ownerAgentId, message.AgentId, StringComparison.Ordinal)
+            || fingerprint.Length != 64
+            || fingerprint.Any(static character =>
+                character is not (>= '0' and <= '9' or >= 'a' and <= 'f'))
+            || !string.Equals(
+                fingerprint,
+                StationExecutionGateClaimCanonicalizer.ComputeSha256(
+                    CreateStationExecutionGateClaim(message)),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "Station execution gate evidence and SHA-256 fingerprint are inconsistent.");
+        }
+    }
+
+    private static StationExecutionGateClaim CreateStationExecutionGateClaim(
+        StationJobRequested message)
+        => new(
+            message.JobId,
+            message.IdempotencyKey,
+            message.AgentId,
+            message.StationId,
+            message.StationSystemId,
+            message.ProductionRunId,
+            message.ProductionUnitId,
+            message.RuntimeSessionId,
+            message.OperationRunId,
+            message.OperationAttempt,
+            message.ProductModelId,
+            message.ProductionUnitIdentityInputKey,
+            message.ProductionUnitIdentityValue,
+            message.LotId,
+            message.CarrierId,
+            message.ProjectId,
+            message.ApplicationId,
+            message.ProjectSnapshotId,
+            message.ProductionLineDefinitionId,
+            message.TopologyId,
+            message.ActorId,
+            message.PackageContentSha256,
+            message.OperationId,
+            message.FlowDefinitionId,
+            message.FlowVersionId,
+            message.ConfigurationSnapshotId,
+            message.RecipeSnapshotId,
+            message.ResourceFences.Select(static fence =>
+                new StationExecutionGateResourceFenceClaim(
+                    fence.ResourceKind,
+                    fence.ResourceId,
+                    fence.FencingToken,
+                    fence.ExpiresAtUtc)).ToArray(),
+            JsonSerializer.Serialize(message.Inputs),
+            message.RequestedAtUtc,
+            message.StationExecutionGateRevision,
+            message.StationAgentControlLeaseOwnerAgentId is null
+                ? null
+                : new StationAgentControlLeaseDispatchAuthority(
+                    message.StationAgentControlLeaseOwnerAgentId,
+                    message.StationAgentControlLeaseOwnerInstanceId!,
+                    message.StationAgentControlLeaseFencingToken,
+                    message.StationAgentControlLeaseExpiresAtUtc!.Value),
+            message.StationExecutionGateEvidenceVersion,
+            message.StationExecutionGateAuthorizedAtUtc!.Value,
+            message.StationExecutionGateExpiresAtUtc!.Value,
+            message.StationExecutionGateEvidence!);
+
+    private static void RequireCanonicalOwnerInstanceId(string value)
+    {
+        if (!IsCanonicalOwnerInstanceId(value))
+        {
+            throw new ArgumentException(
+                "Station Agent control lease owner instance must be a canonical "
+                + "lowercase UUIDv4.",
+                nameof(value));
+        }
+    }
+
+    private static bool IsCanonicalOwnerInstanceId(string value) =>
+        Guid.TryParseExact(value, "D", out var parsed)
+        && parsed != Guid.Empty
+        && string.Equals(parsed.ToString("D"), value, StringComparison.Ordinal)
+        && value[14] == '4'
+        && value[19] is '8' or '9' or 'a' or 'b';
 
     private static void RequireUtc(DateTimeOffset value, string description)
     {

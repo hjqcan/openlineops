@@ -9,6 +9,7 @@ public static class ReleaseArtifactKinds
     public const string PluginHost = "plugin-host";
     public const string ScriptWorker = "script-worker";
     public const string SamplePlugin = "sample-plugin";
+    public const string DeviceSessionsPlugin = "device-sessions-plugin";
     public const string Desktop = "desktop";
 
     public static string Parse(string? value)
@@ -24,7 +25,7 @@ public static class ReleaseArtifactKinds
         throw new InvalidOperationException(
             $"Unsupported release artifact kind '{value}'. Expected exactly one of: "
             + $"'{Source}', '{Api}', '{Agent}', '{Runner}', '{PluginHost}', '{ScriptWorker}', "
-            + $"'{SamplePlugin}', '{Desktop}'.");
+            + $"'{SamplePlugin}', '{DeviceSessionsPlugin}', '{Desktop}'.");
     }
 
     public static string FromRelativePath(string relativePath)
@@ -57,6 +58,7 @@ public static class ReleaseArtifactKinds
         PluginHost,
         ScriptWorker,
         SamplePlugin,
+        DeviceSessionsPlugin,
         Desktop
     ];
 }

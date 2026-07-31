@@ -71,9 +71,14 @@ public sealed class QualityPersistenceOptionsValidator
             try
             {
                 var builder = new SqliteConnectionStringBuilder(options.ConnectionString);
+                if (builder.Mode == SqliteOpenMode.Memory)
+                {
+                    return "Quality persistence requires a file-backed SQLite database.";
+                }
+
                 return ValidateFileBackedDataSource(builder.DataSource);
             }
-            catch (ArgumentException exception)
+            catch (Exception exception) when (exception is ArgumentException or FormatException)
             {
                 return $"Quality SQLite ConnectionString is invalid: {exception.Message}";
             }

@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../shared/OpenLineOps.Application.Abstractions/OpenLineOps.Application.Abstractions.csproj" />
+    <ProjectReference Include="../OpenLineOps.Engineering.Application/OpenLineOps.Engineering.Application.csproj" />
+    <ProjectReference Include="../OpenLineOps.Recipes.Application/OpenLineOps.Recipes.Application.csproj" />
+    <ProjectReference Include="../OpenLineOps.Recipes.Domain/OpenLineOps.Recipes.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

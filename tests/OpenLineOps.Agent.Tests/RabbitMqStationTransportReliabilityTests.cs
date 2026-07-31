@@ -3,11 +3,16 @@ using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Infrastructure.Transport;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Runtime.Contracts;
 
 namespace OpenLineOps.Agent.Tests;
 
 public sealed class RabbitMqStationTransportReliabilityTests
 {
+    private const string StationGateEvidence =
+        "station-lifecycle:station-system.main:3:Automatic:Execute|controller-handshake:7";
+    private const string StationGateRevision =
+        "station-gate-revision:v1:station-system.main:3:1";
     private static readonly DateTimeOffset Now =
         new(2026, 7, 11, 8, 0, 0, TimeSpan.Zero);
 
@@ -341,7 +346,7 @@ public sealed class RabbitMqStationTransportReliabilityTests
     private static StationJobRequested JobRequest()
     {
         using var inputs = JsonDocument.Parse("{}");
-        return new StationJobRequested(
+        var request = new StationJobRequested(
             Guid.NewGuid(),
             Guid.NewGuid(),
             "job/unit-001/operation.main/1",
@@ -377,6 +382,17 @@ public sealed class RabbitMqStationTransportReliabilityTests
                 Now.AddMinutes(5))],
             inputs.RootElement.Clone(),
             Now);
+        return StationMessageContract.BindStationExecutionGateEvidence(
+            request,
+            StationGateRevision,
+            StationGateEvidence,
+            Now,
+            Now.AddMinutes(5),
+            new StationAgentControlLeaseDispatchAuthority(
+                request.AgentId,
+                "11111111-1111-4111-8111-111111111111",
+                FencingToken: 17,
+                Now.AddMinutes(10)));
     }
 
     private static StationTransportDelivery Delivery(

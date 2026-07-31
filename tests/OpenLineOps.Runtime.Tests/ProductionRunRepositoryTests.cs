@@ -37,7 +37,9 @@ public sealed class ProductionRunRepositoryTests
 
         Assert.Equal(0, restored.Revision);
         Assert.Equal("product.board", restored.Run.ProductionUnitIdentity.ModelId);
-        Assert.Equal("operation.main", Assert.Single(restoredPlan.Operations).Definition.OperationId);
+        var restoredOperation = Assert.Single(restoredPlan.Operations).Definition;
+        Assert.Equal("operation.main", restoredOperation.OperationId);
+        Assert.Equal("recipe-definition.main", restoredOperation.RecipeId);
     }
 
     [Fact]
@@ -116,7 +118,14 @@ public sealed class ProductionRunRepositoryTests
         Assert.Equal(
             "3.3",
             Assert.Single(restored.Run.Operations).Outputs["measuredVoltage"].CanonicalValue);
-        Assert.NotNull(await repository.GetByRunIdAsync(run.Id));
+        Assert.Equal(
+            "recipe-definition.main",
+            Assert.Single(restored.Run.OperationDefinitions).RecipeId);
+        var restoredPlan = Assert.IsType<ProductionRunExecutionPlan>(
+            await repository.GetByRunIdAsync(run.Id));
+        Assert.Equal(
+            "recipe-definition.main",
+            Assert.Single(restoredPlan.Operations).Definition.RecipeId);
         var timeline = await materials.ListTimelineAsync(ProductionMaterialTimelineQuery.StrictIntersection(
             productionUnitId: run.ProductionUnitId,
             productionRunId: run.Id));
@@ -919,7 +928,8 @@ public sealed class ProductionRunRepositoryTests
             new ConfigurationSnapshotId("configuration.main"),
             new RecipeSnapshotId("recipe.main"),
             process,
-            []);
+            [],
+            recipeId: "recipe-definition.main");
         var run = ProductionRun.Create(
             runId,
             "project.main",

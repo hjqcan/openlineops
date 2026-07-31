@@ -45,6 +45,10 @@ public interface IStationJobCoordinationStore
         Guid jobId,
         CancellationToken cancellationToken = default);
 
+    ValueTask<StationJobRequested> BindStationExecutionGateEvidenceAsync(
+        StationJobRequested authorizedRequest,
+        CancellationToken cancellationToken = default);
+
     ValueTask MarkPublishedAsync(
         Guid messageId,
         CancellationToken cancellationToken = default);

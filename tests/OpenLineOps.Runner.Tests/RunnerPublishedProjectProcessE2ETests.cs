@@ -650,10 +650,11 @@ public sealed partial class RunnerPublishedProjectProcessE2ETests
             await AssertStatusAsync(response, HttpStatusCode.Created);
         }
 
-        using (var response = await client.PostAsync(
-                   $"{engineeringBase}/recipes/{recipeId}/publish",
-                   content: null))
+        foreach (var transition in new[] { "validate", "approve", "release" })
         {
+            using var response = await client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/{transition}",
+                content: null);
             await AssertStatusAsync(response, HttpStatusCode.OK);
         }
 

@@ -61,6 +61,7 @@ public static class OperationsNativeInjectorBootStrapper
 
     private static void AddSharedServices(IServiceCollection services)
     {
+        services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<IntegrationDtoConverterRegistry>();
         services.AddSingleton<IIntegrationDtoConverter, AlarmIntegrationDtoConverter>();
         services.AddScoped<IAlarmAppService, AlarmAppService>();

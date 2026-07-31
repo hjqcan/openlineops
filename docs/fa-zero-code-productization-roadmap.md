@@ -65,7 +65,7 @@ ISA-95 对企业系统与控制系统边界已经有明确划分，OpenLineOps �
 - MES 下载工单、上传结果
 - 完整产品履历和测试证据
 
-这和你现在已有的不可变发布、多工站协调、供应商程序托管、检查点、追溯、恢复能力高度吻合。[现有端到端验证结果](/C:/workspace/SmartMatriX/openlineops/artifacts/production-closure-e2e/20260730050336074-60476/summary.json)
+这和你现在已有的不可变发布、多工站协调、供应商程序托管、检查点、追溯、恢复能力高度吻合。[现有端到端验证结果](../artifacts/production-closure-e2e/20260730050336074-60476/summary.json)
 
 先把这一类线做到现场 FA 一天内完成，再扩其他行业。不要拿第一版去挑战整车总装、连续过程、复杂机器人工作站。
 
@@ -102,7 +102,7 @@ ISA-95 对企业系统与控制系统边界已经有明确划分，OpenLineOps �
 
 # 四、建立真正的零代码组件体系
 
-现有设备会话接口方向正确，包含 Open、Read、Write、Subscribe、Invoke、Health、Diagnostics 等基本能力。[设备会话接口](/C:/workspace/SmartMatriX/openlineops/shared/OpenLineOps.Plugin.Abstractions/IOpenLineOpsDeviceSessionPlugin.cs:1)
+现有设备会话接口方向正确，包含 Open、Read、Write、Subscribe、Invoke、Health、Diagnostics 等基本能力。[设备会话接口](../shared/OpenLineOps.Plugin.Abstractions/IOpenLineOpsDeviceSessionPlugin.cs)
 
 但只有接口远远不够。需要构建六层产品对象：
 
@@ -213,7 +213,7 @@ FA 选择行业模板，例如“电子产品双工站 EOL 测试线”。
 - 一键证书和密钥配置
 - 一键安装或升级 Agent
 
-不能要求 FA 手工配 PostgreSQL、RabbitMQ、证书目录、Windows ACL 或服务账户。当前部署复杂度已经被架构文档承认，这是产品化必须消灭的成本。[部署复杂度说明](/C:/workspace/SmartMatriX/openlineops/docs/adr/0011-coordinate-production-through-station-agents.md:131)
+不能要求 FA 手工配 PostgreSQL、RabbitMQ、证书目录、Windows ACL 或服务账户。当前部署复杂度已经被架构文档承认，这是产品化必须消灭的成本。[部署复杂度说明](adr/0011-coordinate-production-through-station-agents.md)
 
 ## 3. 添加设备
 
@@ -397,7 +397,7 @@ OPC UA 不只是通信协议，它还提供发现、信息模型、安全和设�
 - Undo/Redo
 - 工程资源升级和迁移框架
 
-必须立即修正当前“旧版本直接拒绝、没有迁移”的策略。[当前格式兼容说明](/C:/workspace/SmartMatriX/openlineops/docs/automation-project-workspace.md:212)
+必须立即修正当前“旧版本直接拒绝、没有迁移”的策略。[当前格式兼容说明](automation-project-workspace.md)
 
 工业项目要活五到十年。没有迁移能力，平台升级就等于逼客户重新调线，这是致命问题。
 
@@ -448,7 +448,7 @@ NI TestStand 的竞争力不只是序列编辑，而是开发、调试、部署�
 - MES 标准适配层
 - 生产监控和告警
 
-当前 Engineering、Operator、Safety 三类静态角色只是原型级安全模型，无法支撑真实工厂治理。[现有 API 权限模型](/C:/workspace/SmartMatriX/openlineops/docs/coordinator-api-security.md:46)
+当前 Engineering、Operator、Safety 三类静态角色只是原型级安全模型，无法支撑真实工厂治理。[现有 API 权限模型](coordinator-api-security.md)
 
 验收门槛：
 
@@ -522,9 +522,9 @@ NI TestStand 的竞争力不只是序列编辑，而是开发、调试、部署�
 
 # 八、安全问题要立刻纠正
 
-你的文档正确说明软件取消不能代替硬件安全系统。[安全边界说明](/C:/workspace/SmartMatriX/openlineops/docs/station-agent-security.md:331)
+你的文档正确说明软件取消不能代替硬件安全系统。[安全边界说明](station-agent-security.md)
 
-但 UI 里直接叫“E-STOP”很危险。[当前 E-STOP UI](/C:/workspace/SmartMatriX/openlineops/apps/desktop/src/renderer/operations-workbench.tsx:790)
+但 UI 里直接叫“E-STOP”很危险。[当前 E-STOP UI](../apps/desktop/src/renderer/operations-workbench.tsx)
 
 应立即改成：
 

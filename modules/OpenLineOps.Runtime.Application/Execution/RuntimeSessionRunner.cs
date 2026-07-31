@@ -14,6 +14,7 @@ using OpenLineOps.Runtime.Application.Sessions;
 using OpenLineOps.Runtime.Contracts;
 using OpenLineOps.Runtime.Domain.Commands;
 using OpenLineOps.Runtime.Domain.Identifiers;
+using OpenLineOps.Runtime.Domain.Incidents;
 using OpenLineOps.Runtime.Domain.Operations;
 using OpenLineOps.Runtime.Domain.Sessions;
 using OpenLineOps.Runtime.Domain.Steps;
@@ -96,7 +97,15 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
     {
         foreach (var node in nodes)
         {
-            var nodeResult = await ExecuteNodeAsync(
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return await CancelIdleSessionAsync(
+                        session,
+                        "Runtime session execution was canceled before the next node started.")
+                    .ConfigureAwait(false);
+            }
+
+            var nodeResult = await ExecuteNodeWithPolicyAsync(
                     session,
                     node,
                     productionInputs,
@@ -136,11 +145,17 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 
         for (var hop = 0; hop < maximumNodeVisits; hop++)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return await CancelIdleSessionAsync(
+                        session,
+                        "Runtime session execution was canceled before the next graph node started.")
+                    .ConfigureAwait(false);
+            }
 
             if (executableNodes.TryGetValue(currentNodeId, out var executableNode))
             {
-                var nodeResult = await ExecuteNodeAsync(
+                var nodeResult = await ExecuteNodeWithPolicyAsync(
                         session,
                         executableNode,
                         productionInputs,
@@ -261,13 +276,65 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         return Result.Success(CreateRunResult(session));
     }
 
-    private async ValueTask<Result<RuntimeNodeExecutionResult>> ExecuteNodeAsync(
+    private async ValueTask<Result<RuntimeNodeExecutionResult>> ExecuteNodeWithPolicyAsync(
         RuntimeSession session,
         ExecutableRuntimeNode node,
         IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
         CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
+        var failurePolicy = node.OperationalPolicy?.FailurePolicy
+            ?? RuntimeActionFailurePolicy.Terminate;
+        var maximumAttempts = failurePolicy == RuntimeActionFailurePolicy.Retry
+            ? checked(node.RetryLimit + 1)
+            : 1;
+
+        for (var attempt = 1; attempt <= maximumAttempts; attempt++)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                var canceled = await CancelIdleSessionAsync(
+                        session,
+                        "Runtime session execution was canceled before the next command attempt started.")
+                    .ConfigureAwait(false);
+                return canceled.IsSuccess
+                    ? Result.Success(new RuntimeNodeExecutionResult(
+                        canceled.Value,
+                        null,
+                        CommandSucceeded: false))
+                    : Result.Failure<RuntimeNodeExecutionResult>(canceled.Error);
+            }
+
+            var disposition = ResolveFailureDisposition(
+                failurePolicy,
+                hasRetryRemaining: attempt < maximumAttempts);
+            var result = await ExecuteNodeAsync(
+                    session,
+                    node,
+                    productionInputs,
+                    disposition,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (result.IsFailure
+                || result.Value.CommandSucceeded
+                || session.IsTerminal
+                || failurePolicy != RuntimeActionFailurePolicy.Retry
+                || attempt == maximumAttempts)
+            {
+                return result;
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"Runtime retry loop for node {node.NodeId} escaped its bounded attempt count.");
+    }
+
+    private async ValueTask<Result<RuntimeNodeExecutionResult>> ExecuteNodeAsync(
+        RuntimeSession session,
+        ExecutableRuntimeNode node,
+        IReadOnlyDictionary<string, ProductionContextValue> productionInputs,
+        RuntimeNodeFailureDisposition failureDisposition,
+        CancellationToken cancellationToken)
+    {
         var step = session.StartStep(
             _idProvider.NewStepId(),
             node.NodeId,
@@ -310,6 +377,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                     step.Id,
                     command.Id,
                     payloadResolution.FailureReason,
+                    RuntimeNodeFailureDisposition.Terminate,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -367,12 +435,14 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 executionResult.Reason ?? "Command failed.",
                 executionResult.Payload,
                 executionResult.ResultJudgement,
+                failureDisposition,
                 cancellationToken).ConfigureAwait(false),
             RuntimeCommandExecutionOutcome.Rejected => await RejectNodeAsync(
                 session,
                 step.Id,
                 command.Id,
                 executionResult.Reason ?? "Command rejected.",
+                failureDisposition,
                 cancellationToken).ConfigureAwait(false),
             RuntimeCommandExecutionOutcome.TimedOut => await TimeoutNodeAsync(
                 session,
@@ -380,6 +450,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
                 command.Id,
                 executionResult.Reason ?? "Command timed out.",
                 executionResult.Payload,
+                failureDisposition,
                 cancellationToken).ConfigureAwait(false),
             RuntimeCommandExecutionOutcome.Canceled => await CancelNodeAsync(
                 session,
@@ -401,14 +472,48 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         RuntimeCommandExecutionContext context,
         CancellationToken cancellationToken)
     {
+        using var executionCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
         try
         {
-            return await _commandExecutor.ExecuteAsync(context, cancellationToken)
-                .ConfigureAwait(false);
+            executionCancellation.CancelAfter(context.Timeout);
+            var execution = _commandExecutor
+                .ExecuteAsync(context, executionCancellation.Token)
+                .AsTask();
+            RuntimeCommandExecutionResult result;
+            if (execution.IsCompleted)
+            {
+                result = await execution.ConfigureAwait(false);
+            }
+            else
+            {
+                result = await execution
+                    .WaitAsync(executionCancellation.Token)
+                    .ConfigureAwait(false);
+            }
+
+            return result.Outcome == RuntimeCommandExecutionOutcome.Canceled
+                   && !cancellationToken.IsCancellationRequested
+                   && executionCancellation.IsCancellationRequested
+                ? RuntimeCommandExecutionResult.TimedOut(
+                    $"Command execution exceeded its timeout of {context.Timeout}.",
+                    result.Payload)
+                : result;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             return RuntimeCommandExecutionResult.Canceled("Command execution was canceled.");
+        }
+        catch (OperationCanceledException) when (executionCancellation.IsCancellationRequested)
+        {
+            return RuntimeCommandExecutionResult.TimedOut(
+                $"Command execution exceeded its timeout of {context.Timeout}.");
+        }
+        catch (OperationCanceledException)
+        {
+            return RuntimeCommandExecutionResult.Failed(
+                "Command executor canceled without a matching caller cancellation or command timeout.");
         }
         catch (Exception exception) when (exception is not OperationCanceledException
                                            and not OutOfMemoryException)
@@ -568,7 +673,10 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 
         await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
-        return Result.Success(new RuntimeNodeExecutionResult(CreateRunResult(session), payload));
+        return Result.Success(new RuntimeNodeExecutionResult(
+            CreateRunResult(session),
+            payload,
+            CommandSucceeded: true));
     }
 
     private async ValueTask<Result<RuntimeNodeExecutionResult>> FailNodeAsync(
@@ -579,6 +687,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         string reason,
         string? payload,
         ResultJudgement resultJudgement,
+        RuntimeNodeFailureDisposition failureDisposition,
         CancellationToken cancellationToken)
     {
         var commandResult = session.FailCommand(
@@ -592,11 +701,12 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToNodeExecutionFailure(commandResult);
         }
 
-        return await FailStepAndSessionAsync(
+        return await FinishFailedStepAsync(
             session,
             stepId,
             code,
             reason,
+            failureDisposition,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -605,6 +715,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         RuntimeStepId stepId,
         RuntimeCommandId commandId,
         string reason,
+        RuntimeNodeFailureDisposition failureDisposition,
         CancellationToken cancellationToken)
     {
         var commandResult = session.RejectCommand(commandId, reason, _clock.UtcNow);
@@ -613,11 +724,12 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToNodeExecutionFailure(commandResult);
         }
 
-        return await FailStepAndSessionAsync(
+        return await FinishFailedStepAsync(
             session,
             stepId,
             "Runtime.CommandRejected",
             reason,
+            failureDisposition,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -627,6 +739,7 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         RuntimeCommandId commandId,
         string reason,
         string? payload,
+        RuntimeNodeFailureDisposition failureDisposition,
         CancellationToken cancellationToken)
     {
         var commandResult = session.TimeoutCommand(commandId, _clock.UtcNow, payload);
@@ -635,11 +748,12 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
             return ToNodeExecutionFailure(commandResult);
         }
 
-        return await FailStepAndSessionAsync(
+        return await FinishFailedStepAsync(
             session,
             stepId,
             "Runtime.CommandTimedOut",
             reason,
+            failureDisposition,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -677,31 +791,54 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 
         await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
-        return Result.Success(new RuntimeNodeExecutionResult(CreateRunResult(session), null));
+        return Result.Success(new RuntimeNodeExecutionResult(
+            CreateRunResult(session),
+            null,
+            CommandSucceeded: false));
     }
 
-    private async ValueTask<Result<RuntimeNodeExecutionResult>> FailStepAndSessionAsync(
+    private async ValueTask<Result<RuntimeNodeExecutionResult>> FinishFailedStepAsync(
         RuntimeSession session,
         RuntimeStepId stepId,
         string code,
         string reason,
+        RuntimeNodeFailureDisposition disposition,
         CancellationToken cancellationToken)
     {
-        var stepResult = session.FailStep(stepId, reason, _clock.UtcNow);
+        var stepResult = disposition.SkipStep
+            ? session.SkipStep(stepId, reason, _clock.UtcNow)
+            : session.FailStep(stepId, reason, _clock.UtcNow);
         if (!stepResult.Succeeded)
         {
             return ToNodeExecutionFailure(stepResult);
         }
 
-        var sessionResult = session.Fail(_clock.UtcNow, code, reason);
-        if (!sessionResult.Succeeded)
+        if (disposition.FailSession)
         {
-            return ToNodeExecutionFailure(sessionResult);
+            var sessionResult = session.Fail(
+                _clock.UtcNow,
+                disposition.TerminalCode ?? code,
+                reason);
+            if (!sessionResult.Succeeded)
+            {
+                return ToNodeExecutionFailure(sessionResult);
+            }
+        }
+        else
+        {
+            session.RecordIncident(
+                RuntimeIncidentSeverity.Warning,
+                $"{code}.{disposition.NonTerminalCodeSuffix}",
+                reason,
+                _clock.UtcNow);
         }
 
         await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
 
-        return Result.Success(new RuntimeNodeExecutionResult(CreateRunResult(session), null));
+        return Result.Success(new RuntimeNodeExecutionResult(
+            CreateRunResult(session),
+            null,
+            CommandSucceeded: false));
     }
 
     private async ValueTask<Result<RuntimeSessionRunResult>> FailSessionAsync(
@@ -711,6 +848,21 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         CancellationToken cancellationToken)
     {
         var sessionResult = session.Fail(_clock.UtcNow, code, reason);
+        if (!sessionResult.Succeeded)
+        {
+            return ToApplicationFailure(sessionResult);
+        }
+
+        await PersistAndPublishAsync(session, CancellationToken.None).ConfigureAwait(false);
+
+        return Result.Success(CreateRunResult(session));
+    }
+
+    private async ValueTask<Result<RuntimeSessionRunResult>> CancelIdleSessionAsync(
+        RuntimeSession session,
+        string reason)
+    {
+        var sessionResult = session.Cancel(_clock.UtcNow, reason);
         if (!sessionResult.Succeeded)
         {
             return ToApplicationFailure(sessionResult);
@@ -1000,6 +1152,45 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
         values.Add(text);
     }
 
+    private static RuntimeNodeFailureDisposition ResolveFailureDisposition(
+        RuntimeActionFailurePolicy failurePolicy,
+        bool hasRetryRemaining)
+    {
+        return failurePolicy switch
+        {
+            RuntimeActionFailurePolicy.Continue =>
+                new RuntimeNodeFailureDisposition(
+                    FailSession: false,
+                    SkipStep: false,
+                    TerminalCode: null,
+                    NonTerminalCodeSuffix: "Continued"),
+            RuntimeActionFailurePolicy.Skip =>
+                new RuntimeNodeFailureDisposition(
+                    FailSession: false,
+                    SkipStep: true,
+                    TerminalCode: null,
+                    NonTerminalCodeSuffix: "Skipped"),
+            RuntimeActionFailurePolicy.Retry when hasRetryRemaining =>
+                new RuntimeNodeFailureDisposition(
+                    FailSession: false,
+                    SkipStep: false,
+                    TerminalCode: null,
+                    NonTerminalCodeSuffix: "RetryScheduled"),
+            RuntimeActionFailurePolicy.Rework =>
+                RuntimeNodeFailureDisposition.TerminateWith("Runtime.ReworkRequired"),
+            RuntimeActionFailurePolicy.ManualDisposition =>
+                RuntimeNodeFailureDisposition.TerminateWith(
+                    "Runtime.ManualDispositionRequired"),
+            RuntimeActionFailurePolicy.Hold =>
+                RuntimeNodeFailureDisposition.TerminateWith("Runtime.HoldRequired"),
+            RuntimeActionFailurePolicy.Terminate
+                or RuntimeActionFailurePolicy.Retry =>
+                RuntimeNodeFailureDisposition.Terminate,
+            _ => throw new InvalidDataException(
+                $"Unsupported Runtime action failure policy {failurePolicy}.")
+        };
+    }
+
     private static Result<RuntimeSessionRunResult> ToApplicationFailure(RuntimeOperationResult result)
     {
         return Result.Failure<RuntimeSessionRunResult>(
@@ -1025,7 +1216,29 @@ public sealed class RuntimeSessionRunner : IRuntimeSessionRunner
 
     private sealed record RuntimeNodeExecutionResult(
         RuntimeSessionRunResult RunResult,
-        string? ResultPayload);
+        string? ResultPayload,
+        bool CommandSucceeded);
+
+    private sealed record RuntimeNodeFailureDisposition(
+        bool FailSession,
+        bool SkipStep,
+        string? TerminalCode,
+        string? NonTerminalCodeSuffix)
+    {
+        public static RuntimeNodeFailureDisposition Terminate { get; } =
+            new(
+                FailSession: true,
+                SkipStep: false,
+                TerminalCode: null,
+                NonTerminalCodeSuffix: null);
+
+        public static RuntimeNodeFailureDisposition TerminateWith(string code) =>
+            new(
+                FailSession: true,
+                SkipStep: false,
+                TerminalCode: code,
+                NonTerminalCodeSuffix: null);
+    }
 
     private sealed record ProductionInputPayloadResolution(
         string? Payload,

@@ -133,7 +133,8 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                         line.LineDefinitionId,
                         operation,
                         line.LineControllerAuthorizations),
-                    CreateMaterialSlotRequirement(operation)));
+                    CreateMaterialSlotRequirement(operation),
+                    configuration.RecipeId));
             }
 
             var transitions = line.Transitions
@@ -238,6 +239,11 @@ public sealed class ProjectReleaseProductionRunLauncher : IProjectReleaseProduct
                 StringComparison.Ordinal))
         {
             return $"process version is {configuration.ProcessVersionId}, expected {operation.FlowVersionId}";
+        }
+
+        if (string.IsNullOrWhiteSpace(configuration.RecipeId))
+        {
+            return "configuration has no frozen recipe id";
         }
 
         return string.Equals(

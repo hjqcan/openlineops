@@ -4,7 +4,9 @@ using OpenLineOps.Runtime.Domain.Stations;
 
 namespace OpenLineOps.Runtime.Infrastructure.Persistence;
 
-public sealed class InMemoryStationLifecycleRepository : IStationLifecycleRepository
+public sealed class InMemoryStationLifecycleRepository :
+    IStationLifecycleRepository,
+    IStationLifecycleFactReader
 {
     private readonly object _gate = new();
     private readonly Dictionary<StationId, StoredStationLifecycle> _stations = [];
@@ -22,9 +24,18 @@ public sealed class InMemoryStationLifecycleRepository : IStationLifecycleReposi
                 return ValueTask.FromResult(false);
             }
 
+            var snapshot = station.ToSnapshot();
+            var document = StationLifecyclePersistenceJson.Serialize(snapshot);
+            var fact = StationLifecycleFactIntegrity.Create(
+                station.Id,
+                sequence: 1,
+                lifecycleRevision: 0,
+                document,
+                station,
+                StationLifecycleFactIntegrity.GenesisSha256);
             _stations.Add(
                 station.Id,
-                new StoredStationLifecycle(station.ToSnapshot(), Revision: 0));
+                new StoredStationLifecycle(snapshot, Revision: 0, [fact]));
             station.ClearDomainEvents();
             return ValueTask.FromResult(true);
         }
@@ -49,9 +60,19 @@ public sealed class InMemoryStationLifecycleRepository : IStationLifecycleReposi
             }
 
             var nextRevision = checked(expectedRevision + 1);
+            var snapshot = station.ToSnapshot();
+            var document = StationLifecyclePersistenceJson.Serialize(snapshot);
+            var fact = StationLifecycleFactIntegrity.Create(
+                station.Id,
+                checked(nextRevision + 1),
+                nextRevision,
+                document,
+                station,
+                stored.Facts[^1].FactSha256);
             _stations[station.Id] = new StoredStationLifecycle(
-                station.ToSnapshot(),
-                nextRevision);
+                snapshot,
+                nextRevision,
+                stored.Facts.Append(fact).ToArray());
             station.ClearDomainEvents();
             return ValueTask.FromResult(nextRevision);
         }
@@ -74,7 +95,48 @@ public sealed class InMemoryStationLifecycleRepository : IStationLifecycleReposi
         }
     }
 
+    public ValueTask<IReadOnlyList<StationLifecyclePersistenceEntry>> ListAsync(
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            IReadOnlyList<StationLifecyclePersistenceEntry> entries = _stations
+                .OrderBy(static pair => pair.Key.Value, StringComparer.Ordinal)
+                .Select(static pair => new StationLifecyclePersistenceEntry(
+                    StationLifecycle.Restore(pair.Value.Snapshot),
+                    pair.Value.Revision))
+                .ToArray();
+            return ValueTask.FromResult(entries);
+        }
+    }
+
+    public ValueTask<IReadOnlyList<StationLifecycleFactMetadata>> ListFactsAsync(
+        StationId stationId,
+        long afterSequence = 0,
+        int pageSize = 100,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(stationId);
+        ArgumentOutOfRangeException.ThrowIfNegative(afterSequence);
+        ArgumentOutOfRangeException.ThrowIfLessThan(pageSize, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(pageSize, 500);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            IReadOnlyList<StationLifecycleFactMetadata> facts =
+                _stations.TryGetValue(stationId, out var stored)
+                    ? stored.Facts
+                        .Where(fact => fact.Sequence > afterSequence)
+                        .Take(pageSize)
+                        .ToArray()
+                    : [];
+            return ValueTask.FromResult(facts);
+        }
+    }
+
     private sealed record StoredStationLifecycle(
         StationLifecycleSnapshot Snapshot,
-        long Revision);
+        long Revision,
+        IReadOnlyList<StationLifecycleFactMetadata> Facts);
 }

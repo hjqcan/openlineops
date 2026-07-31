@@ -6,6 +6,7 @@ using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Agent.Infrastructure.Execution;
 using OpenLineOps.Agent.Infrastructure.Packages;
+using OpenLineOps.BuiltinPlugins.DeviceSessions;
 using OpenLineOps.ContentProtection;
 using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Projects.Application.Releases;
@@ -27,7 +28,11 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
     public async Task FrozenReleasePublishesPerStationCatalogAndAgentInstallsBeforeExecution()
     {
         using var signingKey = RSA.Create(3072);
-        var release = CreateRelease("project.line", "snapshot.main", "portable-content");
+        var release = CreateRelease(
+            "project.line",
+            "snapshot.main",
+            "portable-content",
+            "0.1.0");
         var distribution = Path.Combine(_root, "distribution");
         var catalog = Path.Combine(_root, "catalog");
         var privateKeyPath = WritePrivateKey(signingKey);
@@ -101,7 +106,11 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
                 release.SnapshotId,
                 "station.test")));
 
-        var nextRelease = CreateRelease("project.line", "snapshot.next", "portable-content");
+        var nextRelease = CreateRelease(
+            "project.line",
+            "snapshot.next",
+            "portable-content",
+            "0.2.0");
         var nextPublished = await publisher.PublishAsync(new ProjectReleaseStationPackageRequest(
             nextRelease,
             Metadata("station.assembly", "station.test"),
@@ -116,6 +125,52 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
                 .PackageContentSha256,
             nextRoute.PackageContentSha256);
         Assert.NotEqual(route.PackageContentSha256, nextRoute.PackageContentSha256);
+        var rollbackRoute = await resolver.ResolveAsync(new(
+            release.ProjectId,
+            release.ApplicationId,
+            release.SnapshotId,
+            "station.test"));
+        Assert.Equal(route.PackageContentSha256, rollbackRoute.PackageContentSha256);
+
+        using (var rollbackInstaller = new SignedStationPackageInstaller(
+                   new StationPackageTrustOptions(
+                       Path.Combine(_root, "cache"),
+                       new Dictionary<string, string>(StringComparer.Ordinal)
+                       {
+                           ["release-signing"] = signingKey.ExportSubjectPublicKeyInfoPem()
+                       },
+                       ImmutableStationServiceSid:
+                           AgentTestStationServiceIdentity.ConfiguredOrFixtureSid()),
+                   new InventoryOnlyTestContentProtector(markFilesReadOnly: true)))
+        {
+            var nextStationPackage = nextPublished.Packages.Single(package =>
+                package.StationSystemId == "station.test");
+            var nextInstalled = await rollbackInstaller.InstallAsync(
+                nextStationPackage.PackagePath,
+                nextStationPackage.PackageContentSha256);
+            var rollbackInstalled = await rollbackInstaller.InstallAsync(
+                testPackage.PackagePath,
+                rollbackRoute.PackageContentSha256);
+            Assert.Contains(
+                "\"version\": \"0.2.0\"",
+                await File.ReadAllTextAsync(Path.Combine(
+                    nextInstalled.ContentDirectory,
+                    "packages",
+                    "device-sessions",
+                    "manifest.json")),
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "\"version\": \"0.1.0\"",
+                await File.ReadAllTextAsync(Path.Combine(
+                    rollbackInstalled.ContentDirectory,
+                    "packages",
+                    "device-sessions",
+                    "manifest.json")),
+                StringComparison.Ordinal);
+            Assert.NotEqual(
+                nextInstalled.ContentDirectory,
+                rollbackInstalled.ContentDirectory);
+        }
 
         var runtime = new RecordingRuntimeHost();
         var hasRestrictedStationIdentity = OperatingSystem.IsWindows()
@@ -342,15 +397,45 @@ public sealed class StationPackagePublicationE2ETests : IDisposable
     private ProjectReleaseArtifactDescriptor CreateRelease(
         string projectId,
         string snapshotId,
-        string applicationContent)
+        string applicationContent,
+        string deviceSessionsPluginVersion = "0.1.0")
     {
         var releaseRoot = Path.Combine(_root, projectId, snapshotId);
         var sourceRoot = Path.Combine(releaseRoot, "source");
         var applicationRoot = Path.Combine(sourceRoot, "applications", "portable");
         Directory.CreateDirectory(Path.Combine(applicationRoot, "flows"));
+        var deviceSessionsPackageRoot = Path.Combine(
+            releaseRoot,
+            "packages",
+            "device-sessions");
+        Directory.CreateDirectory(deviceSessionsPackageRoot);
         File.WriteAllText(Path.Combine(releaseRoot, "release.json"), "{\"frozen\":true}");
         File.WriteAllText(Path.Combine(applicationRoot, "application.oloapp"), applicationContent);
         File.WriteAllText(Path.Combine(applicationRoot, "flows", "main.json"), "{\"nodes\":[]}");
+        var deviceSessionsAssemblyPath =
+            typeof(IndustrialDeviceSessionPlugin).Assembly.Location;
+        var deviceSessionsManifestTemplate = File.ReadAllText(Path.Combine(
+            Path.GetDirectoryName(deviceSessionsAssemblyPath)!,
+            "manifest.json"));
+        var deviceSessionsManifest = deviceSessionsManifestTemplate.Replace(
+            "\"version\": \"0.1.0\"",
+            $"\"version\": \"{deviceSessionsPluginVersion}\"",
+            StringComparison.Ordinal);
+        if (!deviceSessionsManifest.Contains(
+                $"\"version\": \"{deviceSessionsPluginVersion}\"",
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The device sessions plugin fixture manifest version could not be bound.");
+        }
+        File.WriteAllText(
+            Path.Combine(deviceSessionsPackageRoot, "manifest.json"),
+            deviceSessionsManifest);
+        File.Copy(
+            deviceSessionsAssemblyPath,
+            Path.Combine(
+                deviceSessionsPackageRoot,
+                "OpenLineOps.BuiltinPlugins.DeviceSessions.dll"));
         return new ProjectReleaseArtifactDescriptor(
             snapshotId,
             projectId,

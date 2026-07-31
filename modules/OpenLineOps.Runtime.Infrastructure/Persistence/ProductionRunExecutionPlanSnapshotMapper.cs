@@ -18,6 +18,7 @@ internal static class ProductionRunExecutionPlanSnapshotMapper
             operation.Definition.StationId.Value,
             operation.Definition.ConfigurationSnapshotId.Value,
             operation.Definition.RecipeSnapshotId.Value,
+            operation.Definition.RecipeId,
             operation.InputMappings.Select(mapping => new PersistedOperationInputMapping(
                 mapping.TargetInputKey,
                 mapping.SourceOperationId,
@@ -63,7 +64,8 @@ internal static class ProductionRunExecutionPlanSnapshotMapper
                     Text(resource.ResourceId, "resource id")))
                     ?? throw new InvalidDataException(
                         "Persisted operation execution plan has no resources."),
-                ToAggregate(operation.MaterialSlotRequirement)))
+                ToAggregate(operation.MaterialSlotRequirement),
+                Optional(operation.RecipeId, "recipe id")))
                 .ToArray());
     }
 
@@ -132,6 +134,9 @@ internal static class ProductionRunExecutionPlanSnapshotMapper
             ? throw new InvalidDataException(
                 $"Persisted Production Run execution plan has no canonical {fieldName}.")
             : value;
+
+    private static string? Optional(string? value, string fieldName) =>
+        value is null ? null : Text(value, fieldName);
 }
 
 internal sealed record PersistedProductionRunExecutionPlan(
@@ -144,6 +149,7 @@ internal sealed record PersistedOperationExecutionPlan(
     string? StationId,
     string? ConfigurationSnapshotId,
     string? RecipeSnapshotId,
+    string? RecipeId,
     PersistedOperationInputMapping[]? InputMappings,
     PersistedExecutionResource[]? Resources,
     PersistedExecutionMaterialSlot? MaterialSlotRequirement,

@@ -725,6 +725,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
         _executor ?? throw new InvalidOperationException("The signed Station executor is not initialized."),
         _resourceFenceValidator
         ?? throw new InvalidOperationException("The Station resource fence validator is not initialized."),
+        TestStationDispatchControlLeaseVerifier.Accepting(),
         new EmptyCancellationStore(),
         new StationJobExecutionRegistry(),
         _runtimeHost ?? throw new InvalidOperationException("The Station runtime host is not initialized."),
@@ -791,7 +792,7 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
             AgentId,
             StationId,
             new StationJobId(jobId)));
-        return new StationJobRequested(
+        var request = new StationJobRequested(
             Guid.NewGuid(),
             jobId,
             $"production/{mode}/{jobId:N}",
@@ -835,6 +836,18 @@ public sealed class SignedVendorProgramStationE2ETests : IDisposable
                 }
             }),
             Now);
+        return StationMessageContract.BindStationExecutionGateEvidence(
+            request,
+            "station-gate-revision:v1:station-system.main:1:1",
+            "station-lifecycle:station-system.main:1:Automatic:Execute"
+            + "|controller-handshake:1",
+            Now,
+            Now.AddMinutes(5),
+            new StationAgentControlLeaseDispatchAuthority(
+                request.AgentId,
+                "11111111-1111-4111-8111-111111111111",
+                FencingToken: 17,
+                Now.AddMinutes(10)));
     }
 
     private ProjectApplicationWorkspaceScope CreateApplication()

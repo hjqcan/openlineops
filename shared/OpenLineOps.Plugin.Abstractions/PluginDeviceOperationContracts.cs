@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace OpenLineOps.Plugin.Abstractions;
 
 public enum PluginDeviceOperationOutcome
@@ -6,6 +8,12 @@ public enum PluginDeviceOperationOutcome
     Rejected = 1,
     Failed = 2,
     TimedOut = 3
+}
+
+public enum PluginDeviceOperationCompletionState
+{
+    Known = 0,
+    Unknown = 1
 }
 
 public sealed record PluginDeviceInvocationRequest
@@ -33,6 +41,8 @@ public sealed record PluginDeviceInvocationRequest
 
 public sealed record PluginDeviceOperationResult
 {
+    private PluginDeviceOperationCompletionState _completionState;
+
     public PluginDeviceOperationResult(
         PluginDeviceOperationOutcome outcome,
         DateTimeOffset completedAtUtc,
@@ -69,6 +79,29 @@ public sealed record PluginDeviceOperationResult
 
     public string? FailureReason { get; }
 
+    [JsonInclude]
+    public PluginDeviceOperationCompletionState CompletionState
+    {
+        get => _completionState;
+        private init
+        {
+            var state = PluginDeviceContractGuard.Defined(value, nameof(CompletionState));
+            if (state == PluginDeviceOperationCompletionState.Unknown
+                && Outcome is PluginDeviceOperationOutcome.Completed
+                    or PluginDeviceOperationOutcome.Rejected)
+            {
+                throw new ArgumentException(
+                    $"An operation with outcome '{Outcome}' cannot have unknown completion.",
+                    nameof(CompletionState));
+            }
+
+            _completionState = state;
+        }
+    }
+
+    public bool RecoveryRequired =>
+        CompletionState == PluginDeviceOperationCompletionState.Unknown;
+
     public bool Succeeded => Outcome == PluginDeviceOperationOutcome.Completed;
 
     public static PluginDeviceOperationResult Completed(
@@ -90,4 +123,16 @@ public sealed record PluginDeviceOperationResult
         DateTimeOffset completedAtUtc,
         string failureReason) =>
         new(PluginDeviceOperationOutcome.TimedOut, completedAtUtc, null, failureReason);
+
+    public static PluginDeviceOperationResult UnknownCompletion(
+        DateTimeOffset completedAtUtc,
+        string failureReason) =>
+        new PluginDeviceOperationResult(
+            PluginDeviceOperationOutcome.Failed,
+            completedAtUtc,
+            null,
+            failureReason)
+        {
+            CompletionState = PluginDeviceOperationCompletionState.Unknown
+        };
 }

@@ -285,6 +285,343 @@ public sealed class RuntimeSessionRunnerTests
     }
 
     [Fact]
+    public async Task RetryPolicyCreatesBoundedAttemptEvidenceAndExecutesActionAgain()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var commandExecutor = new ScriptedRuntimeCommandExecutor(
+            RuntimeCommandExecutionResult.Failed("transient instrument timeout"),
+            RuntimeCommandExecutionResult.Completed("measurement-ok"));
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            commandExecutor);
+        var retryNode = Node(
+            new RuntimeNodeId("node-retry"),
+            "Retry bounded measurement",
+            new RuntimeCapabilityId("device.instrument"),
+            "Measure",
+            TimeSpan.FromSeconds(2)) with
+        {
+            RetryLimit = 1,
+            OperationalPolicy = Policy(RuntimeActionFailurePolicy.Retry)
+        };
+
+        var result = await runner.RunAsync(CreateStartRequest(new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process-retry"),
+            new ProcessVersionId("process-retry@1.0.0"),
+            [retryNode])));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Completed, result.Value.Status);
+        Assert.Equal(2, result.Value.CommandCount);
+        Assert.Equal(1, result.Value.CompletedSteps);
+        Assert.Equal(1, result.Value.IncidentCount);
+        Assert.Equal(2, commandExecutor.Contexts.Count);
+
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(result.Value.SessionId));
+        Assert.Equal(
+            [RuntimeStepStatus.Failed, RuntimeStepStatus.Completed],
+            persisted.Steps.Select(step => step.Status));
+        Assert.Equal(
+            [ExecutionStatus.Failed, ExecutionStatus.Completed],
+            persisted.Commands.Select(command => command.Status));
+        Assert.Equal(
+            "Runtime.CommandFailed.RetryScheduled",
+            Assert.Single(persisted.Incidents).Code);
+    }
+
+    [Fact]
+    public async Task RetryPolicyStopsAfterInitialAttemptPlusDeclaredRetryLimit()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var commandExecutor = new ScriptedRuntimeCommandExecutor(
+            RuntimeCommandExecutionResult.Failed("attempt one failed"),
+            RuntimeCommandExecutionResult.Failed("attempt two failed"),
+            RuntimeCommandExecutionResult.Failed("attempt three failed"),
+            RuntimeCommandExecutionResult.Completed("must not execute"));
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            commandExecutor);
+        var retryNode = Node(
+            new RuntimeNodeId("node-retry-exhausted"),
+            "Exhaust bounded retries",
+            new RuntimeCapabilityId("device.instrument"),
+            "Measure",
+            TimeSpan.FromSeconds(1)) with
+        {
+            RetryLimit = 2,
+            OperationalPolicy = Policy(RuntimeActionFailurePolicy.Retry)
+        };
+
+        var result = await runner.RunAsync(CreateStartRequest(
+            new ExecutableRuntimeProcess(
+                new ProcessDefinitionId("process-retry-exhausted"),
+                new ProcessVersionId("process-retry-exhausted@1.0.0"),
+                [retryNode])));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Failed, result.Value.Status);
+        Assert.Equal(3, result.Value.CommandCount);
+        Assert.Equal(3, commandExecutor.Contexts.Count);
+
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(result.Value.SessionId));
+        Assert.All(persisted.Steps, step => Assert.Equal(RuntimeStepStatus.Failed, step.Status));
+        Assert.All(persisted.Commands, command => Assert.Equal(ExecutionStatus.Failed, command.Status));
+        Assert.Equal(
+            [
+                "Runtime.CommandFailed.RetryScheduled",
+                "Runtime.CommandFailed.RetryScheduled",
+                "Runtime.CommandFailed"
+            ],
+            persisted.Incidents.Select(incident => incident.Code));
+    }
+
+    [Fact]
+    public async Task CancellationBetweenRetryAttemptsPersistsCanceledSessionWithoutStartingAnotherCommand()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        using var cancellation = new CancellationTokenSource();
+        var commandExecutor = new CancelingFailureCommandExecutor(cancellation);
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            commandExecutor);
+        var retryNode = Node(
+            new RuntimeNodeId("node-retry-canceled"),
+            "Canceled retry",
+            new RuntimeCapabilityId("device.instrument"),
+            "Measure",
+            TimeSpan.FromSeconds(1)) with
+        {
+            RetryLimit = 2,
+            OperationalPolicy = Policy(RuntimeActionFailurePolicy.Retry)
+        };
+
+        var result = await runner.RunAsync(
+            CreateStartRequest(new ExecutableRuntimeProcess(
+                new ProcessDefinitionId("process-retry-canceled"),
+                new ProcessVersionId("process-retry-canceled@1.0.0"),
+                [retryNode])),
+            cancellation.Token);
+
+        Assert.True(result.IsSuccess);
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.Equal(RuntimeSessionStatus.Canceled, result.Value.Status);
+        Assert.Equal(1, result.Value.CommandCount);
+        Assert.Equal(1, commandExecutor.ExecutionCount);
+
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(result.Value.SessionId));
+        Assert.Equal(RuntimeSessionStatus.Canceled, persisted.Status);
+        Assert.Equal(RuntimeStepStatus.Failed, Assert.Single(persisted.Steps).Status);
+        Assert.Equal(ExecutionStatus.Failed, Assert.Single(persisted.Commands).Status);
+        Assert.Equal(
+            "Runtime.CommandFailed.RetryScheduled",
+            Assert.Single(persisted.Incidents).Code);
+    }
+
+    [Fact]
+    public async Task RetryPolicyDoesNotRetryAnExecutorCanceledOutcome()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var commandExecutor = new ScriptedRuntimeCommandExecutor(
+            RuntimeCommandExecutionResult.Canceled("device host stopped the command"),
+            RuntimeCommandExecutionResult.Completed("must not execute"));
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            commandExecutor);
+        var retryNode = Node(
+            new RuntimeNodeId("node-retry-executor-canceled"),
+            "Executor canceled retry",
+            new RuntimeCapabilityId("device.instrument"),
+            "Measure",
+            TimeSpan.FromSeconds(1)) with
+        {
+            RetryLimit = 2,
+            OperationalPolicy = Policy(RuntimeActionFailurePolicy.Retry)
+        };
+
+        var result = await runner.RunAsync(CreateStartRequest(
+            new ExecutableRuntimeProcess(
+                new ProcessDefinitionId("process-retry-executor-canceled"),
+                new ProcessVersionId("process-retry-executor-canceled@1.0.0"),
+                [retryNode])));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Canceled, result.Value.Status);
+        Assert.Equal(1, result.Value.CommandCount);
+        Assert.Single(commandExecutor.Contexts);
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(result.Value.SessionId));
+        Assert.Equal(ExecutionStatus.Canceled, Assert.Single(persisted.Commands).Status);
+        Assert.Equal(RuntimeStepStatus.Canceled, Assert.Single(persisted.Steps).Status);
+        Assert.Empty(persisted.Incidents);
+    }
+
+    [Fact]
+    public async Task RunnerEnforcesCommandTimeoutWhenExecutorIgnoresCancellation()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var commandExecutor = new NonCooperativeCommandExecutor();
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            commandExecutor);
+        var node = Node(
+            new RuntimeNodeId("node-runner-timeout"),
+            "Runner timeout",
+            new RuntimeCapabilityId("device.noncooperative"),
+            "Execute",
+            TimeSpan.FromMilliseconds(100));
+        var process = new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process-runner-timeout"),
+            new ProcessVersionId("process-runner-timeout@1.0.0"),
+            [node]);
+
+        var execution = runner.RunAsync(CreateStartRequest(process)).AsTask();
+        var result = await execution.WaitAsync(TimeSpan.FromSeconds(5));
+        commandExecutor.Complete();
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Failed, result.Value.Status);
+        Assert.True(commandExecutor.ObservedCancellation.IsCancellationRequested);
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(result.Value.SessionId));
+        Assert.Equal(ExecutionStatus.TimedOut, Assert.Single(persisted.Commands).Status);
+        Assert.Equal(RuntimeStepStatus.Failed, Assert.Single(persisted.Steps).Status);
+        Assert.Equal("Runtime.CommandTimedOut", Assert.Single(persisted.Incidents).Code);
+    }
+
+    [Fact]
+    public async Task RunnerClassifiesItsOwnCooperativeTimeoutAsTimedOut()
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            new CancellationReportingCommandExecutor());
+        var node = Node(
+            new RuntimeNodeId("node-cooperative-timeout"),
+            "Cooperative timeout",
+            new RuntimeCapabilityId("device.cooperative"),
+            "Execute",
+            TimeSpan.FromMilliseconds(100));
+
+        var result = await runner.RunAsync(CreateStartRequest(
+            new ExecutableRuntimeProcess(
+                new ProcessDefinitionId("process-cooperative-timeout"),
+                new ProcessVersionId("process-cooperative-timeout@1.0.0"),
+                [node])));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Failed, result.Value.Status);
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(result.Value.SessionId));
+        Assert.Equal(ExecutionStatus.TimedOut, Assert.Single(persisted.Commands).Status);
+        Assert.Equal(RuntimeStepStatus.Failed, Assert.Single(persisted.Steps).Status);
+        Assert.Equal("Runtime.CommandTimedOut", Assert.Single(persisted.Incidents).Code);
+    }
+
+    [Theory]
+    [InlineData(
+        RuntimeActionFailurePolicy.Continue,
+        RuntimeStepStatus.Failed,
+        "Runtime.CommandFailed.Continued")]
+    [InlineData(
+        RuntimeActionFailurePolicy.Skip,
+        RuntimeStepStatus.Skipped,
+        "Runtime.CommandFailed.Skipped")]
+    public async Task ContinueAndSkipPoliciesPreserveFailureEvidenceAndRunNextNode(
+        RuntimeActionFailurePolicy failurePolicy,
+        RuntimeStepStatus expectedStepStatus,
+        string expectedIncidentCode)
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var commandExecutor = new ScriptedRuntimeCommandExecutor(
+            RuntimeCommandExecutionResult.Failed("optional inspection unavailable"),
+            RuntimeCommandExecutionResult.Completed("next-step-ok"));
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            commandExecutor);
+        var first = Node(
+            new RuntimeNodeId("node-policy"),
+            "Policy controlled step",
+            new RuntimeCapabilityId("device.optional"),
+            "Inspect",
+            TimeSpan.FromSeconds(1)) with
+        {
+            OperationalPolicy = Policy(failurePolicy)
+        };
+        var second = Node(
+            new RuntimeNodeId("node-after-policy"),
+            "Required next step",
+            new RuntimeCapabilityId("device.required"),
+            "Execute",
+            TimeSpan.FromSeconds(1));
+
+        var result = await runner.RunAsync(CreateStartRequest(new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process-continue-skip"),
+            new ProcessVersionId("process-continue-skip@1.0.0"),
+            [first, second])));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Completed, result.Value.Status);
+        Assert.Equal(2, result.Value.CommandCount);
+        Assert.Equal(1, result.Value.CompletedSteps);
+        Assert.Equal(2, commandExecutor.Contexts.Count);
+
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(result.Value.SessionId));
+        var steps = persisted.Steps.ToArray();
+        Assert.Equal(expectedStepStatus, steps[0].Status);
+        Assert.Equal(RuntimeStepStatus.Completed, steps[1].Status);
+        Assert.Equal(expectedIncidentCode, Assert.Single(persisted.Incidents).Code);
+    }
+
+    [Theory]
+    [InlineData(RuntimeActionFailurePolicy.Rework, "Runtime.ReworkRequired")]
+    [InlineData(
+        RuntimeActionFailurePolicy.ManualDisposition,
+        "Runtime.ManualDispositionRequired")]
+    [InlineData(RuntimeActionFailurePolicy.Hold, "Runtime.HoldRequired")]
+    public async Task EscalationPoliciesTerminateWithAnExplicitRecoveryIncident(
+        RuntimeActionFailurePolicy failurePolicy,
+        string expectedIncidentCode)
+    {
+        var repository = new InMemoryRuntimeSessionRepository();
+        var runner = CreateRunner(
+            repository,
+            new InMemoryRuntimeDomainEventPublisher(),
+            new ScriptedRuntimeCommandExecutor(
+                RuntimeCommandExecutionResult.Failed("quality decision required")));
+        var node = Node(
+            new RuntimeNodeId("node-escalation"),
+            "Escalate failed action",
+            new RuntimeCapabilityId("device.quality"),
+            "Inspect",
+            TimeSpan.FromSeconds(1)) with
+        {
+            OperationalPolicy = Policy(failurePolicy)
+        };
+
+        var result = await runner.RunAsync(CreateStartRequest(new ExecutableRuntimeProcess(
+            new ProcessDefinitionId("process-escalation"),
+            new ProcessVersionId("process-escalation@1.0.0"),
+            [node])));
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(RuntimeSessionStatus.Failed, result.Value.Status);
+        var persisted = Assert.IsType<RuntimeSession>(
+            await repository.GetByIdAsync(result.Value.SessionId));
+        Assert.Equal(expectedIncidentCode, Assert.Single(persisted.Incidents).Code);
+    }
+
+    [Fact]
     public async Task RunAsyncWithEmptyProcessReturnsValidationFailure()
     {
         var repository = new InMemoryRuntimeSessionRepository();
@@ -481,6 +818,16 @@ public sealed class RuntimeSessionRunnerTests
             new RuntimeActionId($"{nodeId.Value}:action:1"),
             new RuntimeTargetReference(RuntimeTargetKinds.Capability, capability.Value));
     }
+
+    private static ExecutableRuntimeActionPolicy Policy(
+        RuntimeActionFailurePolicy failurePolicy) =>
+        new(
+            RuntimeActionIdempotencyClass.Idempotent,
+            RuntimeActionRecoveryPolicy.AutomaticReplay,
+            failurePolicy,
+            [],
+            [],
+            Enum.GetValues<RuntimeActionStationMode>());
 
     private static RuntimeSessionRunner CreateRunner(
         InMemoryRuntimeSessionRepository repository,
@@ -722,6 +1069,66 @@ public sealed class RuntimeSessionRunnerTests
             _ = cancellationToken;
             cancellation.Cancel();
             return ValueTask.FromResult(RuntimeCommandExecutionResult.Completed("completed"));
+        }
+    }
+
+    private sealed class CancelingFailureCommandExecutor(CancellationTokenSource cancellation)
+        : IRuntimeCommandExecutor
+    {
+        public int ExecutionCount { get; private set; }
+
+        public ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
+            RuntimeCommandExecutionContext context,
+            CancellationToken cancellationToken = default)
+        {
+            _ = context;
+            _ = cancellationToken;
+            ExecutionCount++;
+            cancellation.Cancel();
+            return ValueTask.FromResult(
+                RuntimeCommandExecutionResult.Failed("transient failure before cancellation"));
+        }
+    }
+
+    private sealed class NonCooperativeCommandExecutor : IRuntimeCommandExecutor
+    {
+        private readonly TaskCompletionSource<RuntimeCommandExecutionResult> _completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public CancellationToken ObservedCancellation { get; private set; }
+
+        public ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
+            RuntimeCommandExecutionContext context,
+            CancellationToken cancellationToken = default)
+        {
+            _ = context;
+            ObservedCancellation = cancellationToken;
+            return new ValueTask<RuntimeCommandExecutionResult>(_completion.Task);
+        }
+
+        public void Complete()
+        {
+            _completion.TrySetResult(RuntimeCommandExecutionResult.Completed());
+        }
+    }
+
+    private sealed class CancellationReportingCommandExecutor : IRuntimeCommandExecutor
+    {
+        public async ValueTask<RuntimeCommandExecutionResult> ExecuteAsync(
+            RuntimeCommandExecutionContext context,
+            CancellationToken cancellationToken = default)
+        {
+            _ = context;
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return RuntimeCommandExecutionResult.Completed();
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return RuntimeCommandExecutionResult.Canceled(
+                    "Executor observed its supplied cancellation token.");
+            }
         }
     }
 

@@ -16,7 +16,8 @@ public sealed record OperationExecutionPlan
         ExecutableRuntimeProcess executableProcess,
         IEnumerable<OperationInputMappingPlan> inputMappings,
         IEnumerable<ResourceRequirement>? resourceRequirements = null,
-        MaterialSlotRequirement? materialSlotRequirement = null)
+        MaterialSlotRequirement? materialSlotRequirement = null,
+        string? recipeId = null)
     {
         ArgumentNullException.ThrowIfNull(executableProcess);
         Definition = new OperationRunDefinition(
@@ -28,7 +29,8 @@ public sealed record OperationExecutionPlan
             configurationSnapshotId,
             recipeSnapshotId,
             resourceRequirements,
-            materialSlotRequirement);
+            materialSlotRequirement,
+            recipeId);
         FrozenExecutableProcess = new ExecutableRuntimeProcess(
             executableProcess.ProcessDefinitionId,
             executableProcess.ProcessVersionId,

@@ -40,6 +40,7 @@
                       ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\..\samples\plugins\OpenLineOps.SamplePlugins.LoopbackDevice\OpenLineOps.SamplePlugins.LoopbackDevice.csproj"
                       ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\plugins\builtin\OpenLineOps.BuiltinPlugins.DeviceSessions\OpenLineOps.BuiltinPlugins.DeviceSessions.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.ScriptWorker\OpenLineOps.ScriptWorker.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.LeastPrivilegeLauncher\OpenLineOps.LeastPrivilegeLauncher.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.Agent\OpenLineOps.Agent.csproj" />

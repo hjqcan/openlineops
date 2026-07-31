@@ -1244,6 +1244,75 @@ public sealed class PostgreSqlProductionCoordinationStore :
               ?? throw new InvalidDataException("Station dispatch request payload is empty.");
     }
 
+    public async ValueTask<StationJobRequested> BindStationExecutionGateEvidenceAsync(
+        StationJobRequested authorizedRequest,
+        CancellationToken cancellationToken = default)
+    {
+        StationMessageContract.ValidateForAgentDispatch(authorizedRequest);
+        await EnsureSchemaAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        string existingJson;
+        await using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText = """
+                SELECT payload_json::text
+                FROM olo_station_job_outbox
+                WHERE job_id = @job_id
+                  AND kind = 'StationJobRequested'
+                FOR UPDATE;
+                """;
+            read.Parameters.AddWithValue("job_id", authorizedRequest.JobId);
+            existingJson = await read.ExecuteScalarAsync(cancellationToken)
+                    .ConfigureAwait(false) as string
+                ?? throw new InvalidOperationException(
+                    $"Station dispatch Job {authorizedRequest.JobId:D} does not exist.");
+        }
+
+        var existing = JsonSerializer.Deserialize<StationJobRequested>(existingJson, JsonOptions)
+            ?? throw new InvalidDataException("Station dispatch request payload is empty.");
+        if (!SameDispatchWithoutStationGate(existing, authorizedRequest))
+        {
+            throw new InvalidDataException(
+                "Station execution gate evidence targets different dispatch evidence.");
+        }
+
+        var candidateJson = JsonSerializer.Serialize(authorizedRequest, JsonOptions);
+        if (existing.StationExecutionGateEvidence is not null)
+        {
+            StationMessageContract.ValidateForAgentDispatch(existing);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return existing;
+        }
+
+        await using (var update = connection.CreateCommand())
+        {
+            update.Transaction = transaction;
+            update.CommandText = """
+                UPDATE olo_station_job_outbox
+                SET payload_json = @payload_json
+                WHERE job_id = @job_id
+                  AND kind = 'StationJobRequested';
+                """;
+            update.Parameters.AddWithValue("job_id", authorizedRequest.JobId);
+            update.Parameters.Add(
+                new NpgsqlParameter("payload_json", NpgsqlDbType.Jsonb)
+                {
+                    Value = candidateJson
+                });
+            if (await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Station dispatch Job {authorizedRequest.JobId:D} disappeared while gate evidence was bound.");
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return authorizedRequest;
+    }
+
     public ValueTask MarkPublishedAsync(
         Guid messageId,
         CancellationToken cancellationToken = default) =>
@@ -2102,6 +2171,28 @@ public sealed class PostgreSqlProductionCoordinationStore :
         return JsonElement.DeepEquals(leftDocument.RootElement, rightDocument.RootElement);
     }
 
+    private static bool SameDispatchWithoutStationGate(
+        StationJobRequested left,
+        StationJobRequested right) =>
+        CanonicalJsonEquals(
+            JsonSerializer.Serialize(WithoutStationGate(left), JsonOptions),
+            JsonSerializer.Serialize(WithoutStationGate(right), JsonOptions));
+
+    private static StationJobRequested WithoutStationGate(StationJobRequested request) =>
+        request with
+        {
+            StationExecutionGateRevision = null,
+            StationExecutionGateEvidence = null,
+            StationExecutionGateEvidenceSha256 = null,
+            StationExecutionGateEvidenceVersion = 0,
+            StationExecutionGateAuthorizedAtUtc = null,
+            StationExecutionGateExpiresAtUtc = null,
+            StationAgentControlLeaseOwnerAgentId = null,
+            StationAgentControlLeaseOwnerInstanceId = null,
+            StationAgentControlLeaseFencingToken = 0,
+            StationAgentControlLeaseExpiresAtUtc = null
+        };
+
     private static async ValueTask<bool> UpdateProductionUnitAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
@@ -2797,7 +2888,24 @@ public sealed class PostgreSqlProductionCoordinationStore :
                 $"Station dispatch idempotency key '{idempotencyKey}' was reused with different identity.");
         }
 
-        using var existingJson = JsonDocument.Parse(reader.GetString(4));
+        var existingPayload = reader.GetString(4);
+        if (string.Equals(kind, nameof(StationJobRequested), StringComparison.Ordinal))
+        {
+            var existingRequest = JsonSerializer.Deserialize<StationJobRequested>(
+                existingPayload,
+                JsonOptions);
+            var candidateRequest = JsonSerializer.Deserialize<StationJobRequested>(
+                payload,
+                JsonOptions);
+            if (existingRequest is not null
+                && candidateRequest is not null
+                && SameDispatchWithoutStationGate(existingRequest, candidateRequest))
+            {
+                return false;
+            }
+        }
+
+        using var existingJson = JsonDocument.Parse(existingPayload);
         using var candidateJson = JsonDocument.Parse(payload);
         if (!JsonElement.DeepEquals(existingJson.RootElement, candidateJson.RootElement))
         {

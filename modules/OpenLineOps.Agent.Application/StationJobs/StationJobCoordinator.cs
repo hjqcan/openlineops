@@ -2,6 +2,7 @@ using System.Text.Json;
 using OpenLineOps.Agent.Contracts;
 using OpenLineOps.Agent.Domain.StationJobs;
 using OpenLineOps.Application.Abstractions.Time;
+using OpenLineOps.Runtime.Contracts;
 using ExecutionStatus = OpenLineOps.Runtime.Contracts.ExecutionStatus;
 using ResultJudgement = OpenLineOps.Runtime.Contracts.ResultJudgement;
 
@@ -17,6 +18,7 @@ public sealed class StationJobCoordinator
     private readonly IStationJobStore _store;
     private readonly IStationOperationExecutor _executor;
     private readonly IStationResourceFenceValidator _resourceFences;
+    private readonly IStationDispatchControlLeaseVerifier _controlLeaseVerifier;
     private readonly IStationSafetyInboxStore _cancellations;
     private readonly StationJobExecutionRegistry _executions;
     private readonly IStationRuntimeIsolationCleaner _runtimeIsolationCleaner;
@@ -26,6 +28,7 @@ public sealed class StationJobCoordinator
         IStationJobStore store,
         IStationOperationExecutor executor,
         IStationResourceFenceValidator resourceFences,
+        IStationDispatchControlLeaseVerifier controlLeaseVerifier,
         IStationSafetyInboxStore cancellations,
         StationJobExecutionRegistry executions,
         IStationRuntimeIsolationCleaner runtimeIsolationCleaner,
@@ -34,6 +37,8 @@ public sealed class StationJobCoordinator
         _store = store;
         _executor = executor;
         _resourceFences = resourceFences;
+        _controlLeaseVerifier = controlLeaseVerifier
+            ?? throw new ArgumentNullException(nameof(controlLeaseVerifier));
         _cancellations = cancellations;
         _executions = executions;
         _runtimeIsolationCleaner = runtimeIsolationCleaner
@@ -46,7 +51,7 @@ public sealed class StationJobCoordinator
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(message);
-        StationMessageContract.Validate(message);
+        StationMessageContract.ValidateForAgentDispatch(message);
         Validate(message);
 
         var existing = await _store
@@ -63,6 +68,8 @@ public sealed class StationJobCoordinator
                     .ConfigureAwait(false)
                 : existing.Job;
         }
+
+        ValidateStationGateValidityWindow(message, _clock.UtcNow);
 
         var job = StationJob.Request(new StationJobRequest(
             new StationJobId(message.JobId),
@@ -99,7 +106,17 @@ public sealed class StationJobCoordinator
                     fence.ExpiresAtUtc))
                 .ToArray(),
             CanonicalJson(message.Inputs),
-            message.RequestedAtUtc));
+            message.RequestedAtUtc,
+            message.StationExecutionGateRevision,
+            message.StationExecutionGateEvidence,
+            message.StationExecutionGateEvidenceSha256,
+            message.StationExecutionGateEvidenceVersion,
+            message.StationExecutionGateAuthorizedAtUtc,
+            message.StationExecutionGateExpiresAtUtc,
+            message.StationAgentControlLeaseOwnerAgentId,
+            message.StationAgentControlLeaseOwnerInstanceId,
+            message.StationAgentControlLeaseFencingToken,
+            message.StationAgentControlLeaseExpiresAtUtc));
         job.Accept(_clock.UtcNow);
         var acceptedMessage = CreateAccepted(job);
         if (!await _store.TryAddAsync(
@@ -142,6 +159,10 @@ public sealed class StationJobCoordinator
                         .ConfigureAwait(false));
                 }
                 catch (StationResourceFenceUnavailableException)
+                {
+                    recovered.Add(job.ToSnapshot());
+                }
+                catch (StationDispatchControlLeaseUnavailableException)
                 {
                     recovered.Add(job.ToSnapshot());
                 }
@@ -261,6 +282,12 @@ public sealed class StationJobCoordinator
                 .ConfigureAwait(false);
         }
 
+        if (!HasCurrentStationGateEvidence(job, _clock.UtcNow))
+        {
+            return await RejectExpiredStationGateAsync(job, expectedRevision)
+                .ConfigureAwait(false);
+        }
+
         var fenceValidation = await _resourceFences
             .ValidateCurrentAsync(job.ToSnapshot(), cancellationToken)
             .ConfigureAwait(false);
@@ -270,6 +297,12 @@ public sealed class StationJobCoordinator
                     job,
                     expectedRevision,
                     "Station operation was canceled before hardware execution began.")
+                .ConfigureAwait(false);
+        }
+
+        if (!HasCurrentStationGateEvidence(job, _clock.UtcNow))
+        {
+            return await RejectExpiredStationGateAsync(job, expectedRevision)
                 .ConfigureAwait(false);
         }
 
@@ -296,6 +329,50 @@ public sealed class StationJobCoordinator
                 .ConfigureAwait(false);
             _executions.Forget(job.Id);
             return job.ToSnapshot();
+        }
+
+        var controlLeaseValidation = await _controlLeaseVerifier
+            .ValidateCurrentAsync(
+                new StationDispatchControlLeaseExpectation(
+                    job.AgentId,
+                    job.StationId,
+                    job.StationSystemId,
+                    new StationAgentControlLeaseDispatchAuthority(
+                        job.StationAgentControlLeaseOwnerAgentId!,
+                        job.StationAgentControlLeaseOwnerInstanceId!,
+                        job.StationAgentControlLeaseFencingToken,
+                        job.StationAgentControlLeaseExpiresAtUtc!.Value)),
+                execution.CancellationToken)
+            .ConfigureAwait(false);
+        if (!controlLeaseValidation.Accepted)
+        {
+            if (controlLeaseValidation.Retryable)
+            {
+                throw new StationDispatchControlLeaseUnavailableException(
+                    controlLeaseValidation.RejectionReason
+                    ?? "Station Agent control lease proof could not be revalidated.");
+            }
+
+            return await RejectStationControlLeaseAsync(
+                    job,
+                    expectedRevision,
+                    controlLeaseValidation.RejectionReason)
+                .ConfigureAwait(false);
+        }
+
+        if (execution.CancellationToken.IsCancellationRequested)
+        {
+            return await CompleteCanceledAsync(
+                    job,
+                    expectedRevision,
+                    "Station operation was canceled before hardware execution began.")
+                .ConfigureAwait(false);
+        }
+
+        if (!HasCurrentStationGateEvidence(job, _clock.UtcNow))
+        {
+            return await RejectExpiredStationGateAsync(job, expectedRevision)
+                .ConfigureAwait(false);
         }
 
         job.Start(_clock.UtcNow);
@@ -602,6 +679,81 @@ public sealed class StationJobCoordinator
         }
     }
 
+    private static void ValidateStationGateValidityWindow(
+        StationJobRequested message,
+        DateTimeOffset nowUtc)
+    {
+        if (message.StationExecutionGateAuthorizedAtUtc is not { } authorizedAtUtc
+            || message.StationExecutionGateExpiresAtUtc is not { } expiresAtUtc
+            || message.StationAgentControlLeaseExpiresAtUtc is not { } leaseExpiresAtUtc
+            || authorizedAtUtc > nowUtc
+            || expiresAtUtc <= nowUtc
+            || leaseExpiresAtUtc <= nowUtc
+            || expiresAtUtc > leaseExpiresAtUtc)
+        {
+            throw new InvalidDataException(
+                "Station execution gate evidence is not valid at Agent acceptance time.");
+        }
+    }
+
+    private static bool HasCurrentStationGateEvidence(
+        StationJob job,
+        DateTimeOffset nowUtc) =>
+        job.StationExecutionGateEvidenceVersion
+            == StationMessageContract.CurrentStationExecutionGateEvidenceVersion
+        && job.StationExecutionGateRevision is not null
+        && job.StationExecutionGateAuthorizedAtUtc is { } authorizedAtUtc
+        && authorizedAtUtc <= nowUtc
+        && job.StationExecutionGateExpiresAtUtc is { } expiresAtUtc
+        && expiresAtUtc > nowUtc
+        && job.StationAgentControlLeaseOwnerAgentId is not null
+        && job.StationAgentControlLeaseOwnerInstanceId is not null
+        && job.StationAgentControlLeaseFencingToken > 0
+        && job.StationAgentControlLeaseExpiresAtUtc is { } leaseExpiresAtUtc
+        && leaseExpiresAtUtc >= expiresAtUtc
+        && leaseExpiresAtUtc > nowUtc;
+
+    private async ValueTask<StationJobSnapshot> RejectExpiredStationGateAsync(
+        StationJob job,
+        long expectedRevision)
+    {
+        job.RejectBeforeStart(
+            "Agent.StationExecutionGateExpired",
+            "Station execution gate evidence expired before hardware execution began.",
+            _clock.UtcNow);
+        var rejectedMessage = CreateCompleted(job, null, checked(expectedRevision + 1));
+        await _store.SaveAsync(
+                job,
+                expectedRevision,
+                [rejectedMessage],
+                CancellationToken.None)
+            .ConfigureAwait(false);
+        _executions.Forget(job.Id);
+        return job.ToSnapshot();
+    }
+
+    private async ValueTask<StationJobSnapshot> RejectStationControlLeaseAsync(
+        StationJob job,
+        long expectedRevision,
+        string? rejectionReason)
+    {
+        job.RejectBeforeStart(
+            "Agent.StationControlLeaseRejected",
+            rejectionReason
+                ?? "Station Agent control lease owner, boot instance, fencing token, "
+                + "or proof is no longer current.",
+            _clock.UtcNow);
+        var rejectedMessage = CreateCompleted(job, null, checked(expectedRevision + 1));
+        await _store.SaveAsync(
+                job,
+                expectedRevision,
+                [rejectedMessage],
+                CancellationToken.None)
+            .ConfigureAwait(false);
+        _executions.Forget(job.Id);
+        return job.ToSnapshot();
+    }
+
     private static void Validate(StationJobCancelRequested message)
     {
         if (message.MessageId == Guid.Empty
@@ -683,6 +835,36 @@ public sealed class StationJobCoordinator
             || !string.Equals(existing.FlowVersionId, message.FlowVersionId, StringComparison.Ordinal)
             || !string.Equals(existing.ConfigurationSnapshotId, message.ConfigurationSnapshotId, StringComparison.Ordinal)
             || !string.Equals(existing.RecipeSnapshotId, message.RecipeSnapshotId, StringComparison.Ordinal)
+            || !string.Equals(
+                existing.StationExecutionGateRevision,
+                message.StationExecutionGateRevision,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                existing.StationExecutionGateEvidence,
+                message.StationExecutionGateEvidence,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                existing.StationExecutionGateEvidenceSha256,
+                message.StationExecutionGateEvidenceSha256,
+                StringComparison.Ordinal)
+            || existing.StationExecutionGateEvidenceVersion
+                != message.StationExecutionGateEvidenceVersion
+            || existing.StationExecutionGateAuthorizedAtUtc
+                != message.StationExecutionGateAuthorizedAtUtc
+            || existing.StationExecutionGateExpiresAtUtc
+                != message.StationExecutionGateExpiresAtUtc
+            || !string.Equals(
+                existing.StationAgentControlLeaseOwnerAgentId,
+                message.StationAgentControlLeaseOwnerAgentId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                existing.StationAgentControlLeaseOwnerInstanceId,
+                message.StationAgentControlLeaseOwnerInstanceId,
+                StringComparison.Ordinal)
+            || existing.StationAgentControlLeaseFencingToken
+                != message.StationAgentControlLeaseFencingToken
+            || existing.StationAgentControlLeaseExpiresAtUtc
+                != message.StationAgentControlLeaseExpiresAtUtc
             || !SameFences(existing.ResourceFences, message.ResourceFences)
             || !string.Equals(existing.InputsJson, CanonicalJson(message.Inputs), StringComparison.Ordinal))
         {

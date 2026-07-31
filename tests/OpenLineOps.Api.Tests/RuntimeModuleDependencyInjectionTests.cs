@@ -10,6 +10,7 @@ using OpenLineOps.Runtime.Application.Persistence;
 using OpenLineOps.Runtime.Application.Recovery;
 using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Application.Scripting;
+using OpenLineOps.Runtime.Application.Stations;
 using OpenLineOps.Runtime.Infrastructure.Commands;
 using OpenLineOps.Runtime.Infrastructure.Events;
 using OpenLineOps.Runtime.Infrastructure.Execution;
@@ -45,6 +46,14 @@ public sealed class RuntimeModuleDependencyInjectionTests
             serviceProvider.GetRequiredService<IResourceLeaseRepository>());
         Assert.IsType<ProductionLineRuntimeStateReader>(
             scope.ServiceProvider.GetRequiredService<IProductionLineRuntimeStateReader>());
+        Assert.IsType<StationProductionExecutionGate>(
+            scope.ServiceProvider.GetRequiredService<IStationProductionExecutionGate>());
+        Assert.DoesNotContain(
+            services,
+            descriptor => descriptor.ImplementationType
+                == typeof(LegacyCompatibilityStationProductionExecutionGate)
+                || descriptor.ImplementationInstance
+                is LegacyCompatibilityStationProductionExecutionGate);
         Assert.IsType<InMemoryAgentPresenceRepository>(
             serviceProvider.GetRequiredService<IAgentPresenceRepository>());
         Assert.False(serviceProvider

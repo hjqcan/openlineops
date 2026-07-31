@@ -418,6 +418,7 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
                 store,
                 new ExecutorMustNotRun(),
                 new AcceptingFenceValidator(),
+                TestStationDispatchControlLeaseVerifier.Accepting(),
                 new EmptyCancellationStore(),
                 new StationJobExecutionRegistry(),
                 host,

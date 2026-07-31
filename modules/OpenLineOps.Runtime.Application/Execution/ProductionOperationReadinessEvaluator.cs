@@ -10,7 +10,7 @@ namespace OpenLineOps.Runtime.Application.Execution;
 
 public sealed class ProductionOperationReadinessEvaluator(
     IProductionMaterialRepository materials,
-    IStationProductionExecutionGate? stationExecutionGate = null)
+    IStationProductionExecutionGate stationExecutionGate)
     : IProductionOperationReadiness
 {
     public async ValueTask<ProductionOperationReadiness> EvaluateAsync(
@@ -115,20 +115,24 @@ public sealed class ProductionOperationReadinessEvaluator(
                 + $"waiting for {run.ProductionLineDefinitionId}/{operation.Definition.StationSystemId}.");
         }
 
-        if (stationExecutionGate is not null)
+        var stationGate = await stationExecutionGate
+            .EvaluateAsync(
+                operation.Definition.StationSystemId,
+                operation.Definition.RecipeId is null
+                    ? null
+                    : new StationExecutionRecipeExpectation(
+                        operation.Definition.RecipeId,
+                        operation.Definition.RecipeSnapshotId.Value),
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!stationGate.Allowed)
         {
-            var stationGate = await stationExecutionGate
-                .EvaluateAsync(operation.Definition.StationSystemId, cancellationToken)
-                .ConfigureAwait(false);
-            if (stationGate.Managed && !stationGate.Allowed)
-            {
-                return Waiting(stationGate.Reason);
-            }
+            return Waiting(stationGate.Reason);
+        }
 
-            if (stationGate.Evidence is not null)
-            {
-                evidence.Add(stationGate.Evidence);
-            }
+        if (stationGate.Evidence is not null)
+        {
+            evidence.Add(stationGate.Evidence);
         }
 
         var slotRequirements = operation.Definition.ResourceRequirements

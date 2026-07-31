@@ -1,5 +1,7 @@
 using Microsoft.Data.Sqlite;
+using System.Net.Http.Headers;
 using OpenLineOps.Agent;
+using OpenLineOps.Agent.Application.StationController;
 using OpenLineOps.Agent.Application.StationJobs;
 using OpenLineOps.Agent.Infrastructure.Execution;
 using OpenLineOps.Agent.Infrastructure.Packages;
@@ -40,6 +42,9 @@ try
     });
 
     var options = StationAgentHostOptions.Load(builder.Configuration);
+    var processIdentity = StationAgentProcessIdentity.Create(
+        options.AgentId,
+        options.StationId);
     if (!OperatingSystem.IsWindows())
     {
         throw new PlatformNotSupportedException(
@@ -58,6 +63,10 @@ try
     };
 
     builder.Services.AddSingleton(options);
+    builder.Services.AddSingleton(processIdentity);
+    builder.Services.AddSingleton(serviceProvider =>
+        new StationAgentControlLeaseState(
+            serviceProvider.GetRequiredService<StationAgentProcessIdentity>()));
     builder.Services.AddSingleton(new StationAgentPresenceOptions(
         options.AgentId,
         options.StationId,
@@ -167,6 +176,36 @@ try
             serviceProvider
                 .GetRequiredService<IHttpClientFactory>()
                 .CreateClient(artifactUploadHttpClient)));
+    const string stationControlHttpClient = "OpenLineOps.StationControl";
+    builder.Services
+        .AddHttpClient(stationControlHttpClient, client =>
+        {
+            client.BaseAddress = new Uri(
+                options.CoordinatorBaseUri.AbsoluteUri.TrimEnd('/') + "/",
+                UriKind.Absolute);
+            client.Timeout = Timeout.InfiniteTimeSpan;
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue(
+                    "Bearer",
+                    options.ArtifactUploadBearerToken);
+        })
+        .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false
+        });
+    builder.Services.AddSingleton<IStationControllerCoordinatorClient>(
+        serviceProvider => new HttpStationControllerCoordinatorClient(
+            serviceProvider
+                .GetRequiredService<IHttpClientFactory>()
+                .CreateClient(stationControlHttpClient)));
+    builder.Services.AddSingleton<IStationDispatchControlLeaseVerifier>(
+        serviceProvider => new StationDispatchControlLeaseVerifier(
+            options.StationSystemId,
+            serviceProvider.GetRequiredService<StationAgentProcessIdentity>(),
+            serviceProvider.GetRequiredService<StationAgentControlLeaseState>(),
+            serviceProvider.GetRequiredService<IStationControllerCoordinatorClient>(),
+            serviceProvider.GetRequiredService<IClock>(),
+            requestTimeout: TimeSpan.FromSeconds(5)));
     builder.Services.AddSingleton(provider => new RabbitMqStationSafetyReceiver(
         new RabbitMqStationSafetyOptions(
             options.BrokerUri,
