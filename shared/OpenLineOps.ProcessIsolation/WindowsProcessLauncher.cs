@@ -17,8 +17,15 @@ public sealed record IsolatedProcessStartRequest(
 public sealed record WindowsAppContainerPolicy(
     string ProfileName,
     bool NetworkAccessAllowed,
+    WindowsAppContainerProfileMode ProfileMode,
     IReadOnlyCollection<string>? AdditionalCapabilityNames = null,
     string? ProfileLifecycleManagerServiceSid = null);
+
+public enum WindowsAppContainerProfileMode
+{
+    CreateOrOpen = 0,
+    UseExisting = 1
+}
 
 public enum WindowsProcessLaunchCheckpoint
 {

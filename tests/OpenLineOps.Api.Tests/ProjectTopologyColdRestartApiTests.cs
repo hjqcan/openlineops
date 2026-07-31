@@ -1093,7 +1093,7 @@ public sealed class ProjectTopologyColdRestartApiTests : IDisposable
         Assert.Equal(recipeId, recipe.RootElement.GetProperty("recipeId").GetString());
         Assert.Equal(recipeVersionId, recipe.RootElement.GetProperty("versionId").GetString());
         Assert.Equal($"{applicationName} Recipe", recipe.RootElement.GetProperty("displayName").GetString());
-        Assert.Equal("Published", recipe.RootElement.GetProperty("status").GetString());
+        Assert.Equal("Released", recipe.RootElement.GetProperty("status").GetString());
         Assert.NotEqual(default, recipe.RootElement.GetProperty("createdAtUtc").GetDateTimeOffset());
         Assert.NotEqual(default, recipe.RootElement.GetProperty("publishedAtUtc").GetDateTimeOffset());
         var parameter = Assert.Single(recipe.RootElement.GetProperty("parameters").EnumerateArray());

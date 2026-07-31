@@ -30,6 +30,7 @@ public sealed record RaiseAlarmRequest(
 
 public sealed record AcknowledgeAlarmRequest(string AcknowledgedBy);
 
-public sealed record ResolveAlarmRequest(
-    string ResolvedBy,
-    string ResolutionNote);
+public sealed record ClearAlarmSourceRequest(
+    string SourceActor,
+    string StationId,
+    string ClearanceNote);

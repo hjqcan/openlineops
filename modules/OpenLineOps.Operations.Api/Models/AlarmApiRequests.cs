@@ -6,4 +6,4 @@ namespace OpenLineOps.Operations.Api.Models;
 public sealed record AcknowledgeAlarmApiRequest;
 
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
-public sealed record ResolveAlarmApiRequest(string ResolutionNote);
+public sealed record ClearAlarmSourceApiRequest(string ClearanceNote);

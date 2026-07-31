@@ -12,7 +12,7 @@ namespace OpenLineOps.Operations.Tests;
 public sealed class AlarmAppServiceTests
 {
     [Fact]
-    public async Task RaiseAcknowledgeAndResolvePersistThroughApplicationContract()
+    public async Task RaiseAcknowledgeAndSourceClearPersistThroughApplicationContract()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -51,6 +51,22 @@ public sealed class AlarmAppServiceTests
             var repository = new EfAlarmRepository(context);
             var appService = new AlarmAppService(repository);
 
+            var rejectedClearance = await appService.ClearSourceAsync(
+                details.Id,
+                new ClearAlarmSourceRequest(
+                    "agent-other",
+                    "station-other",
+                    "Unrelated station reported recovery."));
+
+            Assert.False(rejectedClearance.Succeeded);
+            Assert.Equal("Operations.Alarm.StationMismatch", rejectedClearance.Code);
+        }
+
+        await using (var context = new OperationsDbContext(options))
+        {
+            var repository = new EfAlarmRepository(context);
+            var appService = new AlarmAppService(repository);
+
             var acknowledgement = await appService.AcknowledgeAsync(
                 details.Id,
                 new AcknowledgeAlarmRequest("operator-b"));
@@ -63,9 +79,12 @@ public sealed class AlarmAppServiceTests
             var repository = new EfAlarmRepository(context);
             var appService = new AlarmAppService(repository);
 
-            var resolution = await appService.ResolveAsync(
+            var resolution = await appService.ClearSourceAsync(
                 details.Id,
-                new ResolveAlarmRequest("operator-b", "Device recovered."));
+                new ClearAlarmSourceRequest(
+                    "agent-b",
+                    "station-beta",
+                    "Device recovered."));
 
             Assert.True(resolution.Succeeded);
         }
@@ -82,7 +101,7 @@ public sealed class AlarmAppServiceTests
         Assert.NotNull(restored);
         Assert.Equal(AlarmStatus.Resolved, restored.Status);
         Assert.Equal("operator-b", restored.AcknowledgedBy);
-        Assert.Equal("operator-b", restored.ResolvedBy);
+        Assert.Equal("agent-b", restored.ResolvedBy);
         Assert.Equal("Device recovered.", restored.ResolutionNote);
     }
 

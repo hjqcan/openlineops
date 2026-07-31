@@ -1,0 +1,51 @@
+{
+  "id": "openlineops.samples.device-simulator",
+  "name": "Device Session Simulator",
+  "version": "0.1.0",
+  "kind": "DeviceDriver",
+  "entryAssembly": "OpenLineOps.SamplePlugins.DeviceSimulator.dll",
+  "entryType": "OpenLineOps.SamplePlugins.DeviceSimulator.DeviceSimulatorPlugin",
+  "contractVersion": "1.0.0",
+  "minimumPlatformVersion": "1.0.0",
+  "capabilities": [
+    "device.simulator"
+  ],
+  "deviceCommands": [
+    {
+      "id": "device.simulator:increment",
+      "capability": "device.simulator",
+      "commandName": "Increment",
+      "inputSchema": "application/json",
+      "outputSchema": "application/json",
+      "timeoutMilliseconds": 5000,
+      "maxRetries": 0
+    },
+    {
+      "id": "device.simulator:replay",
+      "capability": "device.simulator",
+      "commandName": "Replay",
+      "inputSchema": "application/json",
+      "outputSchema": "application/json",
+      "timeoutMilliseconds": 30000,
+      "maxRetries": 0
+    },
+    {
+      "id": "device.simulator:inject-fault",
+      "capability": "device.simulator",
+      "commandName": "InjectFault",
+      "inputSchema": "application/json",
+      "outputSchema": "application/json",
+      "timeoutMilliseconds": 5000,
+      "maxRetries": 0
+    },
+    {
+      "id": "device.simulator:clear-fault",
+      "capability": "device.simulator",
+      "commandName": "ClearFault",
+      "inputSchema": "application/json",
+      "outputSchema": "application/json",
+      "timeoutMilliseconds": 5000,
+      "maxRetries": 0
+    }
+  ]
+}

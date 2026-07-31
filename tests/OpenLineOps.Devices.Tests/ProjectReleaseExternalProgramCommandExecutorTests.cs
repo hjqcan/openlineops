@@ -668,7 +668,7 @@ public sealed class ProjectReleaseExternalProgramCommandExecutorTests : IDisposa
                 result.Reason,
                 StringComparison.Ordinal);
             Assert.NotNull(invocationProfileName);
-            Assert.True(WindowsAppContainerIdentity.ProfileExists(invocationProfileName));
+            Assert.False(WindowsAppContainerIdentity.ProfileExists(invocationProfileName));
             Assert.Empty(Directory.EnumerateFileSystemEntries(
                 Path.Combine(_hostRoot, "workspaces")));
         }

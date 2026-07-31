@@ -59,6 +59,9 @@ public class StationPackageWebApplicationFactory : WebApplicationFactory<Program
         builder.UseSetting(
             "OpenLineOps:Runtime:AgentTransport:DeploymentCatalogDirectory",
             DeploymentCatalogDirectory);
+        builder.UseSetting(
+            "OpenLineOps:Quality:Persistence:DatabasePath",
+            Path.Combine(_root, "quality.sqlite"));
     }
 
     protected override void Dispose(bool disposing)

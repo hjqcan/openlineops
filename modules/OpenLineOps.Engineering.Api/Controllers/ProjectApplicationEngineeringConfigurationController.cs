@@ -255,6 +255,87 @@ public sealed class ProjectApplicationEngineeringConfigurationController : Contr
             : Ok(EngineeringApiContractMapper.ToResponse(result.Value));
     }
 
+    [HttpPost("recipes/{recipeId}/validate")]
+    [ProducesResponseType<RecipeResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<RecipeResponse>> ValidateRecipeAsync(
+        string projectId,
+        string applicationId,
+        string recipeId,
+        CancellationToken cancellationToken)
+    {
+        var result = await _configurationService
+            .ValidateRecipeAsync(projectId, applicationId, recipeId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.IsFailure
+            ? ToProblem(result.Error)
+            : Ok(EngineeringApiContractMapper.ToResponse(result.Value));
+    }
+
+    [HttpPost("recipes/{recipeId}/approve")]
+    [ProducesResponseType<RecipeResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<RecipeResponse>> ApproveRecipeAsync(
+        string projectId,
+        string applicationId,
+        string recipeId,
+        CancellationToken cancellationToken)
+    {
+        var result = await _configurationService
+            .ApproveRecipeAsync(
+                projectId,
+                applicationId,
+                recipeId,
+                User.GetRequiredActorId(),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.IsFailure
+            ? ToProblem(result.Error)
+            : Ok(EngineeringApiContractMapper.ToResponse(result.Value));
+    }
+
+    [HttpPost("recipes/{recipeId}/release")]
+    [ProducesResponseType<RecipeResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<RecipeResponse>> ReleaseRecipeAsync(
+        string projectId,
+        string applicationId,
+        string recipeId,
+        CancellationToken cancellationToken)
+    {
+        var result = await _configurationService
+            .ReleaseRecipeAsync(projectId, applicationId, recipeId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.IsFailure
+            ? ToProblem(result.Error)
+            : Ok(EngineeringApiContractMapper.ToResponse(result.Value));
+    }
+
+    [HttpPost("recipes/{recipeId}/retire")]
+    [ProducesResponseType<RecipeResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<RecipeResponse>> RetireRecipeAsync(
+        string projectId,
+        string applicationId,
+        string recipeId,
+        CancellationToken cancellationToken)
+    {
+        var result = await _configurationService
+            .RetireRecipeAsync(projectId, applicationId, recipeId, cancellationToken)
+            .ConfigureAwait(false);
+
+        return result.IsFailure
+            ? ToProblem(result.Error)
+            : Ok(EngineeringApiContractMapper.ToResponse(result.Value));
+    }
+
     [HttpPost("station-profiles")]
     [ProducesResponseType<StationProfileResponse>(StatusCodes.Status201Created)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]

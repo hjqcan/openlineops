@@ -18,6 +18,7 @@ namespace OpenLineOps.Api.Tests;
 public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPackageWebApplicationFactory>
 {
     private static readonly string[] SnapshotBlockVersionIds = ["block.motion.axis.move@1.0.0"];
+    private static readonly string[] RecipeScanModes = ["Automatic", "Manual"];
 
     private readonly HttpClient _client;
     private readonly StationPackageWebApplicationFactory _factory;
@@ -1338,6 +1339,112 @@ public sealed class AutomationProjectWorkspaceApiTests : IClassFixture<StationPa
 
         Assert.Equal(HttpStatusCode.Created, firstResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, secondResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task TypedRecipeRequiresValidatedApprovedReleasedLifecycle()
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var projectId = $"project-typed-recipe-{suffix}";
+        var applicationId = $"application-typed-recipe-{suffix}";
+        var recipeId = $"recipe-typed-{suffix}";
+        var projectDirectory = ProjectReleaseTestDirectory($"typed-recipe-{suffix}");
+
+        try
+        {
+            using var createWorkspace = await _client.PostAsJsonAsync(
+                "/api/automation-project-workspaces",
+                new
+                {
+                    projectId,
+                    displayName = "Typed Recipe Project",
+                    projectPath = projectDirectory,
+                    defaultApplicationId = applicationId,
+                    defaultApplicationName = "Test Application"
+                });
+            Assert.Equal(HttpStatusCode.Created, createWorkspace.StatusCode);
+
+            var engineeringBase =
+                $"/api/automation-projects/{projectId}/applications/{applicationId}/engineering";
+            using var createRecipe = await _client.PostAsJsonAsync(
+                $"{engineeringBase}/recipes",
+                new
+                {
+                    recipeId,
+                    versionId = $"{recipeId}@1.0.0",
+                    displayName = "Typed Functional Test",
+                    parameters = new object[]
+                    {
+                        new
+                        {
+                            key = "voltage.target",
+                            value = "24.5000",
+                            type = "Decimal",
+                            unit = "V",
+                            minimum = 20m,
+                            maximum = 28m,
+                            required = true
+                        },
+                        new
+                        {
+                            key = "scan.mode",
+                            value = "Automatic",
+                            type = "Enum",
+                            allowedValues = RecipeScanModes,
+                            required = true
+                        }
+                    }
+                });
+            using var createdDocument = await ReadJsonAsync(createRecipe);
+            Assert.Equal(HttpStatusCode.Created, createRecipe.StatusCode);
+            var voltageParameter = createdDocument.RootElement
+                .GetProperty("parameters")
+                .EnumerateArray()
+                .Single(parameter => string.Equals(
+                    parameter.GetProperty("key").GetString(),
+                    "voltage.target",
+                    StringComparison.Ordinal));
+            Assert.Equal(
+                "24.5",
+                voltageParameter.GetProperty("value").GetString());
+            Assert.Equal(
+                "Decimal",
+                voltageParameter.GetProperty("type").GetString());
+
+            using var prematureRelease = await _client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/release",
+                content: null);
+            Assert.Equal(HttpStatusCode.Conflict, prematureRelease.StatusCode);
+
+            using var validate = await _client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/validate",
+                content: null);
+            using var approve = await _client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/approve",
+                content: null);
+            using var release = await _client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/release",
+                content: null);
+            using var releaseDocument = await ReadJsonAsync(release);
+
+            Assert.Equal(HttpStatusCode.OK, validate.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, approve.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, release.StatusCode);
+            Assert.Equal("Released", releaseDocument.RootElement.GetProperty("status").GetString());
+            Assert.False(string.IsNullOrWhiteSpace(
+                releaseDocument.RootElement.GetProperty("approvedBy").GetString()));
+
+            using var retire = await _client.PostAsync(
+                $"{engineeringBase}/recipes/{recipeId}/retire",
+                content: null);
+            using var retiredDocument = await ReadJsonAsync(retire);
+            Assert.Equal(HttpStatusCode.OK, retire.StatusCode);
+            Assert.Equal("Retired", retiredDocument.RootElement.GetProperty("status").GetString());
+        }
+        finally
+        {
+            DeleteProjectDirectory(projectDirectory);
+        }
     }
 
     private async Task CreateScopedReleaseSourceAsync(

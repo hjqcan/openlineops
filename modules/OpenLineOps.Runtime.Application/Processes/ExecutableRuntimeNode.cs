@@ -13,6 +13,8 @@ public sealed record ExecutableRuntimeNode(
     RuntimeActionId ActionId,
     RuntimeTargetReference Target)
 {
+    public ExecutableRuntimeActionPolicy? OperationalPolicy { get; init; }
+
     public bool IsValid => Timeout > TimeSpan.Zero
         && ActionId is not null
         && Target is not null

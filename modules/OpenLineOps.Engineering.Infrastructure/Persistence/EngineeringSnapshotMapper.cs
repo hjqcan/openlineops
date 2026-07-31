@@ -39,8 +39,21 @@ internal static class EngineeringSnapshotMapper
             recipe.CreatedAtUtc,
             recipe.PublishedAtUtc,
             recipe.Parameters
-                .Select(parameter => new PersistedRecipeParameter(parameter.Key, parameter.Value))
-                .ToArray());
+                .Select(parameter => new PersistedRecipeParameter(
+                    parameter.Key,
+                    parameter.Value,
+                    parameter.Type.ToString(),
+                    parameter.Unit,
+                    parameter.Minimum,
+                    parameter.Maximum,
+                    parameter.AllowedValues.ToArray(),
+                    parameter.Required))
+                .ToArray(),
+            recipe.ValidatedAtUtc,
+            recipe.ApprovedAtUtc,
+            recipe.ApprovedBy,
+            recipe.ReleasedAtUtc,
+            recipe.RetiredAtUtc);
     }
 
     public static PersistedStationProfile ToSnapshot(StationProfile stationProfile)
@@ -87,8 +100,12 @@ internal static class EngineeringSnapshotMapper
             snapshot.DisplayName,
             ParseEnum<RecipeStatus>(snapshot.Status, nameof(snapshot.Status)),
             snapshot.CreatedAtUtc,
-            snapshot.PublishedAtUtc,
-            snapshot.Parameters.Select(parameter => new RecipeParameter(parameter.Key, parameter.Value)));
+            snapshot.ReleasedAtUtc ?? snapshot.PublishedAtUtc,
+            snapshot.Parameters.Select(ToAggregate),
+            snapshot.ValidatedAtUtc,
+            snapshot.ApprovedAtUtc,
+            snapshot.ApprovedBy,
+            snapshot.RetiredAtUtc);
     }
 
     public static StationProfile ToAggregate(PersistedStationProfile snapshot)
@@ -165,6 +182,19 @@ internal static class EngineeringSnapshotMapper
             binding.DeviceKey);
     }
 
+    private static RecipeParameter ToAggregate(PersistedRecipeParameter parameter)
+    {
+        return new RecipeParameter(
+            parameter.Key,
+            parameter.Value,
+            ParseEnum<RecipeParameterType>(parameter.Type, nameof(parameter.Type)),
+            parameter.Unit,
+            parameter.Minimum,
+            parameter.Maximum,
+            parameter.AllowedValues,
+            parameter.Required);
+    }
+
     private static DeviceBindingSnapshot ToAggregate(PersistedDeviceBindingSnapshot binding)
     {
         return new DeviceBindingSnapshot(
@@ -221,9 +251,22 @@ internal sealed record PersistedRecipe(
     string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? PublishedAtUtc,
-    PersistedRecipeParameter[] Parameters);
+    PersistedRecipeParameter[] Parameters,
+    DateTimeOffset? ValidatedAtUtc = null,
+    DateTimeOffset? ApprovedAtUtc = null,
+    string? ApprovedBy = null,
+    DateTimeOffset? ReleasedAtUtc = null,
+    DateTimeOffset? RetiredAtUtc = null);
 
-internal sealed record PersistedRecipeParameter(string Key, string Value);
+internal sealed record PersistedRecipeParameter(
+    string Key,
+    string Value,
+    string Type = "String",
+    string? Unit = null,
+    decimal? Minimum = null,
+    decimal? Maximum = null,
+    string[]? AllowedValues = null,
+    bool Required = true);
 
 internal sealed record PersistedStationProfile(
     string StationProfileId,

@@ -231,6 +231,53 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
     }
 
     [Fact]
+    public async Task AppContainerProvisioningFailurePreservesNativeDiagnostics()
+    {
+        string? observedLifecycleManagerSid = null;
+        var pidFile = Path.Combine(_root, "provisioning-must-not-launch.pid");
+        var host = CreateHost(
+            TimeSpan.FromSeconds(30),
+            "OpenLineOps.AgentProvisioningTests",
+            deleteAppContainerProfile: static (_, _) => false,
+            appContainerProfileArtifactsProbe: static _ =>
+                new WindowsAppContainerProfileArtifactState(
+                    PackageRootExists: false,
+                    ProfileDirectoryExists: false,
+                    MappingExists: false,
+                    MappingChildrenExists: false,
+                    StorageExists: false,
+                    StorageChildrenExists: false),
+            retryDelay: static (_, _) => ValueTask.CompletedTask,
+            ensureAppContainerProfile: (_, lifecycleManagerServiceSid) =>
+            {
+                observedLifecycleManagerSid = lifecycleManagerServiceSid;
+                throw new Win32Exception(
+                    5,
+                    "Synthetic AppContainer provisioning denial.");
+            });
+
+        var result = await host.ExecuteAsync(
+            CreateRequest(pidFile),
+            static (_, _) => ValueTask.CompletedTask);
+
+        Assert.Equal(ExecutionStatus.Failed, result.ExecutionStatus);
+        Assert.Equal(ResultJudgement.Unknown, result.Judgement);
+        Assert.Equal(
+            "Agent.RuntimeIsolationProvisioningFailed",
+            result.FailureCode);
+        Assert.Contains(
+            "nativeErrorCode=5",
+            result.FailureReason,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "hresult=0x80004005",
+            result.FailureReason,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(RestrictedServiceSid, observedLifecycleManagerSid);
+        Assert.False(File.Exists(pidFile));
+    }
+
+    [Fact]
     public async Task AgentCancellationKillsStationRuntimeChildProcessTree()
     {
         if (!OperatingSystem.IsWindows())
@@ -346,7 +393,11 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
         {
             var store = new InMemoryStationJobStore();
             Assert.True(await store.TryAddAsync(job, Guid.NewGuid(), []));
-            var host = CreateHost(TimeSpan.FromSeconds(30), profileNamespace);
+            var host = CreateHost(
+                TimeSpan.FromSeconds(30),
+                profileNamespace,
+                deleteAppContainerProfile: static (profileName, _) =>
+                    WindowsAppContainerIdentity.DeleteProfile(profileName));
             var targetWorkDirectory = Path.Combine(
                 _root,
                 "work",
@@ -588,36 +639,6 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
     }
 
     [Fact]
-    public async Task CleanupDoesNotPassConfiguredServiceSidOutsideRestrictedIdentityMode()
-    {
-        string? observedLifecycleManagerSid = RestrictedServiceSid;
-        var host = CreateHost(
-            TimeSpan.FromSeconds(30),
-            "OpenLineOps.AgentUnrestrictedProfileCleanupTests",
-            (_, lifecycleManagerServiceSid) =>
-            {
-                observedLifecycleManagerSid = lifecycleManagerServiceSid;
-                return false;
-            },
-            appContainerProfileArtifactsProbe: static _ =>
-                new WindowsAppContainerProfileArtifactState(
-                    PackageRootExists: false,
-                    ProfileDirectoryExists: false,
-                    MappingExists: false,
-                    MappingChildrenExists: false,
-                    StorageExists: false,
-                    StorageChildrenExists: false),
-            restrictedServiceSid: RestrictedServiceSid);
-
-        await host.CleanupAsync(
-            CreateRunningJob(
-                    Path.Combine(_root, "unused-unrestricted-profile-cleanup.pid"))
-                .ToSnapshot());
-
-        Assert.Null(observedLifecycleManagerSid);
-    }
-
-    [Fact]
     public async Task CleanupReportsPersistentAppContainerProfileDeletionFailure()
     {
         var attempts = 0;
@@ -750,7 +771,10 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
                     ProcessMemoryLimitBytes: 128L * 1024 * 1024,
                     JobMemoryLimitBytes: 256L * 1024 * 1024,
                     CpuTimeLimit: TimeSpan.FromMinutes(2)),
-                new WindowsAppContainerPolicy(profileName, NetworkAccessAllowed: false)));
+                new WindowsAppContainerPolicy(
+                    profileName,
+                    NetworkAccessAllowed: false,
+                    ProfileMode: WindowsAppContainerProfileMode.UseExisting)));
         launched.StandardInput.Dispose();
         try
         {
@@ -791,6 +815,7 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
         Func<string, WindowsAppContainerProfileArtifactState>?
             appContainerProfileArtifactsProbe = null,
         Func<TimeSpan, CancellationToken, ValueTask>? retryDelay = null,
+        Func<string, string?, string>? ensureAppContainerProfile = null,
         string? restrictedServiceSid = null,
         bool requireRestrictedExternalProgramHostIdentity = false)
     {
@@ -798,6 +823,13 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
         var helperAssembly = typeof(StationRuntimeTestHelperMarker).Assembly.Location;
         var executable = Path.ChangeExtension(helperAssembly, ".exe");
         Assert.True(File.Exists(executable), $"Station runtime test helper apphost is missing: {executable}");
+        var requiresAppContainer = appContainerProfileNamespace is not null;
+        var effectiveRestrictedIdentity =
+            requireRestrictedExternalProgramHostIdentity || requiresAppContainer;
+        var effectiveRestrictedServiceSid = restrictedServiceSid
+                                            ?? (requiresAppContainer
+                                                ? RestrictedServiceSid
+                                                : null);
         return new ProcessStationRuntimeHost(
             new ProcessStationRuntimeHostOptions(
                 executable,
@@ -805,17 +837,23 @@ public sealed class ProcessStationRuntimeHostCancellationTests : IDisposable
                 Path.Combine(_root, "work"),
                 Path.Combine(_root, "artifacts"),
                 timeout,
-                RestrictedServiceSid: restrictedServiceSid,
+                RestrictedServiceSid: effectiveRestrictedServiceSid,
                 RequireRestrictedExternalProgramHostIdentity:
-                    requireRestrictedExternalProgramHostIdentity,
+                    effectiveRestrictedIdentity,
                 RequireExternalProgramAppContainerIsolation:
-                    appContainerProfileNamespace is not null,
+                    requiresAppContainer,
                 ExternalProgramAppContainerProfileNamespace:
                     appContainerProfileNamespace,
                 PythonScript: PythonScriptOptions()),
             new AcceptingFenceValidator(),
             processLauncher: null,
             clock: new FixedClock(Now),
+            ensureAppContainerProfile:
+                ensureAppContainerProfile
+                ?? (static (profileName, profileLifecycleManagerServiceSid) =>
+                    WindowsAppContainerIdentity.EnsureProfile(
+                        profileName,
+                        profileLifecycleManagerServiceSid)),
             deleteAppContainerProfile:
                 deleteAppContainerProfile
                 ?? (static (profileName, profileLifecycleManagerServiceSid) =>

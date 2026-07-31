@@ -7,4 +7,9 @@ public sealed record RecipeDetails(
     string Status,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset? PublishedAtUtc,
+    DateTimeOffset? ValidatedAtUtc,
+    DateTimeOffset? ApprovedAtUtc,
+    string? ApprovedBy,
+    DateTimeOffset? ReleasedAtUtc,
+    DateTimeOffset? RetiredAtUtc,
     IReadOnlyCollection<RecipeParameterDetails> Parameters);

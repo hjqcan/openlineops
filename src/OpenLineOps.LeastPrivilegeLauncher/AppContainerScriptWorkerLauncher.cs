@@ -970,6 +970,8 @@ internal static class AppContainerScriptWorkerLauncher
                 new WindowsAppContainerPolicy(
                     profileName,
                     NetworkAccessAllowed: false,
+                    ProfileMode: WindowsAppContainerProfileMode.UseExisting,
+                    AdditionalCapabilityNames:
                     [WindowsAppContainerIdentity.PythonRuntimeCapabilityName])));
 
         return ProxyStandardStreamsAsync(process).GetAwaiter().GetResult();

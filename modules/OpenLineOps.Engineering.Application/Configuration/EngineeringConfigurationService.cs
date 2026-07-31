@@ -4,6 +4,7 @@ using OpenLineOps.Application.Abstractions.Time;
 using OpenLineOps.Engineering.Application.Configuration;
 using OpenLineOps.Engineering.Application.Persistence;
 using OpenLineOps.Engineering.Domain.Identifiers;
+using OpenLineOps.Engineering.Domain.Operations;
 using OpenLineOps.Engineering.Domain.Projects;
 using OpenLineOps.Engineering.Domain.Recipes;
 using OpenLineOps.Engineering.Domain.Snapshots;
@@ -201,9 +202,26 @@ internal sealed class ProjectEngineeringConfigurationEngine
 
             foreach (var parameterRequest in request.Parameters)
             {
-                var parameterResult = recipe.AddOrUpdateParameter(
+                if (!Enum.TryParse<RecipeParameterType>(
+                    parameterRequest.Type,
+                    ignoreCase: false,
+                    out var parameterType)
+                    || !Enum.IsDefined(parameterType))
+                {
+                    return Result.Failure<RecipeDetails>(ApplicationError.Validation(
+                        "Engineering.InvalidRecipeParameterType",
+                        $"Recipe parameter type '{parameterRequest.Type}' is invalid."));
+                }
+
+                var parameterResult = recipe.AddOrUpdateParameter(new RecipeParameter(
                     parameterRequest.Key,
-                    parameterRequest.Value);
+                    parameterRequest.Value,
+                    parameterType,
+                    parameterRequest.Unit,
+                    parameterRequest.Minimum,
+                    parameterRequest.Maximum,
+                    parameterRequest.AllowedValues,
+                    parameterRequest.Required));
                 if (!parameterResult.Succeeded)
                 {
                     return Result.Failure<RecipeDetails>(ApplicationError.Validation(
@@ -266,6 +284,54 @@ internal sealed class ProjectEngineeringConfigurationEngine
         await _repository.SaveAsync(_scope, recipe, cancellationToken).ConfigureAwait(false);
 
         return Result.Success(EngineeringConfigurationMapper.ToDetails(recipe));
+    }
+
+    public async Task<Result<RecipeDetails>> ValidateRecipeAsync(
+        string recipeId,
+        CancellationToken cancellationToken = default)
+    {
+        return await TransitionRecipeAsync(
+            recipeId,
+            recipe => recipe.Validate(_clock.UtcNow),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<Result<RecipeDetails>> ApproveRecipeAsync(
+        string recipeId,
+        string approvedBy,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(approvedBy))
+        {
+            return Result.Failure<RecipeDetails>(ApplicationError.Validation(
+                "Engineering.RecipeApproverRequired",
+                "A canonical approver identity is required."));
+        }
+
+        return await TransitionRecipeAsync(
+            recipeId,
+            recipe => recipe.Approve(approvedBy, _clock.UtcNow),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<Result<RecipeDetails>> ReleaseRecipeAsync(
+        string recipeId,
+        CancellationToken cancellationToken = default)
+    {
+        return await TransitionRecipeAsync(
+            recipeId,
+            recipe => recipe.Release(_clock.UtcNow),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<Result<RecipeDetails>> RetireRecipeAsync(
+        string recipeId,
+        CancellationToken cancellationToken = default)
+    {
+        return await TransitionRecipeAsync(
+            recipeId,
+            recipe => recipe.Retire(_clock.UtcNow),
+            cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<Result<StationProfileDetails>> CreateStationProfileAsync(
@@ -535,6 +601,38 @@ internal sealed class ProjectEngineeringConfigurationEngine
             .ConfigureAwait(false);
     }
 
+    private async Task<Result<RecipeDetails>> TransitionRecipeAsync(
+        string recipeId,
+        Func<Recipe, EngineeringOperationResult> transition,
+        CancellationToken cancellationToken)
+    {
+        var recipe = await FindRecipeAsync(recipeId, cancellationToken).ConfigureAwait(false);
+        if (recipe is null)
+        {
+            return Result.Failure<RecipeDetails>(RecipeNotFound(recipeId));
+        }
+
+        EngineeringOperationResult transitionResult;
+        try
+        {
+            transitionResult = transition(recipe);
+        }
+        catch (ArgumentException exception)
+        {
+            return Result.Failure<RecipeDetails>(InvalidInput(exception));
+        }
+
+        if (!transitionResult.Succeeded)
+        {
+            return Result.Failure<RecipeDetails>(ApplicationError.Conflict(
+                transitionResult.Code,
+                transitionResult.Message));
+        }
+
+        await _repository.SaveAsync(_scope, recipe, cancellationToken).ConfigureAwait(false);
+        return Result.Success(EngineeringConfigurationMapper.ToDetails(recipe));
+    }
+
     private async Task<StationProfile?> FindStationProfileAsync(
         string stationProfileId,
         CancellationToken cancellationToken)
@@ -604,11 +702,13 @@ internal sealed class ProjectEngineeringConfigurationEngine
 
         foreach (var parameter in request.Parameters)
         {
-            if (string.IsNullOrWhiteSpace(parameter.Key) || string.IsNullOrWhiteSpace(parameter.Value))
+            if (string.IsNullOrWhiteSpace(parameter.Key)
+                || string.IsNullOrWhiteSpace(parameter.Type)
+                || (parameter.Required && string.IsNullOrWhiteSpace(parameter.Value)))
             {
                 return ApplicationError.Validation(
                     "Engineering.InvalidRecipeParameter",
-                    "Recipe parameter key and value are required.");
+                    "Recipe parameter key, type, and required value are required.");
             }
         }
 

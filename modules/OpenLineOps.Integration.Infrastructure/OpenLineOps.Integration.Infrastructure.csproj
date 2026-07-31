@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../OpenLineOps.Integration.Application/OpenLineOps.Integration.Application.csproj" />
+    <ProjectReference Include="../OpenLineOps.Integration.Domain/OpenLineOps.Integration.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

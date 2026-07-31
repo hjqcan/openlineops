@@ -89,6 +89,10 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                         ? _options.AppContainerProfileName!
                         : CreateInvocationProfileName(_options.AppContainerProfileName!),
                     request.Policy.NetworkAccessAllowed,
+                    ProfileMode: _options.AppContainerProfileExternallyOwned
+                        ? WindowsAppContainerProfileMode.UseExisting
+                        : WindowsAppContainerProfileMode.CreateOrOpen,
+                    AdditionalCapabilityNames:
                     [WindowsAppContainerIdentity.ExternalProgramContentCapabilityName],
                     ProfileLifecycleManagerServiceSid: _options.RequireRestrictedHostIdentity
                         ? hostIdentity.ServiceSid
@@ -186,9 +190,8 @@ public sealed class ExternalProgramHost : IExternalProgramHost
                 .ConfigureAwait(false);
             if (appContainerPolicy is not null)
             {
-                var appContainerSid = WindowsAppContainerIdentity.EnsureProfile(
-                    appContainerPolicy.ProfileName,
-                    appContainerPolicy.ProfileLifecycleManagerServiceSid);
+                var appContainerSid = WindowsAppContainerIdentity.GetProfileSid(
+                    appContainerPolicy.ProfileName);
                 WindowsContentAccessAuthorizer.GrantWorkspaceModify(
                     workspacePath,
                     appContainerSid);

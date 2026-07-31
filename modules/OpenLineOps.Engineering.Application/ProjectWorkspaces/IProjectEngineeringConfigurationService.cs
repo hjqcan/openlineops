@@ -62,6 +62,31 @@ public interface IProjectEngineeringConfigurationService
         string recipeId,
         CancellationToken cancellationToken = default);
 
+    Task<Result<RecipeDetails>> ValidateRecipeAsync(
+        string projectId,
+        string applicationId,
+        string recipeId,
+        CancellationToken cancellationToken = default);
+
+    Task<Result<RecipeDetails>> ApproveRecipeAsync(
+        string projectId,
+        string applicationId,
+        string recipeId,
+        string approvedBy,
+        CancellationToken cancellationToken = default);
+
+    Task<Result<RecipeDetails>> ReleaseRecipeAsync(
+        string projectId,
+        string applicationId,
+        string recipeId,
+        CancellationToken cancellationToken = default);
+
+    Task<Result<RecipeDetails>> RetireRecipeAsync(
+        string projectId,
+        string applicationId,
+        string recipeId,
+        CancellationToken cancellationToken = default);
+
     Task<Result<StationProfileDetails>> CreateStationProfileAsync(
         string projectId,
         string applicationId,

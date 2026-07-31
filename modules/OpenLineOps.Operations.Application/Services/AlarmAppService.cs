@@ -94,9 +94,9 @@ public sealed class AlarmAppService(IAlarmRepository repository)
                 "Alarm acknowledgement did not persist any changes.");
     }
 
-    public async Task<OperationsApplicationResult> ResolveAsync(
+    public async Task<OperationsApplicationResult> ClearSourceAsync(
         string id,
-        ResolveAlarmRequest request,
+        ClearAlarmSourceRequest request,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -111,7 +111,17 @@ public sealed class AlarmAppService(IAlarmRepository repository)
                 "Alarm was not found.");
         }
 
-        var result = aggregate.Resolve(request.ResolvedBy, request.ResolutionNote, DateTimeOffset.UtcNow);
+        if (!string.Equals(aggregate.StationId, request.StationId, StringComparison.Ordinal))
+        {
+            return OperationsApplicationResult.Rejected(
+                "Operations.Alarm.StationMismatch",
+                "Only the Station Agent that owns the alarm source can clear it.");
+        }
+
+        var result = aggregate.ClearFromSource(
+            request.SourceActor,
+            request.ClearanceNote,
+            DateTimeOffset.UtcNow);
         if (!result.Succeeded)
         {
             return OperationsApplicationResult.Rejected(result.Code, result.Message);
@@ -124,7 +134,7 @@ public sealed class AlarmAppService(IAlarmRepository repository)
             ? OperationsApplicationResult.Accepted(result.Message)
             : OperationsApplicationResult.Rejected(
                 "Operations.Alarm.NotPersisted",
-                "Alarm resolution did not persist any changes.");
+                "Alarm source clearance did not persist any changes.");
     }
 
     private static AlarmDetails ToDetails(Alarm aggregate)

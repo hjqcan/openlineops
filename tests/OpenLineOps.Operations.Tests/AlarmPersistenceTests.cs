@@ -112,7 +112,7 @@ public sealed class AlarmPersistenceTests
             "Pressure low",
             "Air pressure is below threshold.",
             DateTimeOffset.UtcNow);
-        resolved.Resolve("operator-a", "Pressure restored.", DateTimeOffset.UtcNow);
+        resolved.ClearFromSource("agent-a", "Pressure restored.", DateTimeOffset.UtcNow);
 
         var repository = new EfAlarmRepository(context);
         repository.Add(open);

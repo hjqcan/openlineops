@@ -59,6 +59,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
     private readonly string _hostPythonRuntimeDllPath;
     private readonly StationRuntimePythonScriptSandboxOptions _pythonScriptSandbox;
     private readonly IStationResourceFenceValidator _resourceFenceValidator;
+    private readonly Func<string, string?, string> _ensureAppContainerProfile;
     private readonly Func<string, string?, bool> _deleteAppContainerProfile;
     private readonly Func<string, WindowsAppContainerProfileArtifactState>
         _appContainerProfileArtifactsProbe;
@@ -75,6 +76,10 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             processLauncher,
             clock,
             static (profileName, profileLifecycleManagerServiceSid) =>
+                WindowsAppContainerIdentity.EnsureProfile(
+                    profileName,
+                    profileLifecycleManagerServiceSid),
+            static (profileName, profileLifecycleManagerServiceSid) =>
                 WindowsAppContainerIdentity.DeleteProfile(
                     profileName,
                     profileLifecycleManagerServiceSid),
@@ -89,6 +94,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         IStationResourceFenceValidator resourceFenceValidator,
         IsolatedProcessLauncher? processLauncher,
         IClock? clock,
+        Func<string, string?, string> ensureAppContainerProfile,
         Func<string, string?, bool> deleteAppContainerProfile,
         Func<string, WindowsAppContainerProfileArtifactState>
             appContainerProfileArtifactsProbe,
@@ -97,6 +103,8 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         ArgumentNullException.ThrowIfNull(options);
         _resourceFenceValidator = resourceFenceValidator
             ?? throw new ArgumentNullException(nameof(resourceFenceValidator));
+        _ensureAppContainerProfile = ensureAppContainerProfile
+            ?? throw new ArgumentNullException(nameof(ensureAppContainerProfile));
         _deleteAppContainerProfile = deleteAppContainerProfile
             ?? throw new ArgumentNullException(nameof(deleteAppContainerProfile));
         _appContainerProfileArtifactsProbe = appContainerProfileArtifactsProbe
@@ -274,9 +282,48 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             ResolveFenceAuthorityPrincipalSid());
         using var fenceAuthorityCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken);
-        var fenceAuthorityTask = fenceAuthority.RunAsync(fenceAuthorityCancellation.Token);
+        Task? fenceAuthorityTask = null;
         try
         {
+            var appContainerProfileName = ResolveAppContainerProfileName(request.Job);
+            if (appContainerProfileName is not null
+                && _requireRestrictedExternalProgramHostIdentity)
+            {
+                try
+                {
+                    var actualSid = _ensureAppContainerProfile(
+                        appContainerProfileName,
+                        _restrictedServiceSid);
+                    var expectedSid = WindowsAppContainerIdentity.GetProfileSid(
+                        appContainerProfileName);
+                    var profileArtifacts = _appContainerProfileArtifactsProbe(
+                        appContainerProfileName);
+                    if (!string.Equals(
+                            actualSid,
+                            expectedSid,
+                            StringComparison.Ordinal)
+                        || !profileArtifacts.AllArtifactsExist)
+                    {
+                        throw new InvalidDataException(
+                            $"Station runtime AppContainer profile '{appContainerProfileName}' "
+                            + "did not materialize as one complete deterministic profile.");
+                    }
+                }
+                catch (Exception exception) when (exception is Win32Exception
+                                                  or IOException
+                                                  or UnauthorizedAccessException
+                                                  or InvalidDataException
+                                                  or InvalidOperationException
+                                                  or System.Security.SecurityException)
+                {
+                    return Failure(
+                        ExecutionStatus.Failed,
+                        "Agent.RuntimeIsolationProvisioningFailed",
+                        DescribeIsolationProvisioningFailure(exception));
+                }
+            }
+
+            fenceAuthorityTask = fenceAuthority.RunAsync(fenceAuthorityCancellation.Token);
             var requestDocument = CreateRequestDocument(request, fenceAuthority.Descriptor);
             StationOperationDocumentJson.Validate(requestDocument);
             await using (var requestStream = new FileStream(
@@ -306,7 +353,7 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
                     workDirectory,
                     requestPath,
                     resultPath,
-                    ResolveAppContainerProfileName(request.Job)));
+                    appContainerProfileName));
             process.StandardInput.Dispose();
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -501,12 +548,15 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             fenceAuthorityCancellation.Cancel();
             try
             {
-                try
+                if (fenceAuthorityTask is not null)
                 {
-                    await fenceAuthorityTask.ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (fenceAuthorityCancellation.IsCancellationRequested)
-                {
+                    try
+                    {
+                        await fenceAuthorityTask.ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (fenceAuthorityCancellation.IsCancellationRequested)
+                    {
+                    }
                 }
             }
             finally
@@ -543,7 +593,8 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         }
 
         var profileName = ResolveAppContainerProfileName(job);
-        if (profileName is not null)
+        if (profileName is not null
+            && _requireRestrictedExternalProgramHostIdentity)
         {
             try
             {
@@ -589,6 +640,22 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
             + $"exception={exception.GetType().Name}; hresult=0x{exception.HResult:X8}; "
             + $"nativeErrorCode={nativeErrorCode?.ToString(CultureInfo.InvariantCulture) ?? "none"}.",
             exception);
+    }
+
+    private static string DescribeIsolationProvisioningFailure(
+        Exception exception)
+    {
+        var nativeErrorCode = EnumerateExceptionChain(exception)
+            .OfType<Win32Exception>()
+            .Select(static failure => failure.NativeErrorCode)
+            .Cast<int?>()
+            .FirstOrDefault();
+        return "Station runtime AppContainer provisioning failed; "
+               + $"exception={exception.GetType().Name}; "
+               + $"hresult=0x{exception.HResult:X8}; "
+               + $"nativeErrorCode="
+               + (nativeErrorCode?.ToString(CultureInfo.InvariantCulture) ?? "none")
+               + $"; reason={exception.Message}";
     }
 
     private static IEnumerable<Exception> EnumerateExceptionChain(Exception exception)
@@ -775,8 +842,11 @@ public sealed class ProcessStationRuntimeHost : IStationRuntimeHost, IStationRun
         {
             environment["OpenLineOps__Devices__ExternalProgramHost__AppContainerProfileName"] =
                 appContainerProfileName;
-            environment["OpenLineOps__Devices__ExternalProgramHost__AppContainerProfileExternallyOwned"] =
-                "true";
+            if (_requireRestrictedExternalProgramHostIdentity)
+            {
+                environment["OpenLineOps__Devices__ExternalProgramHost__AppContainerProfileExternallyOwned"] =
+                    "true";
+            }
         }
 
         if (_restrictedServiceSid is not null)

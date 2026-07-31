@@ -15,6 +15,7 @@ using OpenLineOps.Runtime.Application.Runs;
 using OpenLineOps.Runtime.Application.Safety;
 using OpenLineOps.Runtime.Application.Scripting;
 using OpenLineOps.Runtime.Application.Sessions;
+using OpenLineOps.Runtime.Application.Stations;
 using OpenLineOps.Runtime.Infrastructure.Commands;
 using OpenLineOps.Runtime.Infrastructure.Events;
 using OpenLineOps.Runtime.Infrastructure.Execution;
@@ -69,6 +70,10 @@ public static class RuntimeModuleServiceCollectionExtensions
                     serviceProvider.GetRequiredService<SqliteRuntimeSessionRepository>());
                 services.AddSingleton<IRuntimeMonitoringStore>(serviceProvider =>
                     serviceProvider.GetRequiredService<SqliteRuntimeSessionRepository>());
+                services.AddSingleton(_ =>
+                    new SqliteStationLifecycleRepository(sqliteConnectionString));
+                services.AddSingleton<IStationLifecycleRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<SqliteStationLifecycleRepository>());
                 services.AddSingleton(new SqliteRuntimeStoreExclusiveLease(sqliteConnectionString));
                 services.AddHostedService<SqliteRuntimeStoreLeaseHostedService>();
                 break;
@@ -78,6 +83,9 @@ public static class RuntimeModuleServiceCollectionExtensions
                     serviceProvider.GetRequiredService<InMemoryRuntimeSessionRepository>());
                 services.AddSingleton<IRuntimeMonitoringStore>(serviceProvider =>
                     serviceProvider.GetRequiredService<InMemoryRuntimeSessionRepository>());
+                services.AddSingleton<InMemoryStationLifecycleRepository>();
+                services.AddSingleton<IStationLifecycleRepository>(serviceProvider =>
+                    serviceProvider.GetRequiredService<InMemoryStationLifecycleRepository>());
                 break;
         }
 
@@ -180,6 +188,7 @@ public static class RuntimeModuleServiceCollectionExtensions
         }
 
         services.AddScoped<ProductionMaterialService>();
+        services.AddScoped<StationLifecycleService>();
         services.TryAddScoped<IProductionMaterialArrivalAuthorizer,
             RejectingProductionMaterialArrivalAuthorizer>();
         services.AddScoped<ProductionMaterialArrivalIngress>();
@@ -189,6 +198,7 @@ public static class RuntimeModuleServiceCollectionExtensions
             StationEmergencyStopProductionRunLinker>();
         services.AddScoped<StationEmergencyStopService>();
         services.AddSingleton<IRuntimeCommandResourceFenceValidator, RuntimeCommandResourceFenceValidator>();
+        services.AddScoped<IStationProductionExecutionGate, StationProductionExecutionGate>();
         services.AddScoped<IProductionOperationReadiness, ProductionOperationReadinessEvaluator>();
         services.AddScoped<IProductionLineRuntimeStateReader, ProductionLineRuntimeStateReader>();
 

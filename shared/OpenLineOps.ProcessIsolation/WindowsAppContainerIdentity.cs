@@ -17,6 +17,14 @@ public sealed record WindowsAppContainerProfileArtifactState(
     bool StorageExists,
     bool StorageChildrenExists)
 {
+    public bool AllArtifactsExist =>
+        PackageRootExists
+        && ProfileDirectoryExists
+        && MappingExists
+        && MappingChildrenExists
+        && StorageExists
+        && StorageChildrenExists;
+
     public bool AnyArtifactsExist =>
         PackageRootExists
         || ProfileDirectoryExists
@@ -52,7 +60,8 @@ public static class WindowsAppContainerIdentity
         using var capabilities = WindowsAppContainerSecurityCapabilities.Create(new WindowsAppContainerPolicy(
             profileName,
             NetworkAccessAllowed: false,
-            ProfileLifecycleManagerServiceSid: profileLifecycleManagerServiceSid));
+            ProfileLifecycleManagerServiceSid: profileLifecycleManagerServiceSid,
+            ProfileMode: WindowsAppContainerProfileMode.CreateOrOpen));
         return capabilities.AppContainerSid;
     }
 
@@ -90,7 +99,7 @@ public static class WindowsAppContainerIdentity
                 return false;
             }
 
-            var appContainerSid = DeriveProfileSid(profileName);
+            var appContainerSid = GetProfileSid(profileName);
             WindowsAppContainerProfileLifecycleAccess.PrepareForDeletion(
                 profileName,
                 appContainerSid,
@@ -148,7 +157,7 @@ public static class WindowsAppContainerIdentity
     internal static WindowsAppContainerProfileArtifactState ProbeProfileArtifactsCore(
         string profileName)
     {
-        var sid = DeriveProfileSid(profileName);
+        var sid = GetProfileSid(profileName);
 
         var localAppData = Environment.GetFolderPath(
             Environment.SpecialFolder.LocalApplicationData);
@@ -174,8 +183,7 @@ public static class WindowsAppContainerIdentity
             RegistryArtifactExists(storagePath + "\\Children"));
     }
 
-    [SupportedOSPlatform("windows")]
-    internal static string DeriveProfileSid(string profileName)
+    public static string GetProfileSid(string profileName)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -467,6 +475,13 @@ internal sealed class WindowsAppContainerSecurityCapabilities : IDisposable
         Action<WindowsAppContainerProfileConfigurationCheckpoint>? checkpoint)
     {
         ValidateProfileName(policy.ProfileName);
+        if (!Enum.IsDefined(policy.ProfileMode))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(policy),
+                "AppContainer profile mode is invalid.");
+        }
+
         WindowsAppContainerProfileLifecycleAccess.ValidateManagerServiceSid(
             policy.ProfileLifecycleManagerServiceSid);
         var capabilityNames = ResolveCapabilityNames(policy);
@@ -494,26 +509,58 @@ internal sealed class WindowsAppContainerSecurityCapabilities : IDisposable
         Action<WindowsAppContainerProfileConfigurationCheckpoint>? checkpoint,
         IDisposable operation)
     {
-        var result = CreateAppContainerProfile(
-            policy.ProfileName,
-            policy.ProfileName,
-            "OpenLineOps isolated external program host",
-            IntPtr.Zero,
-            capabilityCount: 0,
-            out var sidPointer);
-        var createdNew = result >= 0;
-        if (result == ErrorAlreadyExistsHResult)
+        var useExistingProfile =
+            policy.ProfileMode == WindowsAppContainerProfileMode.UseExisting;
+        var creationAttempts = 0;
+        int result;
+        IntPtr sidPointer;
+        var createdNew = false;
+        if (useExistingProfile)
         {
+            var artifacts = WindowsAppContainerIdentity.ProbeProfileArtifactsCore(
+                policy.ProfileName);
+            if (!artifacts.AllArtifactsExist)
+            {
+                throw new InvalidDataException(
+                    $"Externally owned AppContainer profile '{policy.ProfileName}' "
+                    + "is absent or incomplete; "
+                    + DescribeProfileArtifacts(artifacts));
+            }
+
             result = DeriveAppContainerSidFromAppContainerName(
                 policy.ProfileName,
                 out sidPointer);
         }
+        else
+        {
+            creationAttempts = 1;
+            result = CreateAppContainerProfile(
+                policy.ProfileName,
+                policy.ProfileName,
+                "OpenLineOps isolated external program host",
+                IntPtr.Zero,
+                capabilityCount: 0,
+                out sidPointer);
+            createdNew = result >= 0;
+            if (result == ErrorAlreadyExistsHResult)
+            {
+                ReleaseSidPointer(ref sidPointer);
+                result = DeriveAppContainerSidFromAppContainerName(
+                    policy.ProfileName,
+                    out sidPointer);
+            }
+        }
 
         if (result < 0 || sidPointer == IntPtr.Zero)
         {
+            ReleaseSidPointer(ref sidPointer);
+            var nativeErrorCode = result & 0xFFFF;
             throw new Win32Exception(
-                result & 0xFFFF,
-                $"Could not create or resolve AppContainer profile '{policy.ProfileName}'.");
+                nativeErrorCode,
+                $"Could not create or resolve AppContainer profile '{policy.ProfileName}'; "
+                + $"mode={policy.ProfileMode}; "
+                + $"hresult=0x{unchecked((uint)result):X8}; "
+                + $"nativeErrorCode={nativeErrorCode}; attempts={creationAttempts}.");
         }
 
         var appContainerSidHandle = new SafeSidHandle(sidPointer);
@@ -532,7 +579,8 @@ internal sealed class WindowsAppContainerSecurityCapabilities : IDisposable
 
             checkpoint?.Invoke(
                 WindowsAppContainerProfileConfigurationCheckpoint.ConfigurationEntered);
-            if (policy.ProfileLifecycleManagerServiceSid is not null)
+            if (!useExistingProfile
+                && policy.ProfileLifecycleManagerServiceSid is not null)
             {
                 WindowsAppContainerProfileLifecycleAccess.Grant(
                     policy.ProfileName,
@@ -661,6 +709,26 @@ internal sealed class WindowsAppContainerSecurityCapabilities : IDisposable
                 nameof(profileName));
         }
     }
+
+    private static void ReleaseSidPointer(ref IntPtr sidPointer)
+    {
+        if (sidPointer == IntPtr.Zero)
+        {
+            return;
+        }
+
+        using var handle = new SafeSidHandle(sidPointer);
+        sidPointer = IntPtr.Zero;
+    }
+
+    private static string DescribeProfileArtifacts(
+        WindowsAppContainerProfileArtifactState artifacts) =>
+        $"packageRoot={artifacts.PackageRootExists}; "
+        + $"profileDirectory={artifacts.ProfileDirectoryExists}; "
+        + $"mapping={artifacts.MappingExists}; "
+        + $"mappingChildren={artifacts.MappingChildrenExists}; "
+        + $"storage={artifacts.StorageExists}; "
+        + $"storageChildren={artifacts.StorageChildrenExists}.";
 
     private static string[] ResolveCapabilityNames(WindowsAppContainerPolicy policy)
     {

@@ -1,5 +1,6 @@
 using OpenLineOps.Runtime.Application.Materials;
 using OpenLineOps.Runtime.Application.Runs;
+using OpenLineOps.Runtime.Application.Stations;
 using OpenLineOps.Runtime.Domain.Materials;
 using OpenLineOps.Runtime.Domain.Occupancy;
 using OpenLineOps.Runtime.Domain.Resources;
@@ -8,7 +9,9 @@ using OpenLineOps.Runtime.Domain.Runs;
 namespace OpenLineOps.Runtime.Application.Execution;
 
 public sealed class ProductionOperationReadinessEvaluator(
-    IProductionMaterialRepository materials) : IProductionOperationReadiness
+    IProductionMaterialRepository materials,
+    IStationProductionExecutionGate? stationExecutionGate = null)
+    : IProductionOperationReadiness
 {
     public async ValueTask<ProductionOperationReadiness> EvaluateAsync(
         ProductionRunSnapshot run,
@@ -110,6 +113,22 @@ public sealed class ProductionOperationReadinessEvaluator(
             return Waiting(
                 $"Production Unit {unit.Id} is at {location.LineId}/{location.StationSystemId}, "
                 + $"waiting for {run.ProductionLineDefinitionId}/{operation.Definition.StationSystemId}.");
+        }
+
+        if (stationExecutionGate is not null)
+        {
+            var stationGate = await stationExecutionGate
+                .EvaluateAsync(operation.Definition.StationSystemId, cancellationToken)
+                .ConfigureAwait(false);
+            if (stationGate.Managed && !stationGate.Allowed)
+            {
+                return Waiting(stationGate.Reason);
+            }
+
+            if (stationGate.Evidence is not null)
+            {
+                evidence.Add(stationGate.Evidence);
+            }
         }
 
         var slotRequirements = operation.Definition.ResourceRequirements

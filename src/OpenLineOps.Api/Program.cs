@@ -12,6 +12,7 @@ using OpenLineOps.Processes.Api.DependencyInjection;
 using OpenLineOps.ProcessIsolation;
 using OpenLineOps.Production.Api.DependencyInjection;
 using OpenLineOps.Projects.Api.DependencyInjection;
+using OpenLineOps.Quality.Api.DependencyInjection;
 using OpenLineOps.Runtime.Api.DependencyInjection;
 using OpenLineOps.Topology.Api.DependencyInjection;
 using OpenLineOps.Traceability.Api.DependencyInjection;
@@ -81,6 +82,7 @@ builder.Services
     .AddOpenLineOpsOperationsApi()
     .AddOpenLineOpsPluginsApi()
     .AddOpenLineOpsProjectsApi()
+    .AddOpenLineOpsQualityApi()
     .AddOpenLineOpsTopologyApi()
     .AddOpenLineOpsTraceabilityApi();
 builder.Services.AddOpenLineOpsProjectsModule();
@@ -92,6 +94,7 @@ builder.Services.AddOpenLineOpsEngineeringModule();
 builder.Services.AddOpenLineOpsDevicesModule(builder.Configuration);
 builder.Services.AddOpenLineOpsOperationsModule(builder.Configuration);
 builder.Services.AddOpenLineOpsPluginsModule(builder.Configuration);
+builder.Services.AddOpenLineOpsQualityModule(builder.Configuration);
 builder.Services.AddOpenLineOpsTraceabilityModule(builder.Configuration);
 builder.Services.AddOpenLineOpsEventBus(builder.Configuration);
 builder.Services.AddProblemDetails();

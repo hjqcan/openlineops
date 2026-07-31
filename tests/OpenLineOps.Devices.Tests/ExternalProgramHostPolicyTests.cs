@@ -215,6 +215,20 @@ public sealed class ExternalProgramHostPolicyTests
     }
 
     [Fact]
+    public void OptionsRejectExternallyOwnedProfileWithoutRestrictedStationIdentity()
+    {
+        var options = CreateOptions(requireIdentity: false);
+        options.AppContainerProfileExternallyOwned = true;
+
+        var exception = Assert.Throws<InvalidOperationException>(options.Validate);
+
+        Assert.Contains(
+            "restricted Station service identity",
+            exception.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void NetworkDenialRequiresAppContainerIsolation()
     {
         var options = CreateOptions(requireIdentity: true);

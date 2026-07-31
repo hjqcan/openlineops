@@ -9,13 +9,13 @@ using OpenLineOps.Operations.Application.Contract.Services;
 namespace OpenLineOps.Operations.Api.Controllers;
 
 [ApiController]
-[Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
 [ApiExplorerSettings(GroupName = OpenLineOpsApiGroups.Operations)]
 [Route(OpenLineOpsApiRoutes.OperationsAlarms)]
 public sealed class AlarmsController(IAlarmAppService appService)
     : ControllerBase
 {
     [HttpGet("{id}")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<AlarmDetails>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<AlarmDetails>> Get(
@@ -30,6 +30,7 @@ public sealed class AlarmsController(IAlarmAppService appService)
     }
 
     [HttpGet("open")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<IReadOnlyCollection<AlarmDetails>>(StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyCollection<AlarmDetails>>> GetOpenByStation(
         [FromQuery] string stationId,
@@ -43,17 +44,27 @@ public sealed class AlarmsController(IAlarmAppService appService)
     }
 
     [HttpPost]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.StationAgentPolicy)]
     [ProducesResponseType<AlarmDetails>(StatusCodes.Status201Created)]
     public async Task<ActionResult<AlarmDetails>> Raise(
         RaiseAlarmRequest request,
         CancellationToken cancellationToken)
     {
+        if (!string.Equals(
+                request.StationId,
+                User.GetRequiredStationId(),
+                StringComparison.Ordinal))
+        {
+            return Forbid();
+        }
+
         var details = await appService.RaiseAsync(request, cancellationToken).ConfigureAwait(false);
 
         return CreatedAtAction(nameof(Get), new { id = details.Id }, details);
     }
 
     [HttpPost("{id}/acknowledgement")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.OperatorPolicy)]
     [ProducesResponseType<OperationsApplicationResult>(StatusCodes.Status200OK)]
     [ProducesResponseType<OperationsApplicationResult>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<OperationsApplicationResult>(StatusCodes.Status404NotFound)]
@@ -72,19 +83,23 @@ public sealed class AlarmsController(IAlarmAppService appService)
         return ToActionResult(result);
     }
 
-    [HttpPost("{id}/resolution")]
+    [HttpPost("{id}/source-clearance")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Policy = OpenLineOpsApiSecurity.StationAgentPolicy)]
     [ProducesResponseType<OperationsApplicationResult>(StatusCodes.Status200OK)]
     [ProducesResponseType<OperationsApplicationResult>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<OperationsApplicationResult>(StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<OperationsApplicationResult>> Resolve(
+    public async Task<ActionResult<OperationsApplicationResult>> ClearSource(
         string id,
-        ResolveAlarmApiRequest request,
+        ClearAlarmSourceApiRequest request,
         CancellationToken cancellationToken)
     {
         var result = await appService
-            .ResolveAsync(
+            .ClearSourceAsync(
                 id,
-                new ResolveAlarmRequest(User.GetRequiredActorId(), request.ResolutionNote),
+                new ClearAlarmSourceRequest(
+                    User.GetRequiredActorId(),
+                    User.GetRequiredStationId(),
+                    request.ClearanceNote),
                 cancellationToken)
             .ConfigureAwait(false);
 

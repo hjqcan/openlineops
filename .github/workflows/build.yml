@@ -59,6 +59,14 @@ jobs:
         shell: powershell
         run: ./eng/verify-no-legacy-production-contracts.ps1
 
+      - name: Verify product identity boundary
+        shell: powershell
+        run: ./eng/verify-product-identity-boundary.ps1
+
+      - name: Test product identity boundary verifier
+        shell: powershell
+        run: ./eng/verify-product-identity-boundary.tests.ps1
+
       - name: Verify Coordinator executable trial security
         shell: powershell
         run: ./eng/verify-coordinator-external-program-trial-security.ps1

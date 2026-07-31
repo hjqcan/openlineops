@@ -121,22 +121,22 @@ public sealed class Alarm : AggregateRoot<AlarmId>
         return OperationsOperationResult.Accepted("Alarm acknowledged.");
     }
 
-    public OperationsOperationResult Resolve(
-        string resolvedBy,
-        string resolutionNote,
-        DateTimeOffset resolvedAtUtc)
+    public OperationsOperationResult ClearFromSource(
+        string sourceActor,
+        string clearanceNote,
+        DateTimeOffset clearedAtUtc)
     {
         if (Status == AlarmStatus.Resolved)
         {
-            return OperationsOperationResult.Accepted("Alarm already resolved.");
+            return OperationsOperationResult.Accepted("Alarm source is already clear.");
         }
 
-        ResolvedBy = RequiredText(resolvedBy, nameof(resolvedBy));
-        ResolutionNote = RequiredText(resolutionNote, nameof(resolutionNote));
-        ResolvedAtUtc = resolvedAtUtc;
+        ResolvedBy = RequiredText(sourceActor, nameof(sourceActor));
+        ResolutionNote = RequiredText(clearanceNote, nameof(clearanceNote));
+        ResolvedAtUtc = clearedAtUtc;
         Status = AlarmStatus.Resolved;
 
-        return OperationsOperationResult.Accepted("Alarm resolved.");
+        return OperationsOperationResult.Accepted("Alarm source cleared.");
     }
 
     private static string RequiredText(string value, string parameterName)

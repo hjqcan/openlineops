@@ -52,11 +52,11 @@ public sealed class AlarmTests
     }
 
     [Fact]
-    public void ResolveClosesAlarm()
+    public void SourceClearanceClosesAlarm()
     {
         var alarm = CreateAlarm();
 
-        var result = alarm.Resolve("operator-a", "Recovered.", DateTimeOffset.UtcNow);
+        var result = alarm.ClearFromSource("agent-a", "Recovered.", DateTimeOffset.UtcNow);
 
         Assert.True(result.Succeeded);
         Assert.Equal(AlarmStatus.Resolved, alarm.Status);
@@ -66,10 +66,10 @@ public sealed class AlarmTests
     }
 
     [Fact]
-    public void ResolvedAlarmCannotBeAcknowledged()
+    public void SourceClearedAlarmCannotBeAcknowledged()
     {
         var alarm = CreateAlarm();
-        alarm.Resolve("operator-a", "Recovered.", DateTimeOffset.UtcNow);
+        alarm.ClearFromSource("agent-a", "Recovered.", DateTimeOffset.UtcNow);
 
         var result = alarm.Acknowledge("operator-b", DateTimeOffset.UtcNow);
 

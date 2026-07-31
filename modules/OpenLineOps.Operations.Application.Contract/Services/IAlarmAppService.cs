@@ -22,8 +22,8 @@ public interface IAlarmAppService
         AcknowledgeAlarmRequest request,
         CancellationToken cancellationToken = default);
 
-    Task<OperationsApplicationResult> ResolveAsync(
+    Task<OperationsApplicationResult> ClearSourceAsync(
         string id,
-        ResolveAlarmRequest request,
+        ClearAlarmSourceRequest request,
         CancellationToken cancellationToken = default);
 }

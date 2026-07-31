@@ -103,6 +103,13 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     private const string AgentServiceExternalAbortReadyPathVariable =
         "OPENLINEOPS_AGENT_SERVICE_EXTERNAL_ABORT_READY_PATH";
     private const int ErrorAccessDenied = 5;
+    private const int ErrorFileNotFound = 2;
+    private const int ErrorPathNotFound = 3;
+    private const uint InvalidFileAttributes = 0xFFFFFFFF;
+    private const uint KeyRead = 0x00020019;
+    private const uint RegOptionOpenLink = 0x00000008;
+    private static readonly IntPtr HKeyUsers =
+        new(unchecked((int)0x80000003));
     private const uint GenericExecute = 0x20000000;
     private const uint DeleteAccess = 0x00010000;
     private const uint FileShareRead = 0x00000001;
@@ -2947,7 +2954,7 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
             WindowsStationServiceIdentityReader.RequireCanonicalServiceSid(
                 managerServiceSid,
                 nameof(managerServiceSid)));
-        var appContainerSid = WindowsAppContainerIdentity.DeriveProfileSid(profileName);
+        var appContainerSid = WindowsAppContainerIdentity.GetProfileSid(profileName);
         var packageRoot = ResolveLocalServiceAppContainerPackageRoot(profileName);
         var mappingPath =
             LocalServiceAppContainerRegistryPrefix + "\\Mappings\\" + appContainerSid;
@@ -3043,18 +3050,14 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
     private static bool IsAppContainerProfileRemoved(
         AppContainerProfileLifecycleProbe profile)
     {
-        if (Directory.Exists(profile.PackageRoot))
+        if (FileSystemArtifactExistsStrict(profile.PackageRoot))
         {
             return false;
         }
 
-        using var users = RegistryKey.OpenBaseKey(
-            RegistryHive.Users,
-            RegistryView.Default);
         foreach (var registryPath in profile.RegistryPaths)
         {
-            using var key = users.OpenSubKey(registryPath, writable: false);
-            if (key is not null)
+            if (RegistryArtifactExistsStrict(registryPath))
             {
                 return false;
             }
@@ -3062,6 +3065,72 @@ public sealed partial class StagedAgentRabbitMqProcessE2ETests
 
         return true;
     }
+
+    [SupportedOSPlatform("windows")]
+    private static bool FileSystemArtifactExistsStrict(string path)
+    {
+        var attributes = GetFileAttributes(path);
+        if (attributes != InvalidFileAttributes)
+        {
+            return true;
+        }
+
+        var error = Marshal.GetLastWin32Error();
+        if (error is ErrorFileNotFound or ErrorPathNotFound)
+        {
+            return false;
+        }
+
+        throw new Win32Exception(
+            error,
+            $"Could not strictly probe AppContainer profile path '{path}'.");
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static bool RegistryArtifactExistsStrict(string keyPath)
+    {
+        var result = RegOpenKeyEx(
+            HKeyUsers,
+            keyPath,
+            options: RegOptionOpenLink,
+            KeyRead,
+            out var keyHandle);
+        if (result == 0)
+        {
+            _ = RegCloseKey(keyHandle);
+            return true;
+        }
+
+        if (result == ErrorFileNotFound)
+        {
+            return false;
+        }
+
+        throw new Win32Exception(
+            result,
+            $"Could not strictly probe AppContainer profile registry key '{keyPath}'.");
+    }
+
+    [DllImport(
+        "kernel32.dll",
+        EntryPoint = "GetFileAttributesW",
+        CharSet = CharSet.Unicode,
+        SetLastError = true)]
+    private static extern uint GetFileAttributes(string fileName);
+
+    [DllImport(
+        "advapi32.dll",
+        EntryPoint = "RegOpenKeyExW",
+        CharSet = CharSet.Unicode)]
+    private static extern int RegOpenKeyEx(
+        IntPtr key,
+        string subKey,
+        uint options,
+        uint desiredAccess,
+        out IntPtr result);
+
+    [DllImport("advapi32.dll")]
+    private static extern int RegCloseKey(IntPtr key);
 
     [SupportedOSPlatform("windows")]
     private static void VerifyAppContainerProfileDirectoryLifecycleAccess(

@@ -15,6 +15,10 @@
     <Project Path="modules/OpenLineOps.Production.Application/OpenLineOps.Production.Application.csproj" />
     <Project Path="modules/OpenLineOps.Production.Domain/OpenLineOps.Production.Domain.csproj" />
     <Project Path="modules/OpenLineOps.Production.Infrastructure/OpenLineOps.Production.Infrastructure.csproj" />
+    <Project Path="modules/OpenLineOps.Quality.Api/OpenLineOps.Quality.Api.csproj" />
+    <Project Path="modules/OpenLineOps.Quality.Application/OpenLineOps.Quality.Application.csproj" />
+    <Project Path="modules/OpenLineOps.Quality.Domain/OpenLineOps.Quality.Domain.csproj" />
+    <Project Path="modules/OpenLineOps.Quality.Infrastructure/OpenLineOps.Quality.Infrastructure.csproj" />
     <Project Path="modules/OpenLineOps.Projects.Api/OpenLineOps.Projects.Api.csproj" />
     <Project Path="modules/OpenLineOps.Projects.Application/OpenLineOps.Projects.Application.csproj" />
     <Project Path="modules/OpenLineOps.Projects.Domain/OpenLineOps.Projects.Domain.csproj" />
@@ -104,6 +108,7 @@
     <Project Path="tests/OpenLineOps.ProcessIsolation.Tests/OpenLineOps.ProcessIsolation.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Production.Tests/OpenLineOps.Production.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Projects.Tests/OpenLineOps.Projects.Tests.csproj" />
+    <Project Path="tests/OpenLineOps.Quality.Tests/OpenLineOps.Quality.Tests.csproj" />
     <Project Path="tests/OpenLineOps.ReleaseManifest.Tests/OpenLineOps.ReleaseManifest.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Runner.Tests/OpenLineOps.Runner.Tests.csproj" />
     <Project Path="tests/OpenLineOps.Runtime.Tests/OpenLineOps.Runtime.Tests.csproj" />

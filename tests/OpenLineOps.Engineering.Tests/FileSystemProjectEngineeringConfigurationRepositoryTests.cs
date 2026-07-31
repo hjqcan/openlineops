@@ -209,10 +209,10 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
         var path = FindDocumentPath(_projectDirectory, "resourceId", RecipeIdValue);
         var document = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
 
-        Assert.Equal("Published", document["snapshot"]?["status"]?.GetValue<string>());
+        Assert.Equal("Released", document["snapshot"]?["status"]?.GetValue<string>());
         Assert.NotNull(await repository.GetByIdAsync(scope, configuration.Recipe.Id));
 
-        document["snapshot"]!["status"] = "published";
+        document["snapshot"]!["status"] = "released";
         await File.WriteAllTextAsync(path, document.ToJsonString());
 
         var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
@@ -220,7 +220,7 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
                 scope,
                 configuration.Recipe.Id));
         Assert.Contains("status", exception.Message, StringComparison.Ordinal);
-        Assert.Contains("published", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("released", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -441,7 +441,15 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
         {
             Assert.Contains(recipe.Parameters, parameter =>
                 parameter.Key == expectedParameter.Key
-                && parameter.Value == expectedParameter.Value);
+                && parameter.Value == expectedParameter.Value
+                && parameter.Type == expectedParameter.Type
+                && parameter.Unit == expectedParameter.Unit
+                && parameter.Minimum == expectedParameter.Minimum
+                && parameter.Maximum == expectedParameter.Maximum
+                && parameter.Required == expectedParameter.Required
+                && parameter.AllowedValues.SequenceEqual(
+                    expectedParameter.AllowedValues,
+                    StringComparer.Ordinal));
         }
 
         Assert.Single(recipes);
@@ -497,7 +505,15 @@ public sealed class FileSystemProjectEngineeringConfigurationRepositoryTests : I
             new RecipeVersionId(RecipeVersionIdValue),
             $"{prefix} Recipe",
             createdAtUtc.AddMinutes(1));
-        AssertAccepted(recipe.AddOrUpdateParameter("voltage.max", voltageMax));
+        AssertAccepted(recipe.AddOrUpdateParameter(new RecipeParameter(
+            "voltage.max",
+            voltageMax,
+            RecipeParameterType.Decimal,
+            "V",
+            minimum: 0m,
+            maximum: 1000m,
+            allowedValues: null,
+            required: true)));
         AssertAccepted(recipe.AddOrUpdateParameter("axis.speed", speed));
         AssertAccepted(recipe.Publish(publishedAtUtc));
 

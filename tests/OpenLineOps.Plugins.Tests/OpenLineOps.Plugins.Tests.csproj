@@ -28,6 +28,7 @@
     <ProjectReference Include="..\..\shared\OpenLineOps.Plugin.Abstractions\OpenLineOps.Plugin.Abstractions.csproj" />
     <ProjectReference Include="..\..\src\OpenLineOps.PluginHost\OpenLineOps.PluginHost.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="..\..\samples\plugins\OpenLineOps.SamplePlugins.QualityGate\OpenLineOps.SamplePlugins.QualityGate.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\samples\plugins\OpenLineOps.SamplePlugins.DeviceSimulator\OpenLineOps.SamplePlugins.DeviceSimulator.csproj" />
   </ItemGroup>
 
 </Project>

@@ -149,6 +149,59 @@ public sealed class ProjectEngineeringConfigurationService : IProjectEngineering
             cancellationToken);
     }
 
+    public Task<Result<RecipeDetails>> ValidateRecipeAsync(
+        string projectId,
+        string applicationId,
+        string recipeId,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.ValidateRecipeAsync(recipeId, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<Result<RecipeDetails>> ApproveRecipeAsync(
+        string projectId,
+        string applicationId,
+        string recipeId,
+        string approvedBy,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.ApproveRecipeAsync(recipeId, approvedBy, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<Result<RecipeDetails>> ReleaseRecipeAsync(
+        string projectId,
+        string applicationId,
+        string recipeId,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.ReleaseRecipeAsync(recipeId, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<Result<RecipeDetails>> RetireRecipeAsync(
+        string projectId,
+        string applicationId,
+        string recipeId,
+        CancellationToken cancellationToken = default)
+    {
+        return InScopeAsync(
+            projectId,
+            applicationId,
+            service => service.RetireRecipeAsync(recipeId, cancellationToken),
+            cancellationToken);
+    }
+
     public Task<Result<StationProfileDetails>> CreateStationProfileAsync(
         string projectId,
         string applicationId,

@@ -160,6 +160,12 @@ public sealed class ExternalProgramHostOptions
             throw new InvalidOperationException(
                 "An externally owned AppContainer profile requires AppContainer isolation.");
         }
+
+        if (AppContainerProfileExternallyOwned && !RequireRestrictedHostIdentity)
+        {
+            throw new InvalidOperationException(
+                "An externally owned AppContainer profile requires the restricted Station service identity.");
+        }
     }
 
     private static string ResolveRoot(string value, string name)

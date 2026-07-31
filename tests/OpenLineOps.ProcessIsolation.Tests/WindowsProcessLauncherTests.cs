@@ -161,7 +161,10 @@ public sealed class WindowsProcessLauncherTests
                         ProcessMemoryLimitBytes: 512L * 1024 * 1024,
                         JobMemoryLimitBytes: 1024L * 1024 * 1024,
                         CpuTimeLimit: TimeSpan.FromMinutes(5)),
-                    new WindowsAppContainerPolicy(profileName, NetworkAccessAllowed: false)));
+                    new WindowsAppContainerPolicy(
+                        profileName,
+                        NetworkAccessAllowed: false,
+                        ProfileMode: WindowsAppContainerProfileMode.CreateOrOpen)));
             launched.StandardInput.Dispose();
             using var timeout = new CancellationTokenSource(ProcessTimeout);
             var stdout = ReadUtf8Async(launched.StandardOutput, timeout.Token);
@@ -219,7 +222,10 @@ public sealed class WindowsProcessLauncherTests
                         ProcessMemoryLimitBytes: 512L * 1024 * 1024,
                         JobMemoryLimitBytes: 1024L * 1024 * 1024,
                         CpuTimeLimit: TimeSpan.FromMinutes(5)),
-                    new WindowsAppContainerPolicy(profileName, NetworkAccessAllowed: true)));
+                    new WindowsAppContainerPolicy(
+                        profileName,
+                        NetworkAccessAllowed: true,
+                        ProfileMode: WindowsAppContainerProfileMode.CreateOrOpen)));
             launched.StandardInput.Dispose();
             using var timeout = new CancellationTokenSource(ProcessTimeout);
             var stdout = ReadUtf8Async(launched.StandardOutput, timeout.Token);
@@ -322,6 +328,8 @@ public sealed class WindowsProcessLauncherTests
                     new WindowsAppContainerPolicy(
                         profileName,
                         NetworkAccessAllowed: false,
+                        ProfileMode: WindowsAppContainerProfileMode.CreateOrOpen,
+                        AdditionalCapabilityNames:
                         [WindowsAppContainerIdentity.ExternalProgramContentCapabilityName])));
             launched.StandardInput.Dispose();
             using var timeout = new CancellationTokenSource(ProcessTimeout);
@@ -426,6 +434,8 @@ public sealed class WindowsProcessLauncherTests
                            new WindowsAppContainerPolicy(
                                profileName,
                                NetworkAccessAllowed: false,
+                               ProfileMode: WindowsAppContainerProfileMode.UseExisting,
+                               AdditionalCapabilityNames:
                                [WindowsAppContainerIdentity.ExternalProgramContentCapabilityName]))))
             {
                 launched.StandardInput.Dispose();
@@ -507,14 +517,111 @@ public sealed class WindowsProcessLauncherTests
             WindowsAppContainerIdentity.ProbeProfileArtifacts(profileName)
                 .AnyArtifactsExist);
 
-        var first = WindowsAppContainerIdentity.DeriveProfileSid(profileName);
-        var second = WindowsAppContainerIdentity.DeriveProfileSid(profileName);
+        var first = WindowsAppContainerIdentity.GetProfileSid(profileName);
+        var second = WindowsAppContainerIdentity.GetProfileSid(profileName);
 
         Assert.Equal(first, second);
         Assert.StartsWith("S-1-15-2-", first, StringComparison.Ordinal);
         Assert.False(
             WindowsAppContainerIdentity.ProbeProfileArtifacts(profileName)
                 .AnyArtifactsExist);
+    }
+
+    [Fact]
+    public void ExistingProfileModeNeverMaterializesAMissingProfile()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var profileName = "OpenLineOps.Tests.Existing.M."
+                          + Guid.NewGuid().ToString("N");
+
+        var exception = Assert.Throws<InvalidDataException>(() =>
+            WindowsAppContainerSecurityCapabilities.Create(
+                new WindowsAppContainerPolicy(
+                    profileName,
+                    NetworkAccessAllowed: false,
+                    ProfileMode: WindowsAppContainerProfileMode.UseExisting)));
+
+        Assert.Contains("absent or incomplete", exception.Message, StringComparison.Ordinal);
+        Assert.False(
+            WindowsAppContainerIdentity.ProbeProfileArtifacts(profileName)
+                .AnyArtifactsExist);
+    }
+
+    [Fact]
+    public void ExistingProfileModeResolvesOneCompleteOwnedProfile()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var profileName = "OpenLineOps.Tests.Existing.C."
+                          + Guid.NewGuid().ToString("N");
+        try
+        {
+            var expectedSid = WindowsAppContainerIdentity.EnsureProfile(profileName);
+
+            using (var capabilities =
+                   WindowsAppContainerSecurityCapabilities.Create(
+                       new WindowsAppContainerPolicy(
+                           profileName,
+                           NetworkAccessAllowed: false,
+                           ProfileMode: WindowsAppContainerProfileMode.UseExisting)))
+            {
+                Assert.Equal(expectedSid, capabilities.AppContainerSid);
+            }
+
+            Assert.True(
+                WindowsAppContainerIdentity.ProbeProfileArtifacts(profileName)
+                    .AllArtifactsExist);
+        }
+        finally
+        {
+            if (WindowsAppContainerIdentity.ProfileExists(profileName))
+            {
+                _ = WindowsAppContainerIdentity.DeleteProfile(profileName);
+            }
+        }
+    }
+
+    [Fact]
+    public void ExistingProfileModeRejectsAPartialProfile()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var profileName = "OpenLineOps.Tests.Existing.P."
+                          + Guid.NewGuid().ToString("N");
+        var packageRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Packages",
+            profileName.ToLowerInvariant());
+        Directory.CreateDirectory(Path.Combine(packageRoot, "AC"));
+        try
+        {
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                WindowsAppContainerSecurityCapabilities.Create(
+                    new WindowsAppContainerPolicy(
+                        profileName,
+                        NetworkAccessAllowed: false,
+                        ProfileMode: WindowsAppContainerProfileMode.UseExisting)));
+
+            Assert.Contains("packageRoot=True", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("mapping=False", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(packageRoot))
+            {
+                Directory.Delete(packageRoot, recursive: true);
+            }
+        }
     }
 
     [Fact]
@@ -621,7 +728,8 @@ public sealed class WindowsProcessLauncherTests
                 using var capabilities = WindowsAppContainerSecurityCapabilities.Create(
                     new WindowsAppContainerPolicy(
                         profileName,
-                        NetworkAccessAllowed: false),
+                        NetworkAccessAllowed: false,
+                        ProfileMode: WindowsAppContainerProfileMode.CreateOrOpen),
                     checkpoint =>
                     {
                         if (checkpoint
@@ -686,7 +794,8 @@ public sealed class WindowsProcessLauncherTests
                 using var capabilities = WindowsAppContainerSecurityCapabilities.Create(
                     new WindowsAppContainerPolicy(
                         profileName,
-                        NetworkAccessAllowed: false),
+                        NetworkAccessAllowed: false,
+                        ProfileMode: WindowsAppContainerProfileMode.CreateOrOpen),
                     checkpoint =>
                     {
                         if (checkpoint
@@ -707,7 +816,8 @@ public sealed class WindowsProcessLauncherTests
                 using var capabilities = WindowsAppContainerSecurityCapabilities.Create(
                     new WindowsAppContainerPolicy(
                         profileName,
-                        NetworkAccessAllowed: false),
+                        NetworkAccessAllowed: false,
+                        ProfileMode: WindowsAppContainerProfileMode.CreateOrOpen),
                     checkpoint =>
                     {
                         if (checkpoint
@@ -752,7 +862,8 @@ public sealed class WindowsProcessLauncherTests
             capabilities = WindowsAppContainerSecurityCapabilities.Create(
                 new WindowsAppContainerPolicy(
                     profileName,
-                    NetworkAccessAllowed: false));
+                    NetworkAccessAllowed: false,
+                    ProfileMode: WindowsAppContainerProfileMode.CreateOrOpen));
             var delete = Task.Run(() =>
             {
                 deleteStarted.Set();
@@ -1357,7 +1468,10 @@ public sealed class WindowsProcessLauncherTests
                         ProcessMemoryLimitBytes: 512L * 1024 * 1024,
                         JobMemoryLimitBytes: 1024L * 1024 * 1024,
                         CpuTimeLimit: TimeSpan.FromMinutes(5)),
-                    new WindowsAppContainerPolicy(profileName, NetworkAccessAllowed: false)));
+                    new WindowsAppContainerPolicy(
+                        profileName,
+                        NetworkAccessAllowed: false,
+                        ProfileMode: WindowsAppContainerProfileMode.CreateOrOpen)));
             launched.StandardInput.Dispose();
             using var timeout = new CancellationTokenSource(ProcessTimeout);
             var stdout = ReadUtf8Async(launched.StandardOutput, timeout.Token);

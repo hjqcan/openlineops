@@ -26,16 +26,17 @@ They share application contracts, not UI state or a mutable global project
 object. No production host executes draft state or reconstructs trusted
 execution data from UI input.
 
-## Reference boundary
+## Product boundary
 
-The earlier SmartMatriX product is useful only as prior-art input for the user
-experience: a directory represents a project, the start experience is New/Open/
-Recent, the explorer uses automation vocabulary, and an operator has explicit
-run and safety controls.
+An OpenLineOps project is a directory with explicit project and application
+manifests. Studio provides New, Open, and Recent entry points, an
+automation-oriented Project Explorer, and explicit operator run and safety
+controls.
 
-OpenLineOps does not accept `.ak`, serialize a CLR object graph as project
-source, use one global mutable kernel, infer edit mode by hiding windows, or
-write runtime databases and logs back into editable source.
+OpenLineOps accepts only its documented project formats. It does not serialize a
+CLR object graph as project source, use one global mutable kernel, infer edit
+mode by hiding windows, or write runtime databases and logs back into editable
+source.
 
 ## Product artifacts and execution flow
 
